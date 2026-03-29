@@ -4,6 +4,7 @@
 //! and falls back to TCP via `hyper-util` when no socket is available.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine;
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -23,6 +24,12 @@ use crate::config::HadesConfig;
 ///
 /// Sends HTTP requests to ArangoDB over a Unix domain socket (preferred)
 /// or TCP.  Each instance targets a single database.
+/// Default request timeout (30 seconds, matches Python read_timeout).
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default pool idle timeout (90 seconds).
+const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 #[derive(Clone)]
 pub struct ArangoClient {
     /// Unix socket path, if connected via UDS.
@@ -33,6 +40,8 @@ pub struct ArangoClient {
     database: String,
     /// Pre-encoded Basic auth header value.
     auth_header: Option<String>,
+    /// Timeout for individual HTTP requests.
+    request_timeout: Duration,
     /// The hyper client for Unix socket connections.
     unix_client: Option<Client<UnixConnector, Full<Bytes>>>,
     /// The hyper client for TCP connections.
@@ -79,6 +88,7 @@ impl ArangoClient {
             base_url,
             database,
             auth_header,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: None,
             tcp_client: None,
         };
@@ -93,7 +103,9 @@ impl ArangoClient {
         } else {
             let connector = hyper_util::client::legacy::connect::HttpConnector::new();
             client.tcp_client = Some(
-                Client::builder(TokioExecutor::new()).build(connector),
+                Client::builder(TokioExecutor::new())
+                    .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
+                    .build(connector),
             );
             debug!(
                 url = %client.base_url,
@@ -120,6 +132,7 @@ impl ArangoClient {
             base_url: String::new(),
             database: database.to_string(),
             auth_header: Some(format!("Basic {encoded}")),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: Some(Client::unix()),
             tcp_client: None,
         }
@@ -141,6 +154,7 @@ impl ArangoClient {
             base_url: base_url.to_string(),
             database: database.to_string(),
             auth_header: Some(format!("Basic {encoded}")),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: None,
             tcp_client: Some(Client::builder(TokioExecutor::new()).build(connector)),
         }
@@ -237,15 +251,25 @@ impl ArangoClient {
             .body(Full::new(Bytes::copy_from_slice(body)))
             .map_err(|e| ArangoError::Request(e.to_string()))?;
 
-        let response = if let Some(ref client) = self.unix_client {
-            client.request(req).await?
+        let timeout = self.request_timeout;
+        let response_future = if let Some(ref client) = self.unix_client {
+            client.request(req)
         } else if let Some(ref client) = self.tcp_client {
-            client.request(req).await?
+            client.request(req)
         } else {
             return Err(ArangoError::Request(
                 "no transport configured".to_string(),
             ));
         };
+
+        let response = tokio::time::timeout(timeout, response_future)
+            .await
+            .map_err(|_| {
+                ArangoError::Request(format!(
+                    "request timed out after {}s",
+                    timeout.as_secs()
+                ))
+            })??;
 
         let status = response.status();
         let body_bytes = response
@@ -367,6 +391,7 @@ mod tests {
             base_url: "http://localhost:8529".into(),
             database: "test_db".into(),
             auth_header: None,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: None,
             tcp_client: None,
         };
@@ -385,6 +410,7 @@ mod tests {
             base_url: String::new(),
             database: "test_db".into(),
             auth_header: None,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: None,
             tcp_client: None,
         };

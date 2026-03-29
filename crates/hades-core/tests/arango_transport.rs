@@ -182,7 +182,7 @@ async fn pool_health_check() {
     let pool = hades_core::db::ArangoPool::new(reader, writer);
     assert!(pool.is_shared(), "same socket should produce shared pool");
 
-    let status = pool.health_check().await.unwrap();
+    let status = pool.health_check().await;
     assert!(status.reader_ok, "reader should be healthy");
     assert!(status.writer_ok, "writer should be healthy");
     assert!(!status.version.is_empty(), "version should be non-empty");

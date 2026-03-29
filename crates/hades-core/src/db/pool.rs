@@ -87,7 +87,7 @@ impl ArangoPool {
     /// Returns the server version string on success.  Logs latency and
     /// any errors via tracing.
     #[instrument(skip(self), fields(db = %self.reader.database()))]
-    pub async fn health_check(&self) -> Result<HealthStatus, ArangoError> {
+    pub async fn health_check(&self) -> HealthStatus {
         let start = Instant::now();
 
         let reader_ok;
@@ -134,12 +134,12 @@ impl ArangoPool {
             );
         }
 
-        Ok(HealthStatus {
+        HealthStatus {
             version,
             reader_ok,
             writer_ok,
             shared: self.shared,
-        })
+        }
     }
 
     /// Ping a single client and extract the version string.
@@ -177,11 +177,11 @@ mod tests {
 
     #[test]
     fn test_pool_from_config_shared() {
-        // Default config has no separate sockets → both resolve the same
-        let config = HadesConfig::default();
+        let mut config = HadesConfig::default();
+        config.database.name = "test_pool_db".to_string();
         let pool = ArangoPool::from_config(&config).unwrap();
         assert!(pool.is_shared());
-        assert_eq!(pool.database(), "NestedLearning");
+        assert_eq!(pool.database(), "test_pool_db");
     }
 
     #[test]

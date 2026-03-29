@@ -1,0 +1,10 @@
+[package]
+name = "hades-prefetch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Async graph-aware batch prefetcher for training integration"
+
+[dependencies]
+# tokio, memmap2, hades-core will be added in Phase 4

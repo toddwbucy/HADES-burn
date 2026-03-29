@@ -1,4 +1,5 @@
 use clap::Parser;
+use hades_core::config;
 
 /// HADES-Burn — Rust rewrite of the HADES knowledge graph system.
 ///
@@ -16,18 +17,18 @@ struct Cli {
     gpu: Option<u32>,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(ref db) = cli.database {
-        eprintln!("database: {db}");
-    }
-    if let Some(gpu) = cli.gpu {
-        eprintln!("gpu: {gpu}");
-    }
+    let mut config = config::load_config()?;
+    config.apply_cli_overrides(cli.database.as_deref(), cli.gpu);
 
-    println!(
-        "hades-burn {} — workspace scaffold operational",
-        env!("CARGO_PKG_VERSION")
+    eprintln!(
+        "hades-burn {} — database: {}, device: {}",
+        env!("CARGO_PKG_VERSION"),
+        config.effective_database(),
+        config.effective_device(),
     );
+
+    Ok(())
 }

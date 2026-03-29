@@ -6,6 +6,7 @@
 use std::env;
 use std::path::PathBuf;
 
+use anyhow::bail;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -34,7 +35,8 @@ impl HadesConfig {
     /// Apply environment variable overrides.
     ///
     /// Called after YAML loading, before CLI overrides.
-    pub fn apply_env_overrides(&mut self) {
+    /// Returns `Err` if an env var contains an invalid value.
+    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         // Database
         if let Ok(v) = env::var("ARANGO_PASSWORD") {
             self.database.password = Some(v);
@@ -60,7 +62,14 @@ impl HadesConfig {
 
         // GPU
         if let Ok(v) = env::var("HADES_USE_GPU") {
-            self.gpu.enabled = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+            match v.to_lowercase().trim() {
+                "true" | "1" | "yes" => self.gpu.enabled = true,
+                "false" | "0" | "no" => self.gpu.enabled = false,
+                other => bail!(
+                    "HADES_USE_GPU={other:?} is not valid. \
+                     Expected: true, false, 1, 0, yes, or no."
+                ),
+            }
         }
         if let Ok(v) = env::var("CUDA_VISIBLE_DEVICES") {
             self.gpu.cuda_visible_devices = Some(v);
@@ -78,6 +87,8 @@ impl HadesConfig {
         if let Ok(v) = env::var("HADES_LATEX_PATH") {
             self.arxiv.latex_base_path = PathBuf::from(v);
         }
+
+        Ok(())
     }
 
     /// Apply CLI argument overrides (highest priority).

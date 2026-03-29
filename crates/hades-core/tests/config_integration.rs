@@ -1,19 +1,30 @@
 //! Integration test: load the actual production hades.yaml
 //! and verify it parses correctly with matching values.
 
-use std::path::Path;
+use std::path::PathBuf;
 
-const PRODUCTION_YAML: &str = "/home/todd/git/HADES/core/config/hades.yaml";
+/// Resolve the path to production hades.yaml.
+///
+/// Uses HADES_TEST_CONFIG env var if set, otherwise falls back to
+/// the known location relative to the HADES repo.
+fn production_yaml_path() -> PathBuf {
+    if let Ok(p) = std::env::var("HADES_TEST_CONFIG") {
+        return PathBuf::from(p);
+    }
+    // Default: known location on this machine
+    PathBuf::from("/home/todd/git/HADES/core/config/hades.yaml")
+}
 
 #[test]
 fn load_production_hades_yaml() {
-    let path = Path::new(PRODUCTION_YAML);
-    if !path.exists() {
-        eprintln!("skipping: {PRODUCTION_YAML} not found");
-        return;
-    }
+    let path = production_yaml_path();
+    assert!(
+        path.exists(),
+        "production hades.yaml not found at {path:?}. \
+         Set HADES_TEST_CONFIG env var to override the path."
+    );
 
-    let contents = std::fs::read_to_string(path).expect("failed to read hades.yaml");
+    let contents = std::fs::read_to_string(&path).expect("failed to read hades.yaml");
     let config: hades_core::config::HadesConfig =
         serde_yaml::from_str(&contents).expect("failed to parse hades.yaml");
 
@@ -93,13 +104,14 @@ fn load_production_hades_yaml() {
 
 #[test]
 fn load_production_yaml_then_apply_overrides() {
-    let path = Path::new(PRODUCTION_YAML);
-    if !path.exists() {
-        eprintln!("skipping: {PRODUCTION_YAML} not found");
-        return;
-    }
+    let path = production_yaml_path();
+    assert!(
+        path.exists(),
+        "production hades.yaml not found at {path:?}. \
+         Set HADES_TEST_CONFIG env var to override the path."
+    );
 
-    let contents = std::fs::read_to_string(path).unwrap();
+    let contents = std::fs::read_to_string(&path).unwrap();
     let mut config: hades_core::config::HadesConfig =
         serde_yaml::from_str(&contents).unwrap();
 

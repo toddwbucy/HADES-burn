@@ -32,7 +32,7 @@ const CONFIG_SEARCH_PATHS: &[&str] = &[
 /// CLI overrides are applied separately via [`HadesConfig::apply_cli_overrides`]
 /// after this function returns.
 pub fn load_config() -> Result<HadesConfig> {
-    let yaml_path = find_config_file();
+    let yaml_path = find_config_file()?;
 
     let mut config = match yaml_path {
         Some(ref path) => {
@@ -48,33 +48,39 @@ pub fn load_config() -> Result<HadesConfig> {
         }
     };
 
-    config.apply_env_overrides();
+    config.apply_env_overrides()?;
     Ok(config)
 }
 
 /// Search for hades.yaml in standard locations.
 ///
 /// Priority:
-/// 1. `HADES_CONFIG` environment variable (explicit path)
+/// 1. `HADES_CONFIG` environment variable (explicit path — **must exist**)
 /// 2. `./hades.yaml` (current directory)
 /// 3. `./core/config/hades.yaml` (running from HADES repo root)
 /// 4. `~/.config/hades/hades.yaml` (user config)
 /// 5. `/etc/hades/hades.yaml` (system config)
-fn find_config_file() -> Option<PathBuf> {
-    // Explicit path via env var
+///
+/// Returns `Err` if `HADES_CONFIG` is set but the file does not exist.
+fn find_config_file() -> Result<Option<PathBuf>> {
+    // Explicit path via env var — must exist if set
     if let Ok(explicit) = env::var("HADES_CONFIG") {
         let path = PathBuf::from(&explicit);
         if path.exists() {
-            return Some(path);
+            return Ok(Some(path));
         }
-        debug!("HADES_CONFIG={explicit} does not exist, searching standard paths");
+        anyhow::bail!(
+            "HADES_CONFIG={explicit} does not exist. \
+             Remove the variable to use standard config search paths, \
+             or set it to a valid hades.yaml path."
+        );
     }
 
     // Current directory and repo-relative paths
     for candidate in CONFIG_SEARCH_PATHS {
         let path = PathBuf::from(candidate);
         if path.exists() {
-            return Some(path);
+            return Ok(Some(path));
         }
     }
 
@@ -82,17 +88,17 @@ fn find_config_file() -> Option<PathBuf> {
     if let Some(home) = env::var_os("HOME") {
         let path = Path::new(&home).join(".config/hades/hades.yaml");
         if path.exists() {
-            return Some(path);
+            return Ok(Some(path));
         }
     }
 
     // System config
     let system = PathBuf::from("/etc/hades/hades.yaml");
     if system.exists() {
-        return Some(system);
+        return Ok(Some(system));
     }
 
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -162,7 +168,7 @@ search:
             env::set_var("ARANGO_PASSWORD", "secret");
         }
 
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
 
         assert_eq!(config.database.host, "override-host");
         assert_eq!(config.database.port, 1234);
@@ -213,9 +219,36 @@ search:
 
         // SAFETY: test-only env mutation
         unsafe { env::set_var("HADES_USE_GPU", "false") };
-        config.apply_env_overrides();
+        config.apply_env_overrides().unwrap();
         assert!(!config.gpu.enabled);
 
         unsafe { env::remove_var("HADES_USE_GPU") };
+    }
+
+    #[test]
+    fn test_gpu_env_invalid_value_errors() {
+        let mut config = HadesConfig::default();
+
+        unsafe { env::set_var("HADES_USE_GPU", "maybe") };
+        let result = config.apply_env_overrides();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("maybe"), "error should mention the bad value: {msg}");
+
+        unsafe { env::remove_var("HADES_USE_GPU") };
+    }
+
+    #[test]
+    fn test_hades_config_env_missing_file_errors() {
+        unsafe { env::set_var("HADES_CONFIG", "/nonexistent/hades.yaml") };
+        let result = super::load_config();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("/nonexistent/hades.yaml"),
+            "error should mention the path: {msg}"
+        );
+
+        unsafe { env::remove_var("HADES_CONFIG") };
     }
 }

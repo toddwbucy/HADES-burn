@@ -34,3 +34,17 @@ thiserror = "2"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+
+# HTTP client (Unix socket via hyperlocal, TCP via hyper-util)
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyperlocal = { version = "0.9", features = ["client"] }
+http = "1"
+http-body-util = "0.1"
+tower-service = "0.3"
+
+# Encoding
+base64 = "0.22"
+
+# Async
+futures = "0.3"

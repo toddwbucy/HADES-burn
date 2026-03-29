@@ -14,6 +14,13 @@ tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+hyperlocal.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+base64.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

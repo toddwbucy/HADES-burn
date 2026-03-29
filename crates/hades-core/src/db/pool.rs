@@ -4,8 +4,10 @@
 //! a writer.  When both resolve to the same socket (common in single-node
 //! setups), they share a single underlying hyper client.
 
+use std::path::Path;
 use std::time::Instant;
 
+use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, info, instrument, warn};
 
@@ -34,7 +36,7 @@ impl ArangoPool {
         let reader = ArangoClient::from_config(config, true)?;
         let writer = ArangoClient::from_config(config, false)?;
 
-        let shared = reader.socket_path() == writer.socket_path();
+        let shared = paths_equal(reader.socket_path(), writer.socket_path());
         if shared {
             debug!("reader and writer share the same socket");
         } else {
@@ -54,7 +56,7 @@ impl ArangoPool {
 
     /// Build a pool from explicit clients (for testing).
     pub fn new(reader: ArangoClient, writer: ArangoClient) -> Self {
-        let shared = reader.socket_path() == writer.socket_path();
+        let shared = paths_equal(reader.socket_path(), writer.socket_path());
         Self {
             reader,
             writer,
@@ -159,7 +161,7 @@ impl ArangoPool {
 }
 
 /// Result of a health check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HealthStatus {
     /// ArangoDB server version string.
     pub version: String,
@@ -169,6 +171,24 @@ pub struct HealthStatus {
     pub writer_ok: bool,
     /// Whether reader and writer share the same connection.
     pub shared: bool,
+}
+
+/// Compare two optional socket paths, canonicalizing to handle symlinks.
+///
+/// Falls back to raw comparison if canonicalization fails (e.g. path
+/// doesn't exist yet during testing).
+fn paths_equal(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            // Try canonical comparison first to resolve symlinks
+            match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(ca), Ok(cb)) => ca == cb,
+                _ => a == b,
+            }
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

@@ -221,7 +221,9 @@ fn endpoints_equal(
                 _ => a == b,
             }
         }
-        (None, None) => base_url_a == base_url_b,
+        (None, None) => {
+            base_url_a.trim_end_matches('/') == base_url_b.trim_end_matches('/')
+        }
         _ => false,
     }
 }

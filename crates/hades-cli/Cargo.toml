@@ -1,0 +1,21 @@
+[package]
+name = "hades-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI entry point for HADES-Burn"
+
+[[bin]]
+name = "hades-burn"
+path = "src/main.rs"
+
+[dependencies]
+hades-core = { path = "../hades-core" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

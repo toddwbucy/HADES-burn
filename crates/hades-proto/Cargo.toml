@@ -1,0 +1,10 @@
+[package]
+name = "hades-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "gRPC/protobuf definitions for the Persephone provider protocol"
+
+[dependencies]
+# tonic and prost will be added in Phase 3

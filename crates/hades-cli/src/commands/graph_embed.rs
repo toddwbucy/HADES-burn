@@ -6,10 +6,6 @@ use clap::Subcommand;
 pub enum GraphEmbedCmd {
     /// Train graph embeddings.
     Train {
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Number of training epochs.
         #[arg(long, default_value_t = 100)]
         epochs: u32,
@@ -23,10 +19,6 @@ pub enum GraphEmbedCmd {
     Embed {
         /// Node ID to embed.
         node_id: String,
-
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
     },
 
     /// Find nearest neighbors of a node in embedding space.
@@ -40,9 +32,5 @@ pub enum GraphEmbedCmd {
     },
 
     /// Update graph embeddings incrementally.
-    Update {
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-    },
+    Update,
 }

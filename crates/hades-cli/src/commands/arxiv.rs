@@ -6,10 +6,6 @@ use clap::Subcommand;
 pub enum ArxivCmd {
     /// Sync abstracts from arXiv API into the knowledge base.
     Sync {
-        /// GPU device index for embedding during sync.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Run in batch mode (non-interactive).
         #[arg(short = 'b', long)]
         batch: bool,

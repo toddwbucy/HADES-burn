@@ -11,10 +11,6 @@ pub enum CodebaseCmd {
         /// Path to file or directory to ingest.
         path: PathBuf,
 
-        /// GPU device index for embedding.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Programming language override (auto-detected if omitted).
         #[arg(short = 'l', long)]
         language: Option<String>,
@@ -28,10 +24,6 @@ pub enum CodebaseCmd {
     Update {
         /// Path to file or directory to update.
         path: PathBuf,
-
-        /// GPU device index for embedding.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
     },
 
     /// Show code ingestion statistics.

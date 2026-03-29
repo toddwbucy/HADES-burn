@@ -78,10 +78,6 @@ enum Commands {
         /// Input file(s) or directory paths.
         inputs: Vec<PathBuf>,
 
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Run in batch mode.
         #[arg(short = 'b', long)]
         batch: bool,
@@ -178,7 +174,7 @@ fn strip_global_opts(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
 
-    for (i, arg) in args.iter().enumerate() {
+    for arg in args {
         if skip_next {
             skip_next = false;
             continue;
@@ -201,7 +197,7 @@ fn strip_global_opts(args: &[String]) -> Vec<String> {
             continue;
         }
         // Handle -g<value> (no space) form
-        if arg.starts_with("-g") && arg.len() > 2 && args.get(i).is_some() {
+        if arg.starts_with("-g") && arg.len() > 2 {
             let rest = &arg[2..];
             if rest.chars().all(|c| c.is_ascii_digit()) {
                 continue;

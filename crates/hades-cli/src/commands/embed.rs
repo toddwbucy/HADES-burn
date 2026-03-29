@@ -9,10 +9,6 @@ pub enum EmbedCmd {
         /// Text to embed.
         text: String,
 
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Output format (json, raw).
         #[arg(short = 'f', long, default_value = "json")]
         format: String,
@@ -36,10 +32,6 @@ pub enum EmbedServiceCmd {
 
     /// Start the embedding service.
     Start {
-        /// GPU device index.
-        #[arg(short = 'g', long)]
-        gpu: Option<u32>,
-
         /// Run in foreground (don't daemonize).
         #[arg(long)]
         foreground: bool,

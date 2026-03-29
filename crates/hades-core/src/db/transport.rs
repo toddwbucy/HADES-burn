@@ -238,15 +238,9 @@ impl ArangoClient {
             .map_err(|e| ArangoError::Request(e.to_string()))?;
 
         let response = if let Some(ref client) = self.unix_client {
-            client
-                .request(req)
-                .await
-                .map_err(|e| ArangoError::Request(e.to_string()))?
+            client.request(req).await?
         } else if let Some(ref client) = self.tcp_client {
-            client
-                .request(req)
-                .await
-                .map_err(|e| ArangoError::Request(e.to_string()))?
+            client.request(req).await?
         } else {
             return Err(ArangoError::Request(
                 "no transport configured".to_string(),

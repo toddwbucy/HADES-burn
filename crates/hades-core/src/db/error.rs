@@ -21,7 +21,7 @@ pub enum ArangoError {
 
     /// Transport-level error (connection refused, timeout, etc).
     #[error("transport error: {0}")]
-    Transport(#[from] hyper::Error),
+    Transport(#[from] hyper_util::client::legacy::Error),
 
     /// Error building or sending the HTTP request.
     #[error("request error: {0}")]
@@ -30,17 +30,12 @@ pub enum ArangoError {
     /// JSON serialization/deserialization error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-
-    /// The requested document was not found (404).
-    #[error("not found: {collection}/{key}")]
-    NotFound { collection: String, key: String },
 }
 
 /// Classify errors for matching without inspecting fields.
 impl ArangoError {
     pub fn kind(&self) -> ArangoErrorKind {
         match self {
-            Self::NotFound { .. } => ArangoErrorKind::NotFound,
             Self::Api { status, .. } | Self::Http { status, .. } => match *status {
                 401 => ArangoErrorKind::Unauthorized,
                 403 => ArangoErrorKind::Forbidden,

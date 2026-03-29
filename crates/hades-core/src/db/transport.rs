@@ -65,11 +65,10 @@ impl std::fmt::Debug for ArangoClient {
 impl ArangoClient {
     /// Create a client from the HADES configuration.
     ///
-    /// Socket discovery priority (matches Python `resolve_memory_config`):
+    /// Socket discovery priority:
     /// 1. Explicit socket from config (readonly/readwrite)
-    /// 2. Proxy sockets: `/run/hades/{readonly,readwrite}/arangod.sock`
-    /// 3. Direct socket: `/run/arangodb3/arangodb.sock`
-    /// 4. TCP fallback: `http://{host}:{port}`
+    /// 2. Direct socket: `/run/arangodb3/arangodb.sock`
+    /// 3. TCP fallback: `http://{host}:{port}`
     ///
     /// `read_only` selects the read-only or read-write socket path.
     pub fn from_config(config: &HadesConfig, read_only: bool) -> Result<Self, ArangoError> {
@@ -156,7 +155,11 @@ impl ArangoClient {
             auth_header: Some(format!("Basic {encoded}")),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             unix_client: None,
-            tcp_client: Some(Client::builder(TokioExecutor::new()).build(connector)),
+            tcp_client: Some(
+                Client::builder(TokioExecutor::new())
+                    .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
+                    .build(connector),
+            ),
         }
     }
 
@@ -338,9 +341,6 @@ impl ArangoClient {
 // Socket discovery
 // ---------------------------------------------------------------------------
 
-/// Well-known proxy socket paths.
-const PROXY_RO_SOCKET: &str = "/run/hades/readonly/arangod.sock";
-const PROXY_RW_SOCKET: &str = "/run/hades/readwrite/arangod.sock";
 /// Direct ArangoDB socket.
 const DIRECT_SOCKET: &str = "/run/arangodb3/arangodb.sock";
 
@@ -356,26 +356,14 @@ fn resolve_socket(config: &HadesConfig, read_only: bool) -> Option<PathBuf> {
         debug!(socket = %path.display(), "configured socket not found, probing");
     }
 
-    // 2. Proxy sockets
-    let proxy = if read_only {
-        PROXY_RO_SOCKET
-    } else {
-        PROXY_RW_SOCKET
-    };
-    let proxy_path = PathBuf::from(proxy);
-    if proxy_path.exists() {
-        debug!(socket = %proxy_path.display(), "using proxy socket");
-        return Some(proxy_path);
-    }
-
-    // 3. Direct ArangoDB socket
+    // 2. Direct ArangoDB socket
     let direct = PathBuf::from(DIRECT_SOCKET);
     if direct.exists() {
         debug!(socket = %direct.display(), "using direct ArangoDB socket");
         return Some(direct);
     }
 
-    // 4. No socket found — caller will use TCP
+    // 3. No socket found — caller will use TCP
     debug!("no Unix socket found, will use TCP");
     None
 }

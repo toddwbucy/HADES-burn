@@ -36,7 +36,12 @@ impl ArangoPool {
         let reader = ArangoClient::from_config(config, true)?;
         let writer = ArangoClient::from_config(config, false)?;
 
-        let shared = paths_equal(reader.socket_path(), writer.socket_path());
+        let shared = endpoints_equal(
+            reader.socket_path(),
+            writer.socket_path(),
+            reader.base_url(),
+            writer.base_url(),
+        );
         if shared {
             debug!("reader and writer share the same socket");
         } else {
@@ -56,7 +61,12 @@ impl ArangoPool {
 
     /// Build a pool from explicit clients (for testing).
     pub fn new(reader: ArangoClient, writer: ArangoClient) -> Self {
-        let shared = paths_equal(reader.socket_path(), writer.socket_path());
+        let shared = endpoints_equal(
+            reader.socket_path(),
+            writer.socket_path(),
+            reader.base_url(),
+            writer.base_url(),
+        );
         Self {
             reader,
             writer,
@@ -173,13 +183,18 @@ pub struct HealthStatus {
     pub shared: bool,
 }
 
-/// Compare two optional socket paths, canonicalizing to handle symlinks.
+/// Compare two clients' endpoints to determine if they share a connection.
 ///
-/// Falls back to raw comparison if canonicalization fails (e.g. path
-/// doesn't exist yet during testing).
-fn paths_equal(a: Option<&Path>, b: Option<&Path>) -> bool {
-    match (a, b) {
-        (None, None) => true,
+/// For Unix socket clients: canonicalizes paths to handle symlinks.
+/// For TCP clients: compares base URLs.
+/// Mixed socket/TCP: always different.
+fn endpoints_equal(
+    socket_a: Option<&Path>,
+    socket_b: Option<&Path>,
+    base_url_a: &str,
+    base_url_b: &str,
+) -> bool {
+    match (socket_a, socket_b) {
         (Some(a), Some(b)) => {
             // Try canonical comparison first to resolve symlinks
             match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
@@ -187,6 +202,7 @@ fn paths_equal(a: Option<&Path>, b: Option<&Path>) -> bool {
                 _ => a == b,
             }
         }
+        (None, None) => base_url_a == base_url_b,
         _ => false,
     }
 }

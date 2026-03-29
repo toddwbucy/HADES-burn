@@ -168,6 +168,11 @@ impl ArangoClient {
         &self.database
     }
 
+    /// The base URL for TCP connections (empty when using Unix socket).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// The socket path, if using Unix domain socket.
     pub fn socket_path(&self) -> Option<&Path> {
         self.socket_path.as_deref()

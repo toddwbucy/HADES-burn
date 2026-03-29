@@ -106,25 +106,44 @@ impl ArangoPool {
         let writer_ok;
         let mut version = String::new();
 
-        match self.check_client(&self.reader, "reader").await {
-            Ok(v) => {
-                debug!(role = "reader", latency_ms = start.elapsed().as_millis() as u64, "healthy");
-                version = v;
-                reader_ok = true;
-            }
-            Err(e) => {
-                warn!(role = "reader", error = %e, "health check failed");
-                reader_ok = false;
-            }
-        }
-
         if self.shared {
+            // Same endpoint — only check once
+            match self.check_client(&self.reader, "reader").await {
+                Ok(v) => {
+                    debug!(role = "reader", latency_ms = start.elapsed().as_millis() as u64, "healthy");
+                    version = v;
+                    reader_ok = true;
+                }
+                Err(e) => {
+                    warn!(role = "reader", error = %e, "health check failed");
+                    reader_ok = false;
+                }
+            }
             writer_ok = reader_ok;
         } else {
-            let writer_start = Instant::now();
-            match self.check_client(&self.writer, "writer").await {
+            // Different endpoints — check concurrently
+            let (reader_result, writer_result) = tokio::join!(
+                self.check_client(&self.reader, "reader"),
+                self.check_client(&self.writer, "writer"),
+            );
+
+            let elapsed = start.elapsed().as_millis() as u64;
+
+            match reader_result {
                 Ok(v) => {
-                    debug!(role = "writer", latency_ms = writer_start.elapsed().as_millis() as u64, "healthy");
+                    debug!(role = "reader", latency_ms = elapsed, "healthy");
+                    version = v;
+                    reader_ok = true;
+                }
+                Err(e) => {
+                    warn!(role = "reader", error = %e, "health check failed");
+                    reader_ok = false;
+                }
+            }
+
+            match writer_result {
+                Ok(v) => {
+                    debug!(role = "writer", latency_ms = elapsed, "healthy");
                     if version.is_empty() {
                         version = v;
                     }

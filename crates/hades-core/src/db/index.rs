@@ -12,6 +12,22 @@ use super::error::ArangoError;
 use super::pool::ArangoPool;
 use super::query;
 
+/// Percent-encode a string for use as a URL query parameter value.
+fn encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
 /// Distance metric for a vector index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +69,8 @@ pub async fn list_indexes(
     pool: &ArangoPool,
     collection: &str,
 ) -> Result<Vec<IndexInfo>, ArangoError> {
-    let path = format!("index?collection={collection}");
+    let encoded = encode_query_value(collection);
+    let path = format!("index?collection={encoded}");
     let resp = pool.reader().get(&path).await?;
 
     let indexes = resp
@@ -108,7 +125,8 @@ pub async fn create_vector_index(
         }
     };
 
-    let path = format!("index?collection={collection}");
+    let encoded = encode_query_value(collection);
+    let path = format!("index?collection={encoded}");
     let body = serde_json::json!({
         "type": "vector",
         "fields": [field],

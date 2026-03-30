@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use hades_core::db::{query, ArangoClient, ArangoPool};
+use hades_core::db::query::{self, ExecutionTarget};
+use hades_core::db::{ArangoClient, ArangoPool};
+use tracing::warn;
 
 fn arango_socket() -> PathBuf {
     PathBuf::from(
@@ -25,7 +27,7 @@ fn test_pool() -> Option<ArangoPool> {
         if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
             panic!("ARANGO_TESTS is set but socket not found at {}", socket.display());
         }
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        warn!("skipping: ArangoDB socket not found at {}", socket.display());
         return None;
     }
 
@@ -42,7 +44,7 @@ fn test_pool() -> Option<ArangoPool> {
 async fn test_simple_query() {
     let Some(pool) = test_pool() else { return };
 
-    let result = query::query(&pool, "RETURN 1 + 1", None, None, false)
+    let result = query::query(&pool, "RETURN 1 + 1", None, None, false, ExecutionTarget::Reader)
         .await
         .unwrap();
     assert_eq!(result.results.len(), 1);
@@ -54,7 +56,7 @@ async fn test_query_with_bind_vars() {
     let Some(pool) = test_pool() else { return };
 
     let vars = serde_json::json!({"value": 42});
-    let result = query::query(&pool, "RETURN @value", Some(&vars), None, false)
+    let result = query::query(&pool, "RETURN @value", Some(&vars), None, false, ExecutionTarget::Reader)
         .await
         .unwrap();
     assert_eq!(result.results.len(), 1);
@@ -71,6 +73,7 @@ async fn test_query_collection() {
         None,
         None,
         false,
+        ExecutionTarget::Reader,
     )
     .await
     .unwrap();
@@ -88,6 +91,7 @@ async fn test_query_full_count() {
         None,
         None,
         true,
+        ExecutionTarget::Reader,
     )
     .await
     .unwrap();
@@ -107,6 +111,7 @@ async fn test_query_pagination() {
         None,
         Some(2), // batch_size=2, should paginate across 3 pages
         false,
+        ExecutionTarget::Reader,
     )
     .await
     .unwrap();
@@ -141,6 +146,14 @@ async fn test_query_single_empty() {
 async fn test_query_syntax_error() {
     let Some(pool) = test_pool() else { return };
 
-    let result = query::query(&pool, "THIS IS NOT VALID AQL", None, None, false).await;
+    let result = query::query(
+        &pool,
+        "THIS IS NOT VALID AQL",
+        None,
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await;
     assert!(result.is_err(), "expected error for invalid AQL");
 }

@@ -46,5 +46,8 @@ tower-service = "0.3"
 # Encoding
 base64 = "0.22"
 
+# Regex
+regex = "1"
+
 # Async
 futures = "0.3"

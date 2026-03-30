@@ -1,0 +1,143 @@
+// Persephone Extraction Service — document content extraction.
+//
+// Wraps document extraction backends (Docling VLM, LaTeX parser,
+// TreeSitter AST) behind a typed gRPC contract.  The service
+// handles source type routing internally.
+
+syntax = "proto3";
+
+package persephone.extraction;
+
+// Extraction service for converting documents into structured text.
+service ExtractionService {
+  // Extract structured content from a document.
+  rpc Extract(ExtractRequest) returns (ExtractResponse);
+
+  // Query extractor capabilities (supported formats, features).
+  rpc Capabilities(CapabilitiesRequest) returns (ExtractorInfo);
+}
+
+// Source document type.
+enum SourceType {
+  // Auto-detect from file extension.
+  SOURCE_TYPE_UNKNOWN = 0;
+
+  // PDF document (routes to Docling VLM).
+  SOURCE_TYPE_PDF = 1;
+
+  // LaTeX source archive (.tar.gz).
+  SOURCE_TYPE_LATEX = 2;
+
+  // Source code file (routes to TreeSitter AST).
+  SOURCE_TYPE_CODE = 3;
+
+  // Markdown document.
+  SOURCE_TYPE_MARKDOWN = 4;
+
+  // Plain text.
+  SOURCE_TYPE_TEXT = 5;
+}
+
+// Request to extract content from a document.
+message ExtractRequest {
+  // Path to the file on the local filesystem.
+  // The extraction service must have read access to this path.
+  string file_path = 1;
+
+  // Optional raw content bytes (alternative to file_path).
+  // When set, file_path is used only for type detection.
+  bytes content = 2;
+
+  // Source type hint. If UNKNOWN, auto-detect from file extension.
+  SourceType source_type = 3;
+
+  // Whether to extract tables from the document.
+  bool extract_tables = 4;
+
+  // Whether to extract equations from the document.
+  bool extract_equations = 5;
+
+  // Whether to extract images/figures.
+  bool extract_images = 6;
+
+  // Whether to use OCR for scanned content.
+  bool use_ocr = 7;
+}
+
+// Extracted content from a document.
+message ExtractResponse {
+  // Full extracted text content.
+  string full_text = 1;
+
+  // Extracted tables.
+  repeated Table tables = 2;
+
+  // Extracted equations.
+  repeated Equation equations = 3;
+
+  // Extracted image references.
+  repeated ImageRef images = 4;
+
+  // Additional metadata from the extraction process.
+  map<string, string> metadata = 5;
+
+  // Source type that was used for extraction.
+  SourceType source_type = 6;
+}
+
+// A table extracted from the document.
+message Table {
+  // Table content as text (may be markdown or CSV formatted).
+  string content = 1;
+
+  // Table caption or title, if available.
+  string caption = 2;
+
+  // Zero-based index of this table in the document.
+  uint32 index = 3;
+}
+
+// An equation extracted from the document.
+message Equation {
+  // Equation content (LaTeX notation).
+  string latex = 1;
+
+  // Plain text representation, if available.
+  string text = 2;
+
+  // Zero-based index of this equation in the document.
+  uint32 index = 3;
+
+  // Whether this is an inline or display equation.
+  bool is_inline = 4;
+}
+
+// A reference to an extracted image/figure.
+message ImageRef {
+  // Path or identifier for the extracted image.
+  string path = 1;
+
+  // Figure caption, if available.
+  string caption = 2;
+
+  // Zero-based index of this image in the document.
+  uint32 index = 3;
+}
+
+// Empty request for the Capabilities RPC.
+message CapabilitiesRequest {}
+
+// Extractor capabilities and supported formats.
+message ExtractorInfo {
+  // Supported file extensions (e.g. [".pdf", ".tex", ".py"]).
+  repeated string supported_extensions = 1;
+
+  // Supported source types.
+  repeated SourceType supported_types = 2;
+
+  // Available features.
+  repeated string features = 3;
+
+  // Whether GPU is available for extraction.
+  bool gpu_available = 4;
+}

@@ -6,10 +6,12 @@
 pub mod collections;
 pub mod crud;
 mod error;
+pub mod index;
 pub mod keys;
 mod pool;
 pub mod query;
 mod transport;
+pub mod vector;
 
 pub use error::{ArangoError, ArangoErrorKind};
 pub use pool::{ArangoPool, HealthStatus};

@@ -23,6 +23,9 @@ base64.workspace = true
 futures.workspace = true
 regex.workspace = true
 moka.workspace = true
+tonic.workspace = true
+hades-proto = { path = "../hades-proto" }
+tower = "0.5"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -1,0 +1,77 @@
+// Persephone Embedding Service — vector embedding generation.
+//
+// Wraps ML embedding models (e.g. Jina V4) behind a typed gRPC contract.
+// The service runs on a Unix socket (/run/hades/persephone-embedding.sock)
+// and manages GPU memory lifecycle internally.
+
+syntax = "proto3";
+
+package persephone.embedding;
+
+// Embedding service for generating vector representations of text.
+service EmbeddingService {
+  // Embed a batch of texts into vectors.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+
+  // Query provider capabilities and model metadata.
+  rpc Info(InfoRequest) returns (ProviderInfo);
+}
+
+// Request to embed one or more text strings.
+message EmbedRequest {
+  // Text strings to embed.
+  repeated string texts = 1;
+
+  // Embedding task label — controls model behavior.
+  // Common values: "retrieval.passage", "retrieval.query", "code", "text-matching"
+  string task = 2;
+
+  // Optional batch size hint for the provider.
+  // The provider may ignore this and use its own default.
+  uint32 batch_size = 3;
+}
+
+// Response containing computed embeddings.
+message EmbedResponse {
+  // One Embedding per input text, in the same order.
+  repeated Embedding embeddings = 1;
+
+  // Model identifier used to generate the embeddings.
+  string model = 2;
+
+  // Embedding vector dimension.
+  uint32 dimension = 3;
+
+  // Wall-clock time for the embedding computation in milliseconds.
+  uint64 duration_ms = 4;
+}
+
+// A single embedding vector.
+message Embedding {
+  // The embedding values (length == dimension from EmbedResponse).
+  repeated float values = 1;
+}
+
+// Empty request for the Info RPC.
+message InfoRequest {}
+
+// Provider capabilities and model metadata.
+message ProviderInfo {
+  // Model identifier (e.g. "jinaai/jina-embeddings-v4").
+  string model_name = 1;
+
+  // Output embedding dimension (e.g. 2048).
+  uint32 dimension = 2;
+
+  // Maximum input sequence length in tokens.
+  uint32 max_seq_length = 3;
+
+  // Supported task labels.
+  repeated string supported_tasks = 4;
+
+  // Device the model is loaded on (e.g. "cuda:0", "cpu").
+  string device = 5;
+
+  // Whether the model is currently loaded in memory.
+  bool model_loaded = 6;
+}

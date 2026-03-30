@@ -1,0 +1,36 @@
+// Common types shared across Persephone services.
+
+syntax = "proto3";
+
+package persephone.common;
+
+// Text chunking strategy.
+enum ChunkingStrategy {
+  // Late chunking: encode full document, pool token embeddings per chunk.
+  // Preserves full document context in every chunk embedding.
+  CHUNKING_STRATEGY_LATE = 0;
+
+  // Semantic chunking: split on paragraph/sentence boundaries.
+  CHUNKING_STRATEGY_SEMANTIC = 1;
+
+  // Sliding window: fixed token window with overlap.
+  CHUNKING_STRATEGY_SLIDING = 2;
+
+  // Token-based: split at token boundaries with configurable size.
+  CHUNKING_STRATEGY_TOKEN = 3;
+}
+
+// Metadata for a single text chunk within a document.
+message ChunkMetadata {
+  // Zero-based index of this chunk within the document.
+  uint32 chunk_index = 1;
+
+  // Total number of chunks in the document.
+  uint32 total_chunks = 2;
+
+  // Start character offset in the original document text.
+  uint64 start_char = 3;
+
+  // End character offset (exclusive) in the original document text.
+  uint64 end_char = 4;
+}

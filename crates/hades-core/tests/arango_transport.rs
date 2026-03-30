@@ -152,3 +152,72 @@ async fn execute_aql_query() {
     let keys = result["result"].as_array().expect("expected result array");
     assert!(!keys.is_empty(), "expected at least one task key");
 }
+
+// ---------------------------------------------------------------------------
+// ArangoPool integration tests
+// ---------------------------------------------------------------------------
+
+/// Verify pool construction with shared socket.
+#[tokio::test]
+async fn pool_health_check() {
+    let socket = arango_socket();
+    if !socket.exists() {
+        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        return;
+    }
+
+    let reader = hades_core::db::ArangoClient::with_socket(
+        socket.clone(),
+        "_system",
+        "root",
+        &arango_password(),
+    );
+    let writer = hades_core::db::ArangoClient::with_socket(
+        socket,
+        "_system",
+        "root",
+        &arango_password(),
+    );
+
+    let pool = hades_core::db::ArangoPool::new(reader, writer);
+    assert!(pool.is_shared(), "same socket should produce shared pool");
+
+    let status = pool.health_check().await;
+    assert!(status.reader_ok, "reader should be healthy");
+    assert!(status.writer_ok, "writer should be healthy");
+    assert!(!status.version.is_empty(), "version should be non-empty");
+}
+
+/// Verify pool reader/writer execute queries correctly.
+#[tokio::test]
+async fn pool_reader_writer_queries() {
+    let socket = arango_socket();
+    if !socket.exists() {
+        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        return;
+    }
+
+    let reader = hades_core::db::ArangoClient::with_socket(
+        socket.clone(),
+        "bident_burn",
+        "root",
+        &arango_password(),
+    );
+    let writer = hades_core::db::ArangoClient::with_socket(
+        socket,
+        "bident_burn",
+        "root",
+        &arango_password(),
+    );
+
+    let pool = hades_core::db::ArangoPool::new(reader, writer);
+
+    // Read via reader
+    let result = pool.reader().get("collection").await.unwrap();
+    let collections = result["result"].as_array().expect("expected array");
+    assert!(!collections.is_empty());
+
+    // Read via writer (same socket, should also work)
+    let result = pool.writer().get("version").await.unwrap();
+    assert_eq!(result["server"], "arango");
+}

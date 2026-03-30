@@ -164,10 +164,44 @@ pub async fn insert_documents(
     Ok(result)
 }
 
+/// Error returned when a chunked bulk insert fails partway through.
+///
+/// Earlier chunks may have been committed (each chunk is atomic via
+/// `complete=true`, but the overall bulk insert is **chunk-atomic**, not
+/// fully atomic).
+#[derive(Debug)]
+pub struct PartialImportError {
+    /// Aggregated results from chunks that succeeded before the failure.
+    pub committed: ImportResult,
+    /// The error that caused the failure.
+    pub error: ArangoError,
+}
+
+impl std::fmt::Display for PartialImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bulk import failed after {} created: {}",
+            self.committed.created, self.error
+        )
+    }
+}
+
+impl std::error::Error for PartialImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Bulk insert documents with automatic chunking.
 ///
 /// Splits `docs` into chunks of `chunk_size` (default 1000) and imports
-/// each chunk atomically.  Returns the aggregated result across all chunks.
+/// each chunk atomically.  The overall operation is **chunk-atomic**: each
+/// chunk is all-or-nothing, but earlier chunks are committed even if a
+/// later chunk fails.
+///
+/// On partial failure, returns `Err(PartialImportError)` containing
+/// the aggregated results from committed chunks plus the underlying error.
 #[instrument(skip(pool, docs), fields(db = %pool.database(), total = docs.len()))]
 pub async fn bulk_insert(
     pool: &ArangoPool,
@@ -175,14 +209,28 @@ pub async fn bulk_insert(
     docs: &[Value],
     chunk_size: Option<usize>,
     overwrite: bool,
-) -> Result<ImportResult, ArangoError> {
+) -> Result<ImportResult, PartialImportError> {
     let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    if chunk_size == 0 {
+        return Err(PartialImportError {
+            committed: ImportResult::empty(),
+            error: ArangoError::Request("chunk_size must be > 0".to_string()),
+        });
+    }
+
     let mut total = ImportResult::empty();
 
     for (i, chunk) in docs.chunks(chunk_size).enumerate() {
         trace!(chunk_index = i, chunk_size = chunk.len(), "importing chunk");
-        let result = insert_documents(pool, collection, chunk, overwrite).await?;
-        total.merge(&result);
+        match insert_documents(pool, collection, chunk, overwrite).await {
+            Ok(result) => total.merge(&result),
+            Err(error) => {
+                return Err(PartialImportError {
+                    committed: total,
+                    error,
+                });
+            }
+        }
     }
 
     debug!(
@@ -215,22 +263,32 @@ pub async fn list_collections(
     exclude_system: bool,
 ) -> Result<Vec<CollectionInfo>, ArangoError> {
     let resp = pool.reader().get("collection").await?;
-    let collections = resp["result"]
+    let arr = resp["result"]
         .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .filter_map(|c| {
-            let name = c["name"].as_str()?;
-            if exclude_system && name.starts_with('_') {
-                return None;
-            }
-            let collection_type = c["type"].as_u64().unwrap_or(2) as u32;
-            Some(CollectionInfo {
-                name: name.to_string(),
-                collection_type,
-            })
-        })
-        .collect();
+        .ok_or_else(|| ArangoError::Request(
+            "list collections: missing or non-array 'result' field".to_string(),
+        ))?;
+
+    let mut collections = Vec::with_capacity(arr.len());
+    for c in arr {
+        let name = c["name"]
+            .as_str()
+            .ok_or_else(|| ArangoError::Request(
+                "list collections: entry missing 'name' string".to_string(),
+            ))?;
+        if exclude_system && name.starts_with('_') {
+            continue;
+        }
+        let collection_type = c["type"]
+            .as_u64()
+            .ok_or_else(|| ArangoError::Request(
+                format!("list collections: entry '{name}' missing 'type' integer"),
+            ))? as u32;
+        collections.push(CollectionInfo {
+            name: name.to_string(),
+            collection_type,
+        });
+    }
     Ok(collections)
 }
 
@@ -242,7 +300,11 @@ pub async fn count_collection(
 ) -> Result<u64, ArangoError> {
     let path = format!("collection/{collection}/count");
     let resp = pool.reader().get(&path).await?;
-    Ok(resp["count"].as_u64().unwrap_or(0))
+    resp["count"]
+        .as_u64()
+        .ok_or_else(|| ArangoError::Request(
+            format!("count_collection: missing or non-numeric 'count' in response for '{collection}'"),
+        ))
 }
 
 /// Create a new collection.

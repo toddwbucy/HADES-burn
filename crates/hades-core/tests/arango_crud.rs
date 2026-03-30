@@ -4,6 +4,7 @@
 //! Unix socket. They use bident_burn (the writable project database).
 //!
 //! Set ARANGO_PASSWORD env var to authenticate.
+//! Set ARANGO_TESTS=1 to require tests to run (fail instead of skip).
 //! Each test uses its own temporary collection to avoid parallel conflicts.
 
 use std::path::PathBuf;
@@ -23,9 +24,20 @@ fn arango_password() -> String {
     )
 }
 
+/// Whether integration tests are required to run (ARANGO_TESTS=1).
+fn arango_tests_required() -> bool {
+    std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true")
+}
+
 fn test_pool() -> Option<ArangoPool> {
     let socket = arango_socket();
     if !socket.exists() {
+        if arango_tests_required() {
+            panic!(
+                "ARANGO_TESTS is set but socket not found at {}",
+                socket.display()
+            );
+        }
         eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
         return None;
     }
@@ -80,7 +92,9 @@ async fn test_list_collections_include_system() {
 async fn test_drop_collection_ignore_missing() {
     let Some(pool) = test_pool() else { return };
 
-    let resp = crud::drop_collection(&pool, "nonexistent_test_col", true)
+    // Use a unique name to avoid any collision
+    let name = format!("nonexistent_{}", std::process::id());
+    let resp = crud::drop_collection(&pool, &name, true)
         .await
         .unwrap();
     assert_eq!(resp["dropped"], false);
@@ -221,6 +235,22 @@ async fn test_insert_with_overwrite() {
 
     let doc = crud::get_document(&pool, col, "ow_test").await.unwrap();
     assert_eq!(doc["version"], 2);
+
+    teardown(&pool, col).await;
+}
+
+#[tokio::test]
+async fn test_bulk_insert_zero_chunk_size() {
+    let Some(pool) = test_pool() else { return };
+    let col = "test_crud_zero_chunk";
+    setup(&pool, col).await;
+
+    let docs = vec![serde_json::json!({"_key": "x"})];
+    let err = crud::bulk_insert(&pool, col, &docs, Some(0), false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.committed.created, 0);
+    assert!(err.error.to_string().contains("chunk_size must be > 0"));
 
     teardown(&pool, col).await;
 }

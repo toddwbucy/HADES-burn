@@ -6,6 +6,7 @@
 pub mod crud;
 mod error;
 mod pool;
+pub mod query;
 mod transport;
 
 pub use error::{ArangoError, ArangoErrorKind};

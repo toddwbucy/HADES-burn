@@ -51,3 +51,6 @@ regex = "1"
 
 # Async
 futures = "0.3"
+
+# Cache
+moka = { version = "0.12", features = ["future"] }

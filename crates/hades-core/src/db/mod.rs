@@ -8,6 +8,7 @@ pub mod crud;
 mod error;
 pub mod keys;
 mod pool;
+pub mod query;
 mod transport;
 
 pub use error::{ArangoError, ArangoErrorKind};

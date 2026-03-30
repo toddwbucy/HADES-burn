@@ -122,7 +122,7 @@ async fn test_query_pagination() {
 async fn test_query_single() {
     let Some(pool) = test_pool() else { return };
 
-    let result = query::query_single(&pool, "RETURN 'hello'", None)
+    let result = query::query_single(&pool, "RETURN 'hello'", None, ExecutionTarget::Reader)
         .await
         .unwrap();
     assert_eq!(result, Some(serde_json::json!("hello")));
@@ -136,6 +136,7 @@ async fn test_query_single_empty() {
         &pool,
         "FOR x IN [] RETURN x",
         None,
+        ExecutionTarget::Reader,
     )
     .await
     .unwrap();

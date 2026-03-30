@@ -72,10 +72,17 @@ pub async fn query(
     debug!(batch_size, full_count, ?target, "executing AQL query");
     trace!(aql, "query text");
 
-    // Initial cursor request through the selected endpoint
+    // Choose the endpoint for the initial cursor request.
+    //
+    // Cursor state is server-side and tied to the endpoint that created
+    // it.  Continuation and cleanup always go through pool.writer()
+    // (the read-only proxy doesn't support cursor state endpoints), so
+    // when reader != writer we must also create the cursor on the writer
+    // to keep the entire cursor lifecycle on the same socket.
     let initial_client = match target {
-        ExecutionTarget::Reader => pool.reader(),
         ExecutionTarget::Writer => pool.writer(),
+        ExecutionTarget::Reader if pool.is_shared() => pool.reader(),
+        ExecutionTarget::Reader => pool.writer(),
     };
     let resp = initial_client.post("cursor", &body).await?;
 
@@ -146,13 +153,17 @@ async fn paginate(
 }
 
 /// Execute an AQL query and return the first result, or `None` if empty.
+///
+/// Uses the default batch size so the server can satisfy the request in
+/// a single round-trip without extra cursor management overhead.
 #[instrument(skip(pool, bind_vars), fields(db = %pool.database()))]
 pub async fn query_single(
     pool: &ArangoPool,
     aql: &str,
     bind_vars: Option<&Value>,
+    target: ExecutionTarget,
 ) -> Result<Option<Value>, ArangoError> {
-    let result = query(pool, aql, bind_vars, Some(1), false, ExecutionTarget::Reader).await?;
+    let result = query(pool, aql, bind_vars, None, false, target).await?;
     Ok(result.results.into_iter().next())
 }
 

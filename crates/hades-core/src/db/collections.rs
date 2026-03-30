@@ -102,9 +102,25 @@ mod tests {
 
     #[test]
     fn test_default_profile_fallback() {
-        // Without HADES_DEFAULT_COLLECTION set, should return arxiv
-        let p = CollectionProfile::default_profile();
-        assert_eq!(p.metadata, "arxiv_metadata");
+        // Save, clear, test, restore — ensures determinism regardless
+        // of what HADES_DEFAULT_COLLECTION is set to in the environment.
+        let saved = env::var("HADES_DEFAULT_COLLECTION").ok();
+        // SAFETY: unit tests in this module do not concurrently read
+        // this env var from other threads.
+        unsafe { env::remove_var("HADES_DEFAULT_COLLECTION") };
+
+        let result = std::panic::catch_unwind(|| {
+            let p = CollectionProfile::default_profile();
+            assert_eq!(p.metadata, "arxiv_metadata");
+        });
+
+        // Restore before propagating any panic
+        match saved {
+            Some(val) => unsafe { env::set_var("HADES_DEFAULT_COLLECTION", val) },
+            None => unsafe { env::remove_var("HADES_DEFAULT_COLLECTION") },
+        }
+
+        result.unwrap();
     }
 
     #[test]

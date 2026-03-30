@@ -3,9 +3,15 @@
 //! These tests require a running ArangoDB instance accessible via
 //! Unix socket. They use bident_burn (the writable project database).
 //!
-//! Set ARANGO_PASSWORD env var to authenticate.
-//! Set ARANGO_TESTS=1 to require tests to run (fail instead of skip).
-//! Each test uses its own temporary collection to avoid parallel conflicts.
+//! Prerequisites:
+//! - ArangoDB running with socket at /run/arangodb3/arangodb.sock
+//! - `bident_burn` database with `persephone_tasks` collection (the
+//!   permanent HADES kanban table, managed by `hades --db bident_burn`)
+//! - ARANGO_PASSWORD env var set for root authentication
+//! - Set ARANGO_TESTS=1 to require tests to run (fail instead of skip)
+//!
+//! Each mutating test uses its own temporary collection (with PID suffix)
+//! to avoid parallel conflicts.
 
 use std::path::PathBuf;
 
@@ -115,17 +121,17 @@ async fn test_count_collection() {
 #[tokio::test]
 async fn test_create_and_drop_collection() {
     let Some(pool) = test_pool() else { return };
-    let col = "test_crud_create_drop";
+    let col = format!("test_crud_create_drop_{}", std::process::id());
 
-    let _ = crud::drop_collection(&pool, col, true).await;
+    let _ = crud::drop_collection(&pool, &col, true).await;
 
-    let resp = crud::create_collection(&pool, col, None).await.unwrap();
-    assert_eq!(resp["name"].as_str(), Some(col));
+    let resp = crud::create_collection(&pool, &col, None).await.unwrap();
+    assert_eq!(resp["name"].as_str(), Some(col.as_str()));
 
     let collections = crud::list_collections(&pool, false).await.unwrap();
     assert!(collections.iter().any(|c| c.name == col));
 
-    crud::drop_collection(&pool, col, false).await.unwrap();
+    crud::drop_collection(&pool, &col, false).await.unwrap();
 
     let collections = crud::list_collections(&pool, false).await.unwrap();
     assert!(!collections.iter().any(|c| c.name == col));

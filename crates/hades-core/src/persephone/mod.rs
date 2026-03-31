@@ -4,3 +4,4 @@
 //! services.  Connects over Unix domain sockets or TCP.
 
 pub mod embedding;
+pub mod extraction;

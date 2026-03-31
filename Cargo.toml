@@ -78,3 +78,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # URL encoding
 urlencoding = "2"
+
+# Tokio utilities (StreamReader for streaming downloads)
+tokio-util = { version = "0.7", features = ["io"] }

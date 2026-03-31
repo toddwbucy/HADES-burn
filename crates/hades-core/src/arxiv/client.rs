@@ -1,9 +1,8 @@
 //! ArXiv REST API client with rate limiting, retry, and Atom XML parsing.
 
 use super::{is_arxiv_id, normalize_arxiv_id, extract_year_month};
-use super::types::{ArxivPaper, DownloadResult};
+use super::types::{ArxivError, ArxivPaper, DownloadResult};
 
-use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use reqwest::Client;
@@ -43,20 +42,14 @@ pub struct ArxivClient {
     last_request: Mutex<Option<Instant>>,
 }
 
-impl Default for ArxivClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ArxivClient {
     /// Create a new client with default settings (3s rate limit, 3 retries, 30s timeout).
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, ArxivError> {
         Self::with_config(3.0, 3, 30)
     }
 
     /// Create a client for sync operations (0.5s rate limit).
-    pub fn for_sync() -> Self {
+    pub fn for_sync() -> Result<Self, ArxivError> {
         Self::with_config(0.5, 3, 30)
     }
 
@@ -66,28 +59,35 @@ impl ArxivClient {
     /// * `rate_limit_secs` — minimum seconds between API calls
     /// * `max_retries` — number of retry attempts on failure
     /// * `timeout_secs` — HTTP request timeout in seconds
-    pub fn with_config(rate_limit_secs: f64, max_retries: u32, timeout_secs: u64) -> Self {
+    pub fn with_config(
+        rate_limit_secs: f64,
+        max_retries: u32,
+        timeout_secs: u64,
+    ) -> Result<Self, ArxivError> {
         let http = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent("HADES-Burn/0.1 (Rust; https://github.com/toddwbucy/HADES-Burn)")
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(ArxivError::ClientBuild)?;
 
-        Self {
+        Ok(Self {
             http,
             rate_limit_delay: Duration::from_secs_f64(rate_limit_secs),
             max_retries,
             last_request: Mutex::new(None),
-        }
+        })
     }
 
     /// Fetch metadata for a single paper by arXiv ID.
     ///
     /// Returns `None` if the paper is not found (no entries in the response).
     #[instrument(skip(self))]
-    pub async fn get_paper_metadata(&self, arxiv_id: &str) -> Result<Option<ArxivPaper>> {
+    pub async fn get_paper_metadata(
+        &self,
+        arxiv_id: &str,
+    ) -> Result<Option<ArxivPaper>, ArxivError> {
         if !is_arxiv_id(arxiv_id) {
-            bail!("invalid arXiv ID format: {arxiv_id}");
+            return Err(ArxivError::InvalidId(arxiv_id.to_string()));
         }
         let normalized = normalize_arxiv_id(arxiv_id);
         let url = format!("{API_BASE}?id_list={normalized}&max_results=1");
@@ -106,7 +106,7 @@ impl ArxivClient {
         query: &str,
         start: u32,
         max_results: u32,
-    ) -> Result<Vec<ArxivPaper>> {
+    ) -> Result<Vec<ArxivPaper>, ArxivError> {
         let url = format!(
             "{API_BASE}?search_query={}&start={start}&max_results={max_results}",
             urlencoding::encode(query),
@@ -122,7 +122,7 @@ impl ArxivClient {
     pub async fn batch_get_metadata(
         &self,
         arxiv_ids: &[&str],
-    ) -> Result<Vec<Option<ArxivPaper>>> {
+    ) -> Result<Vec<Option<ArxivPaper>>, ArxivError> {
         let mut results = Vec::with_capacity(arxiv_ids.len());
         for chunk in arxiv_ids.chunks(10) {
             let id_list: Vec<String> = chunk
@@ -211,9 +211,12 @@ impl ArxivClient {
             };
         }
 
-        tokio::fs::create_dir_all(&pdf_subdir)
-            .await
-            .ok();
+        if let Err(e) = tokio::fs::create_dir_all(&pdf_subdir).await {
+            return DownloadResult::failed(
+                &normalized,
+                format!("failed to create directory {}: {e}", pdf_subdir.display()),
+            );
+        }
 
         let pdf_url = format!("{PDF_BASE}/{normalized}.pdf");
         match self.download_file(&pdf_url, &pdf_path).await {
@@ -230,13 +233,21 @@ impl ArxivClient {
                     if lpath.exists() && !force {
                         Some(lpath)
                     } else {
-                        tokio::fs::create_dir_all(&latex_subdir).await.ok();
-                        let eprint_url = metadata.eprint_url();
-                        match self.download_file(&eprint_url, &lpath).await {
-                            Ok(_) => Some(lpath),
-                            Err(e) => {
-                                debug!(error = %e, "LaTeX source not available (this is normal)");
-                                None
+                        if let Err(e) = tokio::fs::create_dir_all(&latex_subdir).await {
+                            warn!(
+                                error = %e,
+                                dir = %latex_subdir.display(),
+                                "failed to create LaTeX directory, skipping LaTeX download"
+                            );
+                            None
+                        } else {
+                            let eprint_url = metadata.eprint_url();
+                            match self.download_file(&eprint_url, &lpath).await {
+                                Ok(_) => Some(lpath),
+                                Err(e) => {
+                                    debug!(error = %e, "LaTeX source not available (this is normal)");
+                                    None
+                                }
                             }
                         }
                     }
@@ -273,30 +284,27 @@ impl ArxivClient {
     }
 
     /// Make a GET request with rate limiting and exponential backoff retries.
-    async fn request_with_retry(&self, url: &str) -> Result<String> {
+    async fn request_with_retry(&self, url: &str) -> Result<String, ArxivError> {
         for attempt in 0..=self.max_retries {
             self.enforce_rate_limit().await;
             match self.http.get(url).send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return resp
-                            .text()
-                            .await
-                            .context("failed to read response body");
+                        return resp.text().await.map_err(ArxivError::Request);
                     }
                     warn!(status = %status, attempt, url, "HTTP error");
                     if attempt == self.max_retries {
-                        bail!("HTTP {status} after {} retries for {url}", self.max_retries);
+                        return Err(ArxivError::HttpStatus {
+                            status: status.as_u16(),
+                            url: url.to_string(),
+                        });
                     }
                 }
                 Err(e) => {
                     warn!(error = %e, attempt, url, "request failed");
                     if attempt == self.max_retries {
-                        bail!(
-                            "request failed after {} retries for {url}: {e}",
-                            self.max_retries
-                        );
+                        return Err(ArxivError::Request(e));
                     }
                 }
             }
@@ -308,48 +316,66 @@ impl ArxivClient {
         unreachable!()
     }
 
-    /// Download a file with streaming to disk.
-    async fn download_file(&self, url: &str, dest: &Path) -> Result<u64> {
+    /// Download a file by streaming the response directly to disk.
+    async fn download_file(&self, url: &str, dest: &Path) -> Result<u64, ArxivError> {
+        use futures::TryStreamExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio_util::io::StreamReader;
+
         self.enforce_rate_limit().await;
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .context("download request failed")?;
+        let resp = self.http.get(url).send().await?;
 
         let status = resp.status();
         if !status.is_success() {
-            bail!("HTTP {status} downloading {url}");
+            return Err(ArxivError::HttpStatus {
+                status: status.as_u16(),
+                url: url.to_string(),
+            });
         }
 
         let expected_len = resp.content_length();
-        let bytes = resp.bytes().await.context("failed to read download body")?;
-        let size = bytes.len() as u64;
+
+        // Stream the response body directly to a file.
+        let stream = resp
+            .bytes_stream()
+            .map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
+
+        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
+            ArxivError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to create {}: {e}", dest.display()),
+            ))
+        })?;
+
+        let written = tokio::io::copy(&mut reader, &mut file).await.map_err(|e| {
+            ArxivError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to write {}: {e}", dest.display()),
+            ))
+        })?;
+        file.flush().await?;
 
         if let Some(expected) = expected_len
-            && size != expected
+            && written != expected
         {
             warn!(
                 expected = expected,
-                actual = size,
+                actual = written,
                 "content-length mismatch"
             );
         }
 
-        tokio::fs::write(dest, &bytes)
-            .await
-            .with_context(|| format!("failed to write {}", dest.display()))?;
-
-        Ok(size)
+        Ok(written)
     }
 }
 
 // ── Atom XML parsing ────────────────────────────────────────────────────
 
 /// Parse an arXiv Atom XML response into a list of papers.
-fn parse_atom_response(xml: &str) -> Result<Vec<ArxivPaper>> {
-    let doc = roxmltree::Document::parse(xml).context("failed to parse Atom XML")?;
+fn parse_atom_response(xml: &str) -> Result<Vec<ArxivPaper>, ArxivError> {
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| ArxivError::XmlParse(e.to_string()))?;
     let root = doc.root_element();
 
     let mut papers = Vec::new();
@@ -411,11 +437,21 @@ fn parse_entry(entry: &roxmltree::Node) -> Option<ArxivPaper> {
         .map(|s| s.to_string())
         .collect();
 
-    // Dates.
-    let published = parse_datetime(&find_child_text(entry, ATOM_NS, "published").unwrap_or_default());
-    let updated = parse_datetime(&find_child_text(entry, ATOM_NS, "updated").unwrap_or_default());
-    let updated = updated.unwrap_or(published.unwrap_or_default());
-    let published = published.unwrap_or_default();
+    // Dates — warn if fallback to epoch occurs.
+    let pub_raw = find_child_text(entry, ATOM_NS, "published").unwrap_or_default();
+    let upd_raw = find_child_text(entry, ATOM_NS, "updated").unwrap_or_default();
+    let published_parsed = parse_datetime(&pub_raw);
+    let updated_parsed = parse_datetime(&upd_raw);
+
+    if published_parsed.is_none() && !pub_raw.is_empty() {
+        warn!(arxiv_id, raw = pub_raw, "failed to parse published date, falling back to epoch");
+    }
+    if updated_parsed.is_none() && !upd_raw.is_empty() {
+        warn!(arxiv_id, raw = upd_raw, "failed to parse updated date, falling back to published/epoch");
+    }
+
+    let published = published_parsed.unwrap_or_default();
+    let updated = updated_parsed.unwrap_or(published);
 
     // Optional fields.
     let doi = find_child_text(entry, ARXIV_NS, "doi");
@@ -569,11 +605,11 @@ mod tests {
 
     #[test]
     fn test_client_constructors() {
-        let default = ArxivClient::new();
+        let default = ArxivClient::new().unwrap();
         assert_eq!(default.rate_limit_delay, Duration::from_secs(3));
         assert_eq!(default.max_retries, 3);
 
-        let sync = ArxivClient::for_sync();
+        let sync = ArxivClient::for_sync().unwrap();
         assert_eq!(sync.rate_limit_delay, Duration::from_millis(500));
     }
 
@@ -597,5 +633,17 @@ mod tests {
         let papers = parse_atom_response(xml).unwrap();
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].arxiv_id, "hep-th/9901001");
+    }
+
+    #[test]
+    fn test_arxiv_error_variants() {
+        let err = ArxivError::InvalidId("bad-id".to_string());
+        assert!(err.to_string().contains("bad-id"));
+
+        let err = ArxivError::HttpStatus { status: 503, url: "http://test".to_string() };
+        assert!(err.to_string().contains("503"));
+
+        let err = ArxivError::XmlParse("bad xml".to_string());
+        assert!(err.to_string().contains("bad xml"));
     }
 }

@@ -188,7 +188,7 @@ fn main() -> anyhow::Result<()> {
             .init();
 
         let rt = tokio::runtime::Runtime::new()?;
-        return rt.block_on(commands::ingest::run(
+        let result = rt.block_on(commands::ingest::run(
             &config,
             inputs.into_iter().map(PathBuf::from).collect(),
             batch,
@@ -200,6 +200,16 @@ fn main() -> anyhow::Result<()> {
             id.as_deref(),
             resume,
         ));
+        return match result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // IngestFailure means partial success — JSON was already printed.
+                if e.downcast_ref::<commands::ingest::IngestFailure>().is_some() {
+                    process::exit(1);
+                }
+                Err(e)
+            }
+        };
     }
 
     // ── Python passthrough (strangler-fig) ───────────────────────────────

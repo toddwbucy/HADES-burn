@@ -1,8 +1,36 @@
-//! ArXiv domain types — paper metadata and download results.
+//! ArXiv domain types — paper metadata, download results, and error type.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Typed error for arXiv client operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ArxivError {
+    /// HTTP request or response error.
+    #[error("HTTP request failed: {0}")]
+    Request(#[from] reqwest::Error),
+
+    /// XML parsing failure.
+    #[error("XML parse error: {0}")]
+    XmlParse(String),
+
+    /// Invalid arXiv ID format.
+    #[error("invalid arXiv ID: {0}")]
+    InvalidId(String),
+
+    /// HTTP error status (non-2xx) after retries exhausted.
+    #[error("HTTP {status} for {url}")]
+    HttpStatus { status: u16, url: String },
+
+    /// IO error (file creation, directory creation, streaming).
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// TLS/backend initialization failure when building the HTTP client.
+    #[error("failed to build HTTP client: {0}")]
+    ClientBuild(reqwest::Error),
+}
 
 /// Metadata for a single arXiv paper, parsed from the Atom XML API response.
 #[derive(Debug, Clone, Serialize, Deserialize)]

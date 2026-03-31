@@ -30,6 +30,7 @@ reqwest.workspace = true
 roxmltree.workspace = true
 chrono.workspace = true
 urlencoding.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

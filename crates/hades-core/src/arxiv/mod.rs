@@ -8,7 +8,7 @@ mod client;
 mod types;
 
 pub use client::ArxivClient;
-pub use types::{ArxivPaper, DownloadResult};
+pub use types::{ArxivError, ArxivPaper, DownloadResult};
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -62,6 +62,11 @@ pub fn extract_year_month(id: &str) -> Option<(&str, &str)> {
     } else {
         id
     };
+    // Only new-format IDs (YYMM.NNNNN) have a meaningful year-month prefix.
+    // Validate the shape before slicing to avoid false positives on arbitrary input.
+    if !NEW_ARXIV_RE.is_match(id) {
+        return None;
+    }
     let dot = normalized.find('.')?;
     if dot == 4 {
         Some((&normalized[..2], &normalized[2..4]))

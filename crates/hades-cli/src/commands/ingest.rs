@@ -32,6 +32,9 @@ const CODE_EXTENSIONS: &[&str] = &[
     "go", "java", "rb", "swift", "kt",
 ];
 
+/// Keys that user-provided metadata cannot override.
+const PROTECTED_KEYS: &[&str] = &["_key", "status", "source", "arxiv_id"];
+
 /// Classify a single input as either an arXiv ID or a file path.
 enum InputKind {
     Arxiv(String),
@@ -59,6 +62,16 @@ struct ItemResult {
     error: Option<String>,
     /// Processing duration in milliseconds.
     duration_ms: u64,
+}
+
+/// Ingest command failed with partial results.
+///
+/// Returned instead of calling `process::exit` so callers control the exit code.
+#[derive(Debug, thiserror::Error)]
+#[error("{failed} of {total} documents failed to ingest")]
+pub struct IngestFailure {
+    pub total: usize,
+    pub failed: usize,
 }
 
 /// Run the ingest command.
@@ -155,7 +168,7 @@ pub async fn run(
 
     // -- ArXiv client (only created if we have arXiv inputs) -------------------
     let arxiv_client = if classified.iter().any(|k| matches!(k, InputKind::Arxiv(_))) {
-        Some(ArxivClient::new())
+        Some(ArxivClient::new().context("failed to create ArXiv client")?)
     } else {
         None
     };
@@ -272,7 +285,7 @@ pub async fn run(
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     if failed > 0 {
-        std::process::exit(1);
+        return Err(IngestFailure { total, failed }.into());
     }
     Ok(())
 }
@@ -361,14 +374,8 @@ async fn ingest_arxiv_paper(
         if let Some(jr) = &paper.journal_ref {
             arxiv_meta["journal_ref"] = json!(jr);
         }
-        // Merge user-provided extra metadata.
-        if let Some(extra) = extra_metadata
-            && let Some(obj) = extra.as_object()
-        {
-            for (k, v) in obj {
-                arxiv_meta[k] = v.clone();
-            }
-        }
+        // Merge user-provided extra metadata, skipping protected keys.
+        merge_extra_metadata(&mut arxiv_meta, extra_metadata);
         // Identity fields are sacrosanct — reassert after merge.
         arxiv_meta["_key"] = json!(doc_key);
 
@@ -460,14 +467,8 @@ async fn ingest_file(
             }
         }
 
-        // Merge user-provided extra metadata.
-        if let Some(extra) = extra_metadata
-            && let Some(obj) = extra.as_object()
-        {
-            for (k, v) in obj {
-                file_meta[k] = v.clone();
-            }
-        }
+        // Merge user-provided extra metadata, skipping protected keys.
+        merge_extra_metadata(&mut file_meta, extra_metadata);
         file_meta["_key"] = json!(doc_key);
 
         if let Err(e) =
@@ -495,6 +496,21 @@ async fn ingest_file(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// Merge user-provided extra metadata into a document, skipping protected keys.
+fn merge_extra_metadata(doc: &mut Value, extra: Option<&Value>) {
+    if let Some(extra) = extra
+        && let Some(obj) = extra.as_object()
+    {
+        for (k, v) in obj {
+            if PROTECTED_KEYS.contains(&k.as_str()) {
+                warn!(key = k, "ignoring protected key in user metadata");
+                continue;
+            }
+            doc[k] = v.clone();
+        }
+    }
+}
+
 /// Check if a document key already exists in a collection.
 async fn document_exists(
     db: &ArangoPool,
@@ -503,15 +519,8 @@ async fn document_exists(
 ) -> Result<bool> {
     match hades_core::db::crud::get_document(db, collection, doc_key).await {
         Ok(_) => Ok(true),
-        Err(e) => {
-            // ArangoDB returns 404 for missing documents.
-            let msg = e.to_string();
-            if msg.contains("404") || msg.contains("not found") {
-                Ok(false)
-            } else {
-                Err(e.into())
-            }
-        }
+        Err(e) if e.is_not_found() => Ok(false),
+        Err(e) => Err(e.into()),
     }
 }
 

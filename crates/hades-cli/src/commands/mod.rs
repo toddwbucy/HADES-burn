@@ -4,6 +4,7 @@
 //! corresponding Python Typer command group in HADES.
 
 pub mod arxiv;
+pub mod arxiv_sync;
 pub mod codebase;
 pub mod db;
 pub mod embed;

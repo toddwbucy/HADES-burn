@@ -138,6 +138,9 @@ pub async fn run(
     // Auto-activate batch mode for large input sets.
     let batch_mode = batch || resume || classified.len() > 5;
 
+    // Guard: refuse to write to production databases.
+    config.require_writable_database()?;
+
     // -- Connect to services ---------------------------------------------------
     let db = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;

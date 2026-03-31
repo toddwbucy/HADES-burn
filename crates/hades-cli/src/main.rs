@@ -154,6 +154,17 @@ enum Commands {
     GraphEmbed(GraphEmbedCmd),
 }
 
+/// Initialize tracing (structured logging to stderr).
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 fn main() -> anyhow::Result<()> {
     // Capture raw args before clap consumes them — used for pass-through dispatch.
     let raw_args: Vec<String> = std::env::args().collect();
@@ -163,61 +174,69 @@ fn main() -> anyhow::Result<()> {
     let mut config = config::load_config()?;
     config.apply_cli_overrides(cli.database.as_deref(), cli.gpu);
 
+    // Save global opts before cli.command is consumed by the match.
+    let database = cli.database;
+    let gpu = cli.gpu;
+
     // ── Native command dispatch ──────────────────────────────────────────
     // Commands with native Rust implementations are handled here.
     // All other commands fall through to the Python CLI dispatch below.
-    if let Commands::Ingest {
-        inputs,
-        id,
-        batch,
-        resume,
-        metadata,
-        task,
-        claims,
-        collection,
-        force,
-    } = cli.command
-    {
-        // Initialize tracing for native commands.
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "info".into()),
-            )
-            .with_writer(std::io::stderr)
-            .init();
-
-        let rt = tokio::runtime::Runtime::new()?;
-        let result = rt.block_on(commands::ingest::run(
-            &config,
-            inputs.into_iter().map(PathBuf::from).collect(),
-            batch,
-            metadata.as_deref(),
-            &claims,
-            collection.as_deref(),
-            force,
-            task.as_deref(),
-            id.as_deref(),
-            resume,
-        ));
-        return match result {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                // IngestFailure means partial success — JSON was already printed.
-                if e.downcast_ref::<commands::ingest::IngestFailure>().is_some() {
-                    process::exit(1);
+    match cli.command {
+        Commands::Ingest {
+            inputs, id, batch, resume, metadata, task, claims, collection, force,
+        } => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(commands::ingest::run(
+                &config,
+                inputs.into_iter().map(PathBuf::from).collect(),
+                batch,
+                metadata.as_deref(),
+                &claims,
+                collection.as_deref(),
+                force,
+                task.as_deref(),
+                id.as_deref(),
+                resume,
+            ));
+            return match result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if e.downcast_ref::<commands::ingest::IngestFailure>().is_some() {
+                        process::exit(1);
+                    }
+                    Err(e)
                 }
-                Err(e)
-            }
-        };
+            };
+        }
+        Commands::Arxiv(ArxivCmd::Sync {
+            from_date, categories, max_results, batch_size, incremental,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::arxiv_sync::run(
+                &config,
+                from_date.as_deref(),
+                categories.as_deref(),
+                max_results,
+                batch_size,
+                incremental,
+            ));
+        }
+        Commands::Arxiv(ArxivCmd::SyncStatus { limit }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::arxiv_sync::status(&config, limit));
+        }
+        _ => {} // Fall through to Python passthrough.
     }
 
     // ── Python passthrough (strangler-fig) ───────────────────────────────
     // Commands not yet ported to Rust dispatch to the Python `hades` CLI.
     let passthrough = strip_global_opts(&raw_args[1..]);
     let status = dispatch::dispatch_with_globals(
-        cli.database.as_deref(),
-        cli.gpu,
+        database.as_deref(),
+        gpu,
         &passthrough.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     )?;
 

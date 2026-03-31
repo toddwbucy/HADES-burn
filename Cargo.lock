@@ -455,6 +455,7 @@ dependencies = [
  "anyhow",
  "base64",
  "futures",
+ "hades-proto",
  "http",
  "http-body-util",
  "hyper",
@@ -468,6 +469,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tonic",
+ "tower",
  "tracing",
 ]
 

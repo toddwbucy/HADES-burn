@@ -74,6 +74,24 @@ pub fn file_key(rel_path: &str) -> String {
     rel_path.replace(['.', '/'], "_")
 }
 
+/// Build a symbol key from a file key and qualified symbol name.
+///
+/// Replaces unsafe characters (`:`, `<`, `>`, ` `) with `_` and
+/// joins with `__` to match the Python HADES key format.
+///
+/// # Examples
+/// ```
+/// # use hades_core::db::keys::{file_key, symbol_key};
+/// assert_eq!(
+///     symbol_key("src_lib_rs", "Config::new"),
+///     "src_lib_rs__Config__new"
+/// );
+/// ```
+pub fn symbol_key(file_key: &str, qualified_name: &str) -> String {
+    let safe_name = qualified_name.replace("::", "__").replace(['<', '>', ' ', ','], "_");
+    format!("{file_key}__{safe_name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +138,22 @@ mod tests {
         assert_eq!(
             file_key("core/persephone/models.py"),
             "core_persephone_models_py"
+        );
+    }
+
+    #[test]
+    fn test_symbol_key() {
+        assert_eq!(
+            symbol_key("src_lib_rs", "Config::new"),
+            "src_lib_rs__Config__new"
+        );
+        assert_eq!(
+            symbol_key("src_lib_rs", "Display for Config"),
+            "src_lib_rs__Display_for_Config"
+        );
+        assert_eq!(
+            symbol_key("src_lib_rs", "Vec<String>"),
+            "src_lib_rs__Vec_String_"
         );
     }
 }

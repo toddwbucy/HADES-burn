@@ -10,6 +10,7 @@ use crate::chunking::{ChunkingStrategy, TextChunk};
 use crate::db::collections::CollectionProfile;
 use crate::db::crud;
 use crate::db::keys;
+use crate::db::query::{self, ExecutionTarget};
 use crate::db::ArangoPool;
 use crate::persephone::embedding::{EmbedResult, EmbeddingClient, EmbeddingError};
 use crate::persephone::extraction::{
@@ -191,27 +192,31 @@ impl Pipeline {
 
         // -- Phase 1: Extract all documents --------------------------------
         info!(count = documents.len(), "phase 1: extracting documents");
-        let mut extractions: Vec<Option<(String, ExtractResult)>> =
+        // (doc_key, extract_result, extraction_duration_ms)
+        let mut extractions: Vec<Option<(String, ExtractResult, u64)>> =
             Vec::with_capacity(documents.len());
 
         for &(path, doc_id) in documents {
             let doc_key = keys::normalize_document_key(doc_id);
+            let extract_start = Instant::now();
             match self
                 .extractor
                 .extract_file(path, self.config.extract_options.clone())
                 .await
             {
                 Ok(result) => {
-                    debug!(doc_key, text_len = result.full_text.len(), "extracted");
-                    extractions.push(Some((doc_key, result)));
+                    let extraction_ms = extract_start.elapsed().as_millis() as u64;
+                    debug!(doc_key, text_len = result.full_text.len(), extraction_ms, "extracted");
+                    extractions.push(Some((doc_key, result, extraction_ms)));
                 }
                 Err(e) => {
+                    let extraction_ms = extract_start.elapsed().as_millis() as u64;
                     error!(doc_key, error = %e, "extraction failed");
                     results.push(DocumentResult {
                         doc_key,
                         success: false,
                         chunk_count: 0,
-                        duration_ms: 0,
+                        duration_ms: extraction_ms,
                         error: Some(format!("extraction: {e}")),
                     });
                     extractions.push(None);
@@ -222,17 +227,17 @@ impl Pipeline {
         // -- Phase 2: Chunk + Embed + Store --------------------------------
         info!("phase 2: chunking, embedding, and storing");
         for extraction in extractions {
-            let Some((doc_key, extract_result)) = extraction else {
+            let Some((doc_key, extract_result, extraction_ms)) = extraction else {
                 continue; // already recorded as failed
             };
 
-            let start = Instant::now();
+            let phase2_start = Instant::now();
             match self
                 .chunk_embed_store(&doc_key, &extract_result, chunker)
                 .await
             {
                 Ok(chunk_count) => {
-                    let duration = start.elapsed().as_millis() as u64;
+                    let duration = extraction_ms + phase2_start.elapsed().as_millis() as u64;
                     info!(doc_key, chunk_count, duration_ms = duration, "stored");
                     results.push(DocumentResult {
                         doc_key,
@@ -243,7 +248,7 @@ impl Pipeline {
                     });
                 }
                 Err(e) => {
-                    let duration = start.elapsed().as_millis() as u64;
+                    let duration = extraction_ms + phase2_start.elapsed().as_millis() as u64;
                     error!(doc_key, error = %e, "chunk/embed/store failed");
                     results.push(DocumentResult {
                         doc_key,
@@ -336,6 +341,12 @@ impl Pipeline {
     ) -> Result<(), PipelineError> {
         let profile = self.config.profile;
 
+        // -- Delete stale chunks/embeddings for this doc_key -----------------
+        // When overwriting, a rerun with fewer chunks would leave orphans.
+        if self.config.overwrite {
+            self.delete_doc_chunks(profile, doc_key).await?;
+        }
+
         // -- Metadata document ---------------------------------------------
         let metadata_doc = json!({
             "_key": doc_key,
@@ -349,13 +360,19 @@ impl Pipeline {
             "extractor_metadata": extract_result.metadata,
         });
 
-        crud::insert_documents(
+        let meta_res = crud::insert_documents(
             &self.db,
             profile.metadata,
             &[metadata_doc],
             self.config.overwrite,
         )
         .await?;
+        if meta_res.errors > 0 {
+            return Err(PipelineError::Other(format!(
+                "metadata import had {} errors",
+                meta_res.errors
+            )));
+        }
 
         // -- Chunk documents -----------------------------------------------
         let chunk_docs: Vec<Value> = chunks
@@ -374,13 +391,19 @@ impl Pipeline {
             })
             .collect();
 
-        crud::insert_documents(
+        let chunk_res = crud::insert_documents(
             &self.db,
             profile.chunks,
             &chunk_docs,
             self.config.overwrite,
         )
         .await?;
+        if chunk_res.errors > 0 {
+            return Err(PipelineError::Other(format!(
+                "chunk import had {} errors (created {})",
+                chunk_res.errors, chunk_res.created
+            )));
+        }
 
         // -- Embedding documents -------------------------------------------
         let embedding_docs: Vec<Value> = embed_result
@@ -398,19 +421,65 @@ impl Pipeline {
             })
             .collect();
 
-        crud::insert_documents(
+        let emb_res = crud::insert_documents(
             &self.db,
             profile.embeddings,
             &embedding_docs,
             self.config.overwrite,
         )
         .await?;
+        if emb_res.errors > 0 {
+            return Err(PipelineError::Other(format!(
+                "embedding import had {} errors (created {})",
+                emb_res.errors, emb_res.created
+            )));
+        }
 
         debug!(
             doc_key,
             chunks = chunks.len(),
             "stored metadata, chunks, and embeddings"
         );
+        Ok(())
+    }
+
+    /// Delete existing chunk and embedding documents for a doc_key.
+    ///
+    /// Prevents stale rows when a rerun produces fewer chunks than before.
+    async fn delete_doc_chunks(
+        &self,
+        profile: &CollectionProfile,
+        doc_key: &str,
+    ) -> Result<(), PipelineError> {
+        let bind_vars = json!({
+            "doc_key": doc_key,
+            "@chunks": profile.chunks,
+            "@embeddings": profile.embeddings,
+        });
+
+        // Delete chunks by doc_key
+        query::query(
+            &self.db,
+            "FOR c IN @@chunks FILTER c.doc_key == @doc_key REMOVE c IN @@chunks",
+            Some(&bind_vars),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await?;
+
+        // Delete embeddings by doc_key
+        query::query(
+            &self.db,
+            "FOR e IN @@embeddings FILTER e.doc_key == @doc_key REMOVE e IN @@embeddings",
+            Some(&bind_vars),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await?;
+
+        debug!(doc_key, "deleted stale chunks and embeddings");
         Ok(())
     }
 }

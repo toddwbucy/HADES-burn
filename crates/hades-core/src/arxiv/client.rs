@@ -8,6 +8,7 @@ use regex::Regex;
 use reqwest::Client;
 use std::path::Path;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -27,6 +28,9 @@ const PDF_BASE: &str = "https://arxiv.org/pdf";
 static WS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\s+").expect("invalid regex")
 });
+
+/// Monotonic counter for generating unique temp file names across concurrent downloads.
+static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Typed client for the arXiv REST API.
 ///
@@ -64,11 +68,11 @@ impl ArxivClient {
         max_retries: u32,
         timeout_secs: u64,
     ) -> Result<Self, ArxivError> {
-        if !rate_limit_secs.is_finite() || rate_limit_secs < 0.0 {
-            return Err(ArxivError::InvalidConfig(format!(
+        let rate_limit_delay = Duration::try_from_secs_f64(rate_limit_secs).map_err(|_| {
+            ArxivError::InvalidConfig(format!(
                 "rate_limit_secs must be finite and non-negative, got {rate_limit_secs}"
-            )));
-        }
+            ))
+        })?;
 
         let http = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
@@ -78,7 +82,7 @@ impl ArxivClient {
 
         Ok(Self {
             http,
-            rate_limit_delay: Duration::from_secs_f64(rate_limit_secs),
+            rate_limit_delay,
             max_retries,
             last_request: Mutex::new(None),
         })
@@ -329,11 +333,11 @@ impl ArxivClient {
     /// interrupted or content-length doesn't match, the temp file is removed
     /// and no partial file is left at `dest`.
     async fn download_file(&self, url: &str, dest: &Path) -> Result<u64, ArxivError> {
-        let pid = std::process::id();
+        let run_id = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         for attempt in 0..=self.max_retries {
-            // Unique temp path per attempt to prevent races with concurrent downloads.
-            let tmp_path = dest.with_extension(format!("part.{pid}.{attempt}"));
+            // Unique temp path per invocation+attempt to prevent races with concurrent downloads.
+            let tmp_path = dest.with_extension(format!("part.{run_id}.{attempt}"));
             match self.download_file_once(url, dest, &tmp_path).await {
                 Ok(written) => return Ok(written),
                 Err(e) => {

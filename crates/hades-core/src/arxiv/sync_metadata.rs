@@ -84,6 +84,11 @@ pub async fn get_sync_status(pool: &ArangoPool) -> Result<Option<SyncWatermark>,
 /// Update the sync watermark after a successful sync run.
 ///
 /// Creates the `sync_metadata` collection and document if they don't exist.
+///
+/// The `updated` parameter is recorded in [`SyncHistoryEntry`] but does not
+/// affect `total_synced` (which only counts new additions). It is reserved
+/// for future use when the sync pipeline supports updating existing papers.
+/// Callers should pass `0` until that feature is implemented.
 pub async fn update_sync_watermark(
     pool: &ArangoPool,
     added: u64,

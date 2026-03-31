@@ -9,13 +9,29 @@ use chrono::{Datelike, NaiveDate, Utc};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use crate::arxiv::{extract_year_month, ArxivClient, ArxivPaper};
+use crate::arxiv::{extract_year_month, ArxivClient, ArxivError, ArxivPaper};
 use crate::db::collections::CollectionProfile;
 use crate::db::crud;
 use crate::db::keys::normalize_document_key;
-use crate::db::ArangoPool;
+use crate::db::{ArangoError, ArangoPool};
 use crate::db::query::{self, ExecutionTarget};
-use crate::persephone::embedding::EmbeddingClient;
+use crate::persephone::embedding::{EmbeddingClient, EmbeddingError};
+
+/// Typed error for sync operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    /// ArXiv API error (fetch, search).
+    #[error("arXiv API error: {0}")]
+    Arxiv(#[from] ArxivError),
+
+    /// ArangoDB error (deduplication query, insert).
+    #[error("database error: {0}")]
+    Db(#[from] ArangoError),
+
+    /// Embedding service error.
+    #[error("embedding error: {0}")]
+    Embedding(#[from] EmbeddingError),
+}
 
 /// Maximum results per month query to avoid arXiv pagination ceiling.
 const MAX_PER_MONTH: u32 = 5000;
@@ -55,7 +71,7 @@ pub async fn run_sync(
     client: &ArxivClient,
     embed_client: &EmbeddingClient,
     config: &SyncConfig,
-) -> anyhow::Result<SyncResult> {
+) -> Result<SyncResult, SyncError> {
     let profile = CollectionProfile::get("sync")
         .expect("sync profile must exist");
 
@@ -210,9 +226,9 @@ fn end_of_month(date: NaiveDate) -> NaiveDate {
         (date.year(), date.month() + 1)
     };
     NaiveDate::from_ymd_opt(y, m, 1)
-        .unwrap()
+        .expect("from_ymd_opt produced None for first-of-next-month in end_of_month")
         .pred_opt()
-        .unwrap()
+        .expect("pred_opt produced None when computing last day of month in end_of_month")
 }
 
 // ── Phase 2: Deduplication ──────────────────────────────────────────────
@@ -222,7 +238,7 @@ async fn filter_existing<'a>(
     pool: &ArangoPool,
     profile: &CollectionProfile,
     papers: &'a [ArxivPaper],
-) -> anyhow::Result<Vec<&'a ArxivPaper>> {
+) -> Result<Vec<&'a ArxivPaper>, SyncError> {
     let ids: Vec<String> = papers.iter().map(|p| p.arxiv_id.clone()).collect();
 
     // Query existing IDs in batches of 500 to avoid huge bind vars.
@@ -268,7 +284,7 @@ async fn embed_and_store(
     profile: &CollectionProfile,
     papers: &[&ArxivPaper],
     batch_size: u32,
-) -> anyhow::Result<(usize, usize)> {
+) -> Result<(usize, usize), SyncError> {
     let mut total_stored = 0usize;
     let mut total_errors = 0usize;
 
@@ -371,7 +387,7 @@ async fn insert_batch(
     meta_docs: &[Value],
     chunk_docs: &[Value],
     embed_docs: &[Value],
-) -> anyhow::Result<usize> {
+) -> Result<usize, SyncError> {
     let meta_result = crud::insert_documents(pool, profile.metadata, meta_docs, false).await?;
     let _chunk_result = crud::insert_documents(pool, profile.chunks, chunk_docs, false).await?;
     let _embed_result = crud::insert_documents(pool, profile.embeddings, embed_docs, false).await?;
@@ -382,7 +398,12 @@ async fn insert_batch(
 /// Extract year, month, and year_month string from an arXiv paper.
 ///
 /// For new-format IDs (YYMM.NNNNN), parses from the ID directly.
-/// Falls back to the published date for old-format IDs.
+/// Falls back to `paper.published` for old-format IDs.
+///
+/// **Century assumption**: Two-digit years from `arxiv_id` are mapped to
+/// 2000–2099 (e.g. "25" → 2025). This matches arXiv's new-format ID
+/// scheme introduced in 2007. If arXiv IDs persist past 2099, the
+/// `2000 + yy` offset here will need a century pivot rule.
 fn extract_year_month_full(arxiv_id: &str, paper: &ArxivPaper) -> (i32, u32, String) {
     if let Some((y_str, m_str)) = extract_year_month(arxiv_id) {
         let year = 2000 + y_str.parse::<i32>().unwrap_or(0);

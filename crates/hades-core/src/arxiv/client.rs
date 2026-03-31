@@ -190,82 +190,77 @@ impl ArxivClient {
             .map(|(y, m)| format!("{y}{m}"))
             .unwrap_or_else(|| "other".to_string());
 
-        // Download PDF.
+        // -- PDF ---------------------------------------------------------------
         let pdf_subdir = pdf_dir.join(&subdir);
         let pdf_path = pdf_subdir.join(format!("{}.pdf", normalized.replace('/', "_")));
 
+        let file_size_bytes;
         if pdf_path.exists() && !force {
             info!(path = %pdf_path.display(), "PDF already exists, skipping (use force to re-download)");
-            let file_size = tokio::fs::metadata(&pdf_path)
+            file_size_bytes = tokio::fs::metadata(&pdf_path)
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
-            return DownloadResult {
-                success: true,
-                arxiv_id: normalized,
-                pdf_path: Some(pdf_path),
-                latex_path: None,
-                metadata: Some(metadata),
-                error_message: None,
-                file_size_bytes: file_size,
-            };
-        }
-
-        if let Err(e) = tokio::fs::create_dir_all(&pdf_subdir).await {
-            return DownloadResult::failed(
-                &normalized,
-                format!("failed to create directory {}: {e}", pdf_subdir.display()),
-            );
-        }
-
-        let pdf_url = format!("{PDF_BASE}/{normalized}.pdf");
-        match self.download_file(&pdf_url, &pdf_path).await {
-            Ok(size) => {
-                info!(path = %pdf_path.display(), bytes = size, "PDF downloaded");
-
-                // Optionally download LaTeX.
-                let latex_path = if let Some(ldir) = latex_dir {
-                    let latex_subdir = ldir.join(&subdir);
-                    let lpath = latex_subdir.join(format!(
-                        "{}.tar.gz",
-                        normalized.replace('/', "_")
-                    ));
-                    if lpath.exists() && !force {
-                        Some(lpath)
-                    } else {
-                        if let Err(e) = tokio::fs::create_dir_all(&latex_subdir).await {
-                            warn!(
-                                error = %e,
-                                dir = %latex_subdir.display(),
-                                "failed to create LaTeX directory, skipping LaTeX download"
-                            );
-                            None
-                        } else {
-                            let eprint_url = metadata.eprint_url();
-                            match self.download_file(&eprint_url, &lpath).await {
-                                Ok(_) => Some(lpath),
-                                Err(e) => {
-                                    debug!(error = %e, "LaTeX source not available (this is normal)");
-                                    None
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                DownloadResult {
-                    success: true,
-                    arxiv_id: normalized,
-                    pdf_path: Some(pdf_path),
-                    latex_path,
-                    metadata: Some(metadata),
-                    error_message: None,
-                    file_size_bytes: size,
+        } else {
+            if let Err(e) = tokio::fs::create_dir_all(&pdf_subdir).await {
+                return DownloadResult::failed(
+                    &normalized,
+                    format!("failed to create directory {}: {e}", pdf_subdir.display()),
+                );
+            }
+            let pdf_url = format!("{PDF_BASE}/{normalized}.pdf");
+            match self.download_file(&pdf_url, &pdf_path).await {
+                Ok(size) => {
+                    info!(path = %pdf_path.display(), bytes = size, "PDF downloaded");
+                    file_size_bytes = size;
+                }
+                Err(e) => {
+                    return DownloadResult::failed(
+                        &normalized,
+                        format!("PDF download failed: {e}"),
+                    );
                 }
             }
-            Err(e) => DownloadResult::failed(&normalized, format!("PDF download failed: {e}")),
+        }
+
+        // -- LaTeX (optional) --------------------------------------------------
+        let latex_path = if let Some(ldir) = latex_dir {
+            let latex_subdir = ldir.join(&subdir);
+            let lpath = latex_subdir.join(format!(
+                "{}.tar.gz",
+                normalized.replace('/', "_")
+            ));
+            if lpath.exists() && !force {
+                Some(lpath)
+            } else if let Err(e) = tokio::fs::create_dir_all(&latex_subdir).await {
+                warn!(
+                    error = %e,
+                    dir = %latex_subdir.display(),
+                    "failed to create LaTeX directory, skipping LaTeX download"
+                );
+                None
+            } else {
+                let eprint_url = metadata.eprint_url();
+                match self.download_file(&eprint_url, &lpath).await {
+                    Ok(_) => Some(lpath),
+                    Err(e) => {
+                        debug!(error = %e, "LaTeX source not available (this is normal)");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        DownloadResult {
+            success: true,
+            arxiv_id: normalized,
+            pdf_path: Some(pdf_path),
+            latex_path,
+            metadata: Some(metadata),
+            error_message: None,
+            file_size_bytes,
         }
     }
 
@@ -316,7 +311,10 @@ impl ArxivClient {
         unreachable!()
     }
 
-    /// Download a file by streaming the response directly to disk.
+    /// Download a file by streaming to a temp file, then atomically renaming on success.
+    ///
+    /// If the download is interrupted or content-length doesn't match, the temp
+    /// file is removed and no partial file is left at `dest`.
     async fn download_file(&self, url: &str, dest: &Path) -> Result<u64, ArxivError> {
         use futures::TryStreamExt;
         use tokio::io::AsyncWriteExt;
@@ -335,38 +333,69 @@ impl ArxivClient {
 
         let expected_len = resp.content_length();
 
-        // Stream the response body directly to a file.
+        // Write to a temp file first, rename atomically on success.
+        let tmp_path = dest.with_extension("part");
+
         let stream = resp
             .bytes_stream()
             .map_err(std::io::Error::other);
         let mut reader = StreamReader::new(stream);
 
-        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
+        let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
             ArxivError::Io(std::io::Error::new(
                 e.kind(),
-                format!("failed to create {}: {e}", dest.display()),
+                format!("failed to create {}: {e}", tmp_path.display()),
             ))
         })?;
 
-        let written = tokio::io::copy(&mut reader, &mut file).await.map_err(|e| {
-            ArxivError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to write {}: {e}", dest.display()),
-            ))
-        })?;
-        file.flush().await?;
+        let result = async {
+            let written = tokio::io::copy(&mut reader, &mut file).await.map_err(|e| {
+                ArxivError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to write {}: {e}", tmp_path.display()),
+                ))
+            })?;
+            file.flush().await?;
+            file.sync_all().await?;
 
-        if let Some(expected) = expected_len
-            && written != expected
-        {
-            warn!(
-                expected = expected,
-                actual = written,
-                "content-length mismatch"
-            );
+            // Fail if content-length was advertised and doesn't match.
+            if let Some(expected) = expected_len
+                && written != expected
+            {
+                return Err(ArxivError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "content-length mismatch for {}: expected {expected}, got {written}",
+                        dest.display()
+                    ),
+                )));
+            }
+
+            Ok(written)
         }
+        .await;
 
-        Ok(written)
+        match result {
+            Ok(written) => {
+                // Atomic rename into place.
+                tokio::fs::rename(&tmp_path, dest).await.map_err(|e| {
+                    ArxivError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "failed to rename {} -> {}: {e}",
+                            tmp_path.display(),
+                            dest.display()
+                        ),
+                    ))
+                })?;
+                Ok(written)
+            }
+            Err(e) => {
+                // Clean up partial temp file.
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                Err(e)
+            }
+        }
     }
 }
 

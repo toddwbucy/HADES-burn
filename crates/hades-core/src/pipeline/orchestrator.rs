@@ -93,7 +93,8 @@ pub struct PipelineSummary {
 }
 
 impl PipelineSummary {
-    fn from_results(results: Vec<DocumentResult>, total_duration_ms: u64) -> Self {
+    /// Build a summary from a list of document results.
+    pub fn from_results(results: Vec<DocumentResult>, total_duration_ms: u64) -> Self {
         let total = results.len();
         let succeeded = results.iter().filter(|r| r.success).count();
         Self {
@@ -310,6 +311,14 @@ impl Pipeline {
             .embed(&texts, &self.config.embed_task, self.config.embed_batch_size)
             .await?;
 
+        if embed_result.embeddings.len() != chunks.len() {
+            return Err(PipelineError::Other(format!(
+                "embedding count mismatch: expected {} (chunks), got {} (embeddings)",
+                chunks.len(),
+                embed_result.embeddings.len()
+            )));
+        }
+
         // 4. Store
         self.store(doc_key, extract_result, &chunks, &embed_result)
             .await?;
@@ -337,6 +346,7 @@ impl Pipeline {
             "chunk_count": chunks.len(),
             "embedding_model": embed_result.model,
             "embedding_dimension": embed_result.dimension,
+            "extractor_metadata": extract_result.metadata,
         });
 
         crud::insert_documents(

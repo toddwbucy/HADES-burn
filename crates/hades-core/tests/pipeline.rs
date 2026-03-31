@@ -67,18 +67,13 @@ fn test_pipeline_summary_counts() {
         },
     ];
 
-    let summary = PipelineSummary {
-        total: 3,
-        succeeded: 2,
-        failed: 1,
-        results,
-        total_duration_ms: 1000,
-    };
+    let summary = PipelineSummary::from_results(results, 1000);
 
     assert_eq!(summary.total, 3);
     assert_eq!(summary.succeeded, 2);
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.results.len(), 3);
+    assert_eq!(summary.total_duration_ms, 1000);
 }
 
 #[test]

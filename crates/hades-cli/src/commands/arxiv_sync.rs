@@ -20,6 +20,9 @@ pub async fn run(
     batch_size: u32,
     incremental: bool,
 ) -> Result<()> {
+    // Guard: refuse to write to production databases.
+    config.require_writable_database()?;
+
     let pool = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;
 
@@ -63,25 +66,40 @@ pub async fn run(
     .await?;
 
     // Update watermark.
-    if let Err(e) = hades_core::arxiv::sync_metadata::update_sync_watermark(
+    let watermark_error = match hades_core::arxiv::sync_metadata::update_sync_watermark(
         &pool,
         result.stored as u64,
         0,
     )
     .await
     {
-        warn!(error = %e, "failed to update sync watermark");
-    }
+        Ok(()) => None,
+        Err(e) => {
+            warn!(error = %e, "failed to update sync watermark");
+            Some(e.to_string())
+        }
+    };
 
     // Print JSON summary to stdout.
-    let summary = json!({
-        "status": "complete",
+    let status = if watermark_error.is_some() {
+        "partial"
+    } else if result.errors > 0 {
+        "complete_with_errors"
+    } else {
+        "complete"
+    };
+
+    let mut summary = json!({
+        "status": status,
         "fetched": result.fetched,
         "duplicates": result.duplicates,
         "stored": result.stored,
         "errors": result.errors,
         "start_date": start_date.to_string(),
     });
+    if let Some(wm_err) = &watermark_error {
+        summary["watermark_error"] = json!(wm_err);
+    }
     println!("{}", serde_json::to_string_pretty(&summary)?);
 
     if result.errors > 0 {

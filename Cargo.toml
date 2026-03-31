@@ -60,3 +60,9 @@ tonic = "0.13"
 prost = "0.13"
 prost-types = "0.13"
 tonic-build = "0.13"
+
+# Internal crates
+hades-proto = { path = "crates/hades-proto" }
+
+# Tower middleware
+tower = "0.5"

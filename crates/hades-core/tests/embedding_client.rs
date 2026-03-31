@@ -14,7 +14,7 @@ fn test_config_defaults() {
     let config = EmbeddingClientConfig::default();
     match &config.endpoint {
         EmbeddingEndpoint::Unix(path) => {
-            assert_eq!(path, &PathBuf::from("/run/hades/persephone-embedding.sock"));
+            assert_eq!(path, &PathBuf::from("/run/hades/embedder.sock"));
         }
         EmbeddingEndpoint::Tcp(_) => panic!("expected Unix endpoint by default"),
     }
@@ -49,8 +49,11 @@ fn test_endpoint_variants() {
 async fn test_connect_nonexistent_socket_fails() {
     use hades_core::persephone::embedding::EmbeddingClient;
 
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let socket_path = dir.path().join("nonexistent.sock");
+
     let config = EmbeddingClientConfig {
-        endpoint: EmbeddingEndpoint::Unix(PathBuf::from("/tmp/nonexistent_socket.sock")),
+        endpoint: EmbeddingEndpoint::Unix(socket_path),
         connect_timeout: std::time::Duration::from_millis(500),
         ..Default::default()
     };

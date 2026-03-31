@@ -43,7 +43,7 @@ impl Default for EmbeddingClientConfig {
     fn default() -> Self {
         Self {
             endpoint: EmbeddingEndpoint::Unix(
-                PathBuf::from("/run/hades/persephone-embedding.sock"),
+                PathBuf::from("/run/hades/embedder.sock"),
             ),
             timeout: DEFAULT_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
@@ -149,6 +149,18 @@ impl EmbeddingClient {
             )));
         }
 
+        let expected_dim = response.dimension as usize;
+        for (i, emb) in embeddings.iter().enumerate() {
+            if emb.len() != expected_dim {
+                return Err(EmbeddingError::InvalidResponse(format!(
+                    "embedding[{}] has dimension {}, expected {}",
+                    i,
+                    emb.len(),
+                    expected_dim
+                )));
+            }
+        }
+
         debug!(
             count = embeddings.len(),
             dimension = response.dimension,
@@ -199,11 +211,18 @@ impl EmbeddingClient {
     }
 
     /// Check if the service is reachable by calling Info.
+    ///
+    /// Uses a short timeout so a stalled service returns `false` quickly
+    /// rather than blocking for the full request timeout.
     pub async fn health_check(&self) -> bool {
-        match self.info().await {
-            Ok(_) => true,
-            Err(e) => {
+        match tokio::time::timeout(Duration::from_secs(5), self.info()).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(e)) => {
                 warn!(error = %e, "embedding service health check failed");
+                false
+            }
+            Err(_) => {
+                warn!("embedding service health check timed out");
                 false
             }
         }

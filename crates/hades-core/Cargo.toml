@@ -26,6 +26,10 @@ moka.workspace = true
 tonic.workspace = true
 hades-proto.workspace = true
 tower.workspace = true
+reqwest.workspace = true
+roxmltree.workspace = true
+chrono.workspace = true
+urlencoding.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

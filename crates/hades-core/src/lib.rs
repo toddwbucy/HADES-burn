@@ -1,3 +1,4 @@
+pub mod arxiv;
 pub mod chunking;
 pub mod config;
 pub mod db;

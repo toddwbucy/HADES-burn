@@ -8,5 +8,6 @@ pub mod codebase;
 pub mod db;
 pub mod embed;
 pub mod graph_embed;
+pub mod ingest;
 pub mod smell;
 pub mod task;

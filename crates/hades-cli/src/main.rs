@@ -75,27 +75,39 @@ enum Commands {
 
     /// Ingest documents into the knowledge base.
     Ingest {
-        /// Input file(s) or directory paths.
-        inputs: Vec<PathBuf>,
+        /// Input arXiv IDs or file paths (can mix both).
+        inputs: Vec<String>,
+
+        /// Custom document ID (single input only).
+        #[arg(long)]
+        id: Option<String>,
 
         /// Run in batch mode.
         #[arg(short = 'b', long)]
         batch: bool,
 
+        /// Resume a previously interrupted batch.
+        #[arg(short = 'r', long)]
+        resume: bool,
+
         /// Custom metadata as JSON.
         #[arg(short = 'm', long)]
         metadata: Option<String>,
+
+        /// Embedding task type (e.g. "code" for Jina Code LoRA).
+        #[arg(short = 't', long)]
+        task: Option<String>,
 
         /// Compliance claims (CS-NN format).
         #[arg(long)]
         claims: Vec<String>,
 
-        /// Collection profile.
+        /// Collection profile (arxiv, sync, default).
         #[arg(short = 'c', long)]
         collection: Option<String>,
 
-        /// Skip confirmation.
-        #[arg(short = 'y', long)]
+        /// Force re-processing of existing documents.
+        #[arg(short = 'f', long)]
         force: bool,
     },
 
@@ -151,9 +163,57 @@ fn main() -> anyhow::Result<()> {
     let mut config = config::load_config()?;
     config.apply_cli_overrides(cli.database.as_deref(), cli.gpu);
 
-    // During the strangler-fig phase, pass through the original arguments
-    // to the Python `hades` CLI.  We skip argv[0] (the binary name) and
-    // let dispatch_with_globals handle --db/--gpu separately.
+    // ── Native command dispatch ──────────────────────────────────────────
+    // Commands with native Rust implementations are handled here.
+    // All other commands fall through to the Python CLI dispatch below.
+    if let Commands::Ingest {
+        inputs,
+        id,
+        batch,
+        resume,
+        metadata,
+        task,
+        claims,
+        collection,
+        force,
+    } = cli.command
+    {
+        // Initialize tracing for native commands.
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        let result = rt.block_on(commands::ingest::run(
+            &config,
+            inputs.into_iter().map(PathBuf::from).collect(),
+            batch,
+            metadata.as_deref(),
+            &claims,
+            collection.as_deref(),
+            force,
+            task.as_deref(),
+            id.as_deref(),
+            resume,
+        ));
+        return match result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // IngestFailure means partial success — JSON was already printed.
+                if e.downcast_ref::<commands::ingest::IngestFailure>().is_some() {
+                    process::exit(1);
+                }
+                Err(e)
+            }
+        };
+    }
+
+    // ── Python passthrough (strangler-fig) ───────────────────────────────
+    // Commands not yet ported to Rust dispatch to the Python `hades` CLI.
     let passthrough = strip_global_opts(&raw_args[1..]);
     let status = dispatch::dispatch_with_globals(
         cli.database.as_deref(),

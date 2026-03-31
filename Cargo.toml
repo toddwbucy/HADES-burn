@@ -66,3 +66,18 @@ hades-proto = { path = "crates/hades-proto" }
 
 # Tower middleware
 tower = "0.5"
+
+# HTTP client (high-level)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# XML parsing
+roxmltree = "0.21"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL encoding
+urlencoding = "2"
+
+# Tokio utilities (StreamReader for streaming downloads)
+tokio-util = { version = "0.7", features = ["io"] }

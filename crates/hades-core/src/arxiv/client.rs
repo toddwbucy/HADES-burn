@@ -185,10 +185,11 @@ impl ArxivClient {
             }
         };
 
-        // Determine subdirectory from arXiv ID.
+        // Determine subdirectory from arXiv ID year-month, falling back to
+        // the published date for old-format IDs where extract_year_month returns None.
         let subdir = extract_year_month(&normalized)
             .map(|(y, m)| format!("{y}{m}"))
-            .unwrap_or_else(|| "other".to_string());
+            .unwrap_or_else(|| metadata.published.format("%y%m").to_string());
 
         // -- PDF ---------------------------------------------------------------
         let pdf_subdir = pdf_dir.join(&subdir);
@@ -243,9 +244,15 @@ impl ArxivClient {
                 let eprint_url = metadata.eprint_url();
                 match self.download_file(&eprint_url, &lpath).await {
                     Ok(_) => Some(lpath),
-                    Err(e) => {
-                        debug!(error = %e, "LaTeX source not available (this is normal)");
+                    Err(ArxivError::HttpStatus { status: 404, .. }) => {
+                        debug!("LaTeX source not available (this is normal)");
                         None
+                    }
+                    Err(e) => {
+                        return DownloadResult::failed(
+                            &normalized,
+                            format!("LaTeX download failed: {e}"),
+                        );
                     }
                 }
             }
@@ -313,9 +320,42 @@ impl ArxivClient {
 
     /// Download a file by streaming to a temp file, then atomically renaming on success.
     ///
-    /// If the download is interrupted or content-length doesn't match, the temp
-    /// file is removed and no partial file is left at `dest`.
+    /// Uses the same retry/backoff loop as API requests so transient failures
+    /// during large PDF/LaTeX downloads are retried.  If the download is
+    /// interrupted or content-length doesn't match, the temp file is removed
+    /// and no partial file is left at `dest`.
     async fn download_file(&self, url: &str, dest: &Path) -> Result<u64, ArxivError> {
+        let tmp_path = dest.with_extension("part");
+
+        for attempt in 0..=self.max_retries {
+            match self.download_file_once(url, dest, &tmp_path).await {
+                Ok(written) => return Ok(written),
+                Err(e) => {
+                    // HTTP 404 is never retried — it means the resource doesn't exist.
+                    if matches!(&e, ArxivError::HttpStatus { status: 404, .. }) {
+                        return Err(e);
+                    }
+                    warn!(error = %e, attempt, url, "download attempt failed");
+                    if attempt == self.max_retries {
+                        return Err(e);
+                    }
+                    // Exponential backoff: 2^attempt * base delay.
+                    let backoff = self.rate_limit_delay * 2u32.pow(attempt);
+                    debug!(backoff_ms = backoff.as_millis(), attempt, "retrying download");
+                    sleep(backoff).await;
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// Single attempt to download a file — called by `download_file` inside its retry loop.
+    async fn download_file_once(
+        &self,
+        url: &str,
+        dest: &Path,
+        tmp_path: &Path,
+    ) -> Result<u64, ArxivError> {
         use futures::TryStreamExt;
         use tokio::io::AsyncWriteExt;
         use tokio_util::io::StreamReader;
@@ -333,15 +373,12 @@ impl ArxivClient {
 
         let expected_len = resp.content_length();
 
-        // Write to a temp file first, rename atomically on success.
-        let tmp_path = dest.with_extension("part");
-
         let stream = resp
             .bytes_stream()
             .map_err(std::io::Error::other);
         let mut reader = StreamReader::new(stream);
 
-        let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
+        let mut file = tokio::fs::File::create(tmp_path).await.map_err(|e| {
             ArxivError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to create {}: {e}", tmp_path.display()),
@@ -378,21 +415,22 @@ impl ArxivClient {
         match result {
             Ok(written) => {
                 // Atomic rename into place.
-                tokio::fs::rename(&tmp_path, dest).await.map_err(|e| {
-                    ArxivError::Io(std::io::Error::new(
+                if let Err(e) = tokio::fs::rename(tmp_path, dest).await {
+                    let _ = tokio::fs::remove_file(tmp_path).await;
+                    return Err(ArxivError::Io(std::io::Error::new(
                         e.kind(),
                         format!(
                             "failed to rename {} -> {}: {e}",
                             tmp_path.display(),
                             dest.display()
                         ),
-                    ))
-                })?;
+                    )));
+                }
                 Ok(written)
             }
             Err(e) => {
                 // Clean up partial temp file.
-                let _ = tokio::fs::remove_file(&tmp_path).await;
+                let _ = tokio::fs::remove_file(tmp_path).await;
                 Err(e)
             }
         }

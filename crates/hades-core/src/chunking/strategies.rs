@@ -40,6 +40,10 @@ impl ChunkingStrategy for TokenChunking {
             return Vec::new();
         }
 
+        if self.chunk_size == 0 {
+            return Vec::new();
+        }
+
         let step = self.chunk_size.saturating_sub(self.overlap).max(1);
         let mut chunks = Vec::new();
         let mut start = 0;
@@ -75,7 +79,10 @@ impl ChunkingStrategy for TokenChunking {
 // Sliding window chunking (character-based)
 // ---------------------------------------------------------------------------
 
-/// Character-based sliding window with configurable window size and step.
+/// Sliding window chunking with configurable window size and step.
+///
+/// Window and step sizes are measured in Unicode characters.  The resulting
+/// [`TextChunk`] offsets are byte offsets (consistent with other strategies).
 pub struct SlidingWindowChunking {
     /// Window size in characters.
     pub window_size: usize,
@@ -117,8 +124,8 @@ impl ChunkingStrategy for SlidingWindowChunking {
 
             chunks.push(TextChunk {
                 text: text[byte_start..byte_end].to_string(),
-                start_char: char_pos,
-                end_char: end_char_pos,
+                start_char: byte_start,
+                end_char: byte_end,
                 chunk_index: chunks.len(),
                 total_chunks: 0,
             });
@@ -408,7 +415,7 @@ mod tests {
         assert_eq!(&text[sentences[1].0..sentences[1].1], "This is a test!");
     }
 
-    // -- Character offsets are correct ------------------------------------
+    // -- Offsets are correct ------------------------------------------------
 
     #[test]
     fn test_chunk_offsets_roundtrip() {
@@ -416,6 +423,59 @@ mod tests {
         let chunker = TokenChunking {
             chunk_size: 3,
             overlap: 1,
+        };
+        let chunks = chunker.chunk(text);
+        for c in &chunks {
+            assert_eq!(&text[c.start_char..c.end_char], c.text);
+        }
+    }
+
+    #[test]
+    fn test_token_chunking_zero_chunk_size() {
+        let chunker = TokenChunking {
+            chunk_size: 0,
+            overlap: 0,
+        };
+        assert!(chunker.chunk("hello world").is_empty());
+    }
+
+    // -- Unicode regression -------------------------------------------------
+
+    #[test]
+    fn test_unicode_byte_offsets_token() {
+        // "café bon" — 'é' is 2 bytes in UTF-8
+        let text = "café bon jour ici";
+        let chunker = TokenChunking {
+            chunk_size: 2,
+            overlap: 0,
+        };
+        let chunks = chunker.chunk(text);
+        for c in &chunks {
+            assert_eq!(&text[c.start_char..c.end_char], c.text);
+        }
+    }
+
+    #[test]
+    fn test_unicode_byte_offsets_sliding_window() {
+        // Each emoji is 4 bytes. "🔥🌊🎉" = 12 bytes, 3 chars.
+        let text = "🔥🌊🎉ab";
+        let chunker = SlidingWindowChunking {
+            window_size: 2,
+            step_size: 1,
+        };
+        let chunks = chunker.chunk(text);
+        for c in &chunks {
+            // Byte offsets must slice correctly
+            assert_eq!(&text[c.start_char..c.end_char], c.text);
+        }
+    }
+
+    #[test]
+    fn test_unicode_byte_offsets_sentence() {
+        let text = "Ünited Stätes. Bönn city.";
+        let chunker = SentenceChunking {
+            max_chunk_size: 20,
+            min_chunk_size: 5,
         };
         let chunks = chunker.chunk(text);
         for c in &chunks {

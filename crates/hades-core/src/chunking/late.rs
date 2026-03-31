@@ -10,14 +10,14 @@
 
 /// Configuration for late chunking.
 #[derive(Debug, Clone)]
-pub struct LateCunkConfig {
+pub struct LateChunkConfig {
     /// Tokens per chunk (default 500).
     pub chunk_size_tokens: usize,
     /// Overlap tokens between consecutive chunks (default 200).
     pub overlap_tokens: usize,
 }
 
-impl Default for LateCunkConfig {
+impl Default for LateChunkConfig {
     fn default() -> Self {
         Self {
             chunk_size_tokens: 500,
@@ -50,7 +50,7 @@ pub struct LateChunkResult {
 /// Does not panic. Returns an empty result if `token_embeddings` is empty.
 pub fn late_chunk_embeddings(
     token_embeddings: &[Vec<f32>],
-    config: &LateCunkConfig,
+    config: &LateChunkConfig,
 ) -> LateChunkResult {
     if token_embeddings.is_empty() {
         return LateChunkResult {
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_late_chunk_empty() {
-        let result = late_chunk_embeddings(&[], &LateCunkConfig::default());
+        let result = late_chunk_embeddings(&[], &LateChunkConfig::default());
         assert!(result.embeddings.is_empty());
         assert!(result.boundaries.is_empty());
     }
@@ -140,7 +140,7 @@ mod tests {
             vec![0.0, 1.0, 0.0],
             vec![0.0, 0.0, 1.0],
         ];
-        let config = LateCunkConfig {
+        let config = LateChunkConfig {
             chunk_size_tokens: 10,
             overlap_tokens: 2,
         };
@@ -169,7 +169,7 @@ mod tests {
             })
             .collect();
 
-        let config = LateCunkConfig {
+        let config = LateChunkConfig {
             chunk_size_tokens: 3,
             overlap_tokens: 1,
         };

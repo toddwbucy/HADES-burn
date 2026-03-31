@@ -10,7 +10,7 @@
 mod late;
 mod strategies;
 
-pub use late::{late_chunk_embeddings, LateCunkConfig};
+pub use late::{late_chunk_embeddings, LateChunkConfig, LateChunkResult};
 pub use strategies::{SentenceChunking, SlidingWindowChunking, TokenChunking};
 
 /// A chunk of text with positional metadata.
@@ -18,16 +18,15 @@ pub use strategies::{SentenceChunking, SlidingWindowChunking, TokenChunking};
 pub struct TextChunk {
     /// The chunk text content.
     pub text: String,
-    /// Start character offset in the original document (inclusive).
+    /// Start byte offset in the original document (inclusive).
     pub start_char: usize,
-    /// End character offset in the original document (exclusive).
+    /// End byte offset in the original document (exclusive).
     pub end_char: usize,
     /// Zero-based chunk index within the document.
     pub chunk_index: usize,
     /// Total number of chunks produced from the document.
     ///
-    /// Set to 0 during chunking; callers fill in after all chunks
-    /// are produced (since total is unknown until iteration completes).
+    /// Populated by the chunking strategy before returning.
     pub total_chunks: usize,
 }
 

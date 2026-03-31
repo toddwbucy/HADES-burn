@@ -218,6 +218,17 @@ impl ExtractionClient {
             .await?
             .into_inner();
 
+        if response.full_text.is_empty()
+            && response.tables.is_empty()
+            && response.equations.is_empty()
+            && response.images.is_empty()
+        {
+            return Err(ExtractionError::InvalidResponse(
+                "extraction returned no content (empty text, no tables, equations, or images)"
+                    .to_string(),
+            ));
+        }
+
         let source_type = response.source_type.try_into().unwrap_or(SourceType::Unknown);
 
         debug!(
@@ -292,6 +303,10 @@ pub struct ExtractOptions {
 
 impl ExtractOptions {
     /// Create options that extract all supported content types.
+    ///
+    /// OCR is left disabled because it is expensive and significantly
+    /// increases extraction time.  Enable it explicitly when needed:
+    /// `ExtractOptions { use_ocr: true, ..ExtractOptions::all() }`.
     pub fn all() -> Self {
         Self {
             source_type: None,

@@ -64,6 +64,12 @@ impl ArxivClient {
         max_retries: u32,
         timeout_secs: u64,
     ) -> Result<Self, ArxivError> {
+        if !rate_limit_secs.is_finite() || rate_limit_secs < 0.0 {
+            return Err(ArxivError::InvalidConfig(format!(
+                "rate_limit_secs must be finite and non-negative, got {rate_limit_secs}"
+            )));
+        }
+
         let http = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent("HADES-Burn/0.1 (Rust; https://github.com/toddwbucy/HADES-Burn)")
@@ -234,12 +240,10 @@ impl ArxivClient {
             if lpath.exists() && !force {
                 Some(lpath)
             } else if let Err(e) = tokio::fs::create_dir_all(&latex_subdir).await {
-                warn!(
-                    error = %e,
-                    dir = %latex_subdir.display(),
-                    "failed to create LaTeX directory, skipping LaTeX download"
+                return DownloadResult::failed(
+                    &normalized,
+                    format!("failed to create LaTeX directory {}: {e}", latex_subdir.display()),
                 );
-                None
             } else {
                 let eprint_url = metadata.eprint_url();
                 match self.download_file(&eprint_url, &lpath).await {
@@ -325,9 +329,11 @@ impl ArxivClient {
     /// interrupted or content-length doesn't match, the temp file is removed
     /// and no partial file is left at `dest`.
     async fn download_file(&self, url: &str, dest: &Path) -> Result<u64, ArxivError> {
-        let tmp_path = dest.with_extension("part");
+        let pid = std::process::id();
 
         for attempt in 0..=self.max_retries {
+            // Unique temp path per attempt to prevent races with concurrent downloads.
+            let tmp_path = dest.with_extension(format!("part.{pid}.{attempt}"));
             match self.download_file_once(url, dest, &tmp_path).await {
                 Ok(written) => return Ok(written),
                 Err(e) => {
@@ -378,12 +384,17 @@ impl ArxivClient {
             .map_err(std::io::Error::other);
         let mut reader = StreamReader::new(stream);
 
-        let mut file = tokio::fs::File::create(tmp_path).await.map_err(|e| {
-            ArxivError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to create {}: {e}", tmp_path.display()),
-            ))
-        })?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp_path)
+            .await
+            .map_err(|e| {
+                ArxivError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to create {}: {e}", tmp_path.display()),
+                ))
+            })?;
 
         let result = async {
             let written = tokio::io::copy(&mut reader, &mut file).await.map_err(|e| {
@@ -504,20 +515,24 @@ fn parse_entry(entry: &roxmltree::Node) -> Option<ArxivPaper> {
         .map(|s| s.to_string())
         .collect();
 
-    // Dates — warn if fallback to epoch occurs.
+    // Dates — skip entries with unparseable published dates rather than
+    // fabricating a 1970 epoch timestamp.
     let pub_raw = find_child_text(entry, ATOM_NS, "published").unwrap_or_default();
     let upd_raw = find_child_text(entry, ATOM_NS, "updated").unwrap_or_default();
     let published_parsed = parse_datetime(&pub_raw);
     let updated_parsed = parse_datetime(&upd_raw);
 
-    if published_parsed.is_none() && !pub_raw.is_empty() {
-        warn!(arxiv_id, raw = pub_raw, "failed to parse published date, falling back to epoch");
-    }
-    if updated_parsed.is_none() && !upd_raw.is_empty() {
-        warn!(arxiv_id, raw = upd_raw, "failed to parse updated date, falling back to published/epoch");
-    }
+    let published = match published_parsed {
+        Some(dt) => dt,
+        None => {
+            warn!(arxiv_id, raw = pub_raw, "skipping entry: failed to parse published date");
+            return None;
+        }
+    };
 
-    let published = published_parsed.unwrap_or_default();
+    if updated_parsed.is_none() && !upd_raw.is_empty() {
+        warn!(arxiv_id, raw = upd_raw, "failed to parse updated date, falling back to published");
+    }
     let updated = updated_parsed.unwrap_or(published);
 
     // Optional fields.
@@ -712,5 +727,54 @@ mod tests {
 
         let err = ArxivError::XmlParse("bad xml".to_string());
         assert!(err.to_string().contains("bad xml"));
+    }
+
+    #[test]
+    fn test_with_config_rejects_invalid_rate_limit() {
+        assert!(ArxivClient::with_config(-1.0, 3, 30).is_err());
+        assert!(ArxivClient::with_config(f64::NAN, 3, 30).is_err());
+        assert!(ArxivClient::with_config(f64::INFINITY, 3, 30).is_err());
+        assert!(ArxivClient::with_config(0.0, 3, 30).is_ok());
+        assert!(ArxivClient::with_config(1.5, 3, 30).is_ok());
+    }
+
+    #[test]
+    fn test_parse_entry_skips_missing_published_date() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2501.00001v1</id>
+    <title>No Date Paper</title>
+    <summary>Missing published date.</summary>
+    <author><name>Author</name></author>
+    <arxiv:primary_category term="cs.AI" />
+    <category term="cs.AI" />
+  </entry>
+</feed>"#;
+
+        let papers = parse_atom_response(xml).unwrap();
+        assert!(papers.is_empty(), "entry with missing published date should be skipped");
+    }
+
+    #[test]
+    fn test_parse_entry_skips_unparseable_published_date() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2501.00002v1</id>
+    <title>Bad Date Paper</title>
+    <summary>Unparseable date.</summary>
+    <author><name>Author</name></author>
+    <published>not-a-real-date</published>
+    <updated>also-not-a-date</updated>
+    <arxiv:primary_category term="cs.AI" />
+    <category term="cs.AI" />
+  </entry>
+</feed>"#;
+
+        let papers = parse_atom_response(xml).unwrap();
+        assert!(papers.is_empty(), "entry with unparseable published date should be skipped");
     }
 }

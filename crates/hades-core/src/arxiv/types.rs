@@ -30,6 +30,10 @@ pub enum ArxivError {
     /// TLS/backend initialization failure when building the HTTP client.
     #[error("failed to build HTTP client: {0}")]
     ClientBuild(reqwest::Error),
+
+    /// Invalid configuration value.
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 /// Metadata for a single arXiv paper, parsed from the Atom XML API response.

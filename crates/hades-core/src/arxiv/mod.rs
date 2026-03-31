@@ -5,6 +5,8 @@
 //! PDF/LaTeX downloads.
 
 mod client;
+pub mod sync;
+pub mod sync_metadata;
 mod types;
 
 pub use client::ArxivClient;

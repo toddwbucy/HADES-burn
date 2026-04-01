@@ -18,38 +18,53 @@ use super::symbols::{
 use super::Language;
 
 /// Analyze Python source code, returning symbols, metrics, and structure.
-pub fn analyze(source: &str) -> FileAnalysis {
+pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
     let line_offsets = build_line_offsets(source);
-    let symbols = extract_symbols(source, &line_offsets);
-    let metrics = compute_metrics(source);
-    let top_level_defs = extract_top_level_defs(source, &line_offsets);
+
+    // Parse once — share the AST across all extraction phases.
+    let module = parse_module(source);
+
+    let symbols = match &module {
+        Some(m) => extract_symbols_from_module(m, &line_offsets),
+        None => Vec::new(),
+    };
+    let metrics = match &module {
+        Some(m) => compute_metrics_from_module(source, m),
+        None => compute_metrics_fallback(source),
+    };
+    let top_level_defs = match &module {
+        Some(m) => extract_top_level_defs_from_module(m, &line_offsets),
+        None => Vec::new(),
+    };
     let symbol_hash = compute_symbol_hash(&symbols);
 
-    FileAnalysis {
+    Ok(FileAnalysis {
         language: Language::Python,
         symbols,
         metrics,
         symbol_hash,
         top_level_defs,
+    })
+}
+
+/// Parse Python source into a Module. Returns None on parse error.
+fn parse_module(source: &str) -> Option<ast::ModModule> {
+    let parsed = match parser::parse(source, parser::Mode::Module, "<input>") {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            warn!(error = %e, "Python parse error");
+            return None;
+        }
+    };
+    match parsed {
+        ast::Mod::Module(m) => Some(m),
+        _ => None,
     }
 }
 
 // ── Symbol Extraction ──────────────────────────────────────────────────
 
-fn extract_symbols(source: &str, offsets: &[usize]) -> Vec<Symbol> {
-    let parsed = match parser::parse(source, parser::Mode::Module, "<input>") {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            warn!(error = %e, "Python parse error, returning empty symbols");
-            return Vec::new();
-        }
-    };
-
-    let module = match parsed {
-        ast::Mod::Module(m) => m,
-        _ => return Vec::new(),
-    };
-
+fn extract_symbols_from_module(module: &ast::ModModule, offsets: &[usize]) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for stmt in &module.body {
         extract_stmt_symbols(stmt, &mut symbols, &module.body, offsets);
@@ -121,12 +136,28 @@ fn extract_stmt_symbols(
         ast::Stmt::Import(imp) => {
             let (start_line, end_line) = range_lines(&imp.range, offsets);
             for alias in &imp.names {
+                // Use asname (alias) if present, otherwise first dotted
+                // component of the module name (what Python actually binds).
+                let bound_name = if let Some(ref asname) = alias.asname {
+                    asname.to_string()
+                } else {
+                    alias.name.split('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                };
+                if bound_name.is_empty() {
+                    continue;
+                }
                 symbols.push(Symbol {
-                    name: alias.name.to_string(),
+                    name: bound_name,
                     kind: SymbolKind::Import,
                     start_line,
                     end_line,
-                    metadata: json!({ "type": "import" }),
+                    metadata: json!({
+                        "type": "import",
+                        "module": alias.name.to_string(),
+                    }),
                 });
             }
         }
@@ -141,8 +172,18 @@ fn extract_stmt_symbols(
 
             let (start_line, end_line) = range_lines(&imp.range, offsets);
             for alias in &imp.names {
+                // Skip wildcard imports (from ... import *)
+                if alias.name.as_str() == "*" {
+                    continue;
+                }
+                // Use asname if present, otherwise the imported name.
+                let bound_name = if let Some(ref asname) = alias.asname {
+                    asname.to_string()
+                } else {
+                    alias.name.to_string()
+                };
                 symbols.push(Symbol {
-                    name: alias.name.to_string(),
+                    name: bound_name,
                     kind: SymbolKind::Import,
                     start_line,
                     end_line,
@@ -150,6 +191,7 @@ fn extract_stmt_symbols(
                         "type": "from_import",
                         "module": module_name,
                         "level": level,
+                        "original_name": alias.name.to_string(),
                     }),
                 });
             }
@@ -302,8 +344,9 @@ fn extract_docstring(body: &[ast::Stmt]) -> Option<String> {
         && let ast::Constant::Str(s) = &c.value
     {
         let trimmed = s.trim();
-        if trimmed.len() > 500 {
-            return Some(format!("{}...", &trimmed[..497]));
+        if trimmed.chars().count() > 500 {
+            let truncated: String = trimmed.chars().take(497).collect();
+            return Some(format!("{truncated}..."));
         }
         return Some(trimmed.to_string());
     }
@@ -312,17 +355,7 @@ fn extract_docstring(body: &[ast::Stmt]) -> Option<String> {
 
 // ── Top-Level Definitions ──────────────────────────────────────────────
 
-fn extract_top_level_defs(source: &str, offsets: &[usize]) -> Vec<TopLevelDef> {
-    let parsed = match parser::parse(source, parser::Mode::Module, "<input>") {
-        Ok(parsed) => parsed,
-        Err(_) => return Vec::new(),
-    };
-
-    let module = match parsed {
-        ast::Mod::Module(m) => m,
-        _ => return Vec::new(),
-    };
-
+fn extract_top_level_defs_from_module(module: &ast::ModModule, offsets: &[usize]) -> Vec<TopLevelDef> {
     let mut defs = Vec::new();
     for stmt in &module.body {
         let (name, kind, range) = match stmt {
@@ -356,16 +389,18 @@ fn extract_top_level_defs(source: &str, offsets: &[usize]) -> Vec<TopLevelDef> {
 
 // ── Code Metrics ───────────────────────────────────────────────────────
 
-fn compute_metrics(source: &str) -> CodeMetrics {
-    let total_lines = source.lines().count().max(1);
+fn compute_metrics_from_module(source: &str, module: &ast::ModModule) -> CodeMetrics {
+    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
     let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
     let comment_lines = source
         .lines()
         .filter(|l| l.trim_start().starts_with('#'))
         .count();
-    let lines_of_code = total_lines - blank_lines - comment_lines;
+    let lines_of_code = total_lines.saturating_sub(blank_lines + comment_lines);
 
-    let (complexity, max_depth) = compute_complexity_and_depth(source);
+    let mut complexity = 1usize;
+    let mut max_depth = 0usize;
+    count_complexity_stmts(&module.body, 0, &mut complexity, &mut max_depth);
 
     CodeMetrics {
         total_lines,
@@ -377,21 +412,24 @@ fn compute_metrics(source: &str) -> CodeMetrics {
     }
 }
 
-fn compute_complexity_and_depth(source: &str) -> (usize, usize) {
-    let parsed = match parser::parse(source, parser::Mode::Module, "<input>") {
-        Ok(p) => p,
-        Err(_) => return (1, 0),
-    };
+/// Fallback metrics when parsing fails (line counting only).
+fn compute_metrics_fallback(source: &str) -> CodeMetrics {
+    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
+    let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
+    let comment_lines = source
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .count();
+    let lines_of_code = total_lines.saturating_sub(blank_lines + comment_lines);
 
-    let module = match parsed {
-        ast::Mod::Module(m) => m,
-        _ => return (1, 0),
-    };
-
-    let mut complexity = 1usize;
-    let mut max_depth = 0usize;
-    count_complexity_stmts(&module.body, 0, &mut complexity, &mut max_depth);
-    (complexity, max_depth)
+    CodeMetrics {
+        total_lines,
+        lines_of_code,
+        blank_lines,
+        comment_lines,
+        cyclomatic_complexity: 1,
+        max_nesting_depth: 0,
+    }
 }
 
 fn count_complexity_stmts(
@@ -552,7 +590,7 @@ def process(items: list) -> int:
 
     #[test]
     fn test_extract_symbols() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
 
         assert!(names.contains(&"os"), "missing os: {names:?}");
@@ -567,7 +605,7 @@ def process(items: list) -> int:
 
     #[test]
     fn test_symbol_kinds() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
 
         let config = analysis.symbols.iter().find(|s| s.name == "Config").unwrap();
         assert_eq!(config.kind, SymbolKind::Class);
@@ -584,7 +622,7 @@ def process(items: list) -> int:
 
     #[test]
     fn test_function_metadata() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         let save = analysis.symbols.iter().find(|s| s.name == "save").unwrap();
         assert_eq!(save.metadata["is_async"], true);
 
@@ -596,14 +634,14 @@ def process(items: list) -> int:
 
     #[test]
     fn test_class_metadata() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         let config = analysis.symbols.iter().find(|s| s.name == "Config").unwrap();
         assert!(config.metadata.get("docstring").is_some());
     }
 
     #[test]
     fn test_import_metadata() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         let path_import = analysis.symbols.iter().find(|s| s.name == "Path").unwrap();
         assert_eq!(path_import.metadata["type"], "from_import");
         assert_eq!(path_import.metadata["module"], "pathlib");
@@ -611,7 +649,7 @@ def process(items: list) -> int:
 
     #[test]
     fn test_top_level_defs() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         assert_eq!(analysis.top_level_defs.len(), 2, "defs: {:?}", analysis.top_level_defs);
         assert_eq!(analysis.top_level_defs[0].name, "Config");
         assert_eq!(analysis.top_level_defs[0].kind, SymbolKind::Class);
@@ -621,7 +659,7 @@ def process(items: list) -> int:
 
     #[test]
     fn test_metrics() {
-        let analysis = analyze(SAMPLE_PYTHON);
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
         let m = &analysis.metrics;
         assert!(m.total_lines > 20);
         assert!(m.lines_of_code > 0);
@@ -633,15 +671,14 @@ def process(items: list) -> int:
 
     #[test]
     fn test_empty_source() {
-        let analysis = analyze("");
+        let analysis = analyze("").unwrap();
         assert!(analysis.symbols.is_empty());
         assert!(analysis.top_level_defs.is_empty());
-        assert_eq!(analysis.metrics.total_lines, 1);
     }
 
     #[test]
     fn test_syntax_error_graceful() {
         let analysis = analyze("def foo(:\n    pass");
-        let _ = analysis; // Should not panic.
+        let _ = analysis; // Should not panic — returns Ok with empty symbols.
     }
 }

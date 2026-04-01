@@ -53,48 +53,34 @@ impl ChunkingStrategy for AstChunking {
             // No definitions found — treat entire file as one chunk.
             raw_chunks.push((text.to_string(), 0, text.len()));
         } else {
-            // Chunk 0: module-level code (everything before first def,
-            // plus gaps between defs).
-            let mut module_parts = Vec::new();
+            // Walk the file once, emitting gaps and defs in source order.
             let mut cursor = 0usize;
 
             for def in &self.defs {
-                if def.start_byte > cursor {
-                    let gap = &text[cursor..def.start_byte];
+                // Emit gap (module-level code) before this def.
+                let def_start = def.start_byte.min(text.len());
+                if def_start > cursor {
+                    let gap = &text[cursor..def_start];
                     if !gap.trim().is_empty() {
-                        module_parts.push((cursor, def.start_byte));
+                        raw_chunks.push((gap.to_string(), cursor, def_start));
                     }
                 }
-                cursor = def.end_byte;
+
+                // Emit the def itself.
+                let start = def_start;
+                let end = def.end_byte.min(text.len());
+                if start < end {
+                    raw_chunks.push((text[start..end].to_string(), start, end));
+                }
+
+                cursor = def.end_byte.min(text.len());
             }
+
             // Trailing module code after last def.
             if cursor < text.len() {
                 let tail = &text[cursor..];
                 if !tail.trim().is_empty() {
-                    module_parts.push((cursor, text.len()));
-                }
-            }
-
-            // Emit module chunk if non-empty.
-            if !module_parts.is_empty() {
-                let start = module_parts[0].0;
-                let end = module_parts.last().unwrap().1;
-                let module_text: String = module_parts
-                    .iter()
-                    .map(|(s, e)| &text[*s..*e])
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !module_text.trim().is_empty() {
-                    raw_chunks.push((module_text, start, end));
-                }
-            }
-
-            // Each top-level definition → its own chunk.
-            for def in &self.defs {
-                let start = def.start_byte.min(text.len());
-                let end = def.end_byte.min(text.len());
-                if start < end {
-                    raw_chunks.push((text[start..end].to_string(), start, end));
+                    raw_chunks.push((tail.to_string(), cursor, text.len()));
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! for AST-aligned chunking.
 
 use serde_json::json;
-use syn::{visit::Visit, Item, Visibility};
+use syn::{spanned::Spanned, visit::Visit, Item, Visibility};
 use tracing::warn;
 
 use super::symbols::{
@@ -14,19 +14,19 @@ use super::symbols::{
 use super::Language;
 
 /// Analyze Rust source code, returning symbols, metrics, and structure.
-pub fn analyze(source: &str) -> FileAnalysis {
+pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
     let symbols = extract_symbols(source);
     let metrics = compute_metrics(source);
     let top_level_defs = extract_top_level_defs(source);
     let symbol_hash = compute_symbol_hash(&symbols);
 
-    FileAnalysis {
+    Ok(FileAnalysis {
         language: Language::Rust,
         symbols,
         metrics,
         symbol_hash,
         top_level_defs,
-    }
+    })
 }
 
 // ── Symbol Extraction ──────────────────────────────────────────────────
@@ -40,11 +40,8 @@ fn extract_symbols(source: &str) -> Vec<Symbol> {
         }
     };
 
-    let line_offsets = build_line_offsets(source);
     let mut collector = SymbolCollector {
         symbols: Vec::new(),
-        source,
-        line_offsets: &line_offsets,
         impl_context: None,
     };
 
@@ -55,20 +52,17 @@ fn extract_symbols(source: &str) -> Vec<Symbol> {
     collector.symbols
 }
 
-struct SymbolCollector<'a> {
+struct SymbolCollector {
     symbols: Vec<Symbol>,
-    source: &'a str,
-    line_offsets: &'a [usize],
     /// Current impl block context (e.g. "Config" or "Display for Config").
     impl_context: Option<String>,
 }
 
-impl<'a> SymbolCollector<'a> {
+impl SymbolCollector {
     fn visit_top_level_item(&mut self, item: &Item) {
         match item {
             Item::Fn(func) => {
-                let (start_line, end_line) = self.span_lines(&func.sig.fn_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(func, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&func.span());
 
                 let mut meta = json!({
                     "visibility": vis_str(&func.vis),
@@ -89,8 +83,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Struct(s) => {
-                let (start_line, end_line) = self.span_lines(&s.struct_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(s, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&s.span());
 
                 let derives = extract_derives(&s.attrs);
                 let mut meta = json!({
@@ -113,8 +106,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Enum(e) => {
-                let (start_line, end_line) = self.span_lines(&e.enum_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(e, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&e.span());
 
                 let derives = extract_derives(&e.attrs);
                 let variants: Vec<String> = e.variants.iter().map(|v| v.ident.to_string()).collect();
@@ -136,8 +128,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Trait(t) => {
-                let (start_line, end_line) = self.span_lines(&t.trait_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(t, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&t.span());
 
                 let methods: Vec<String> = t
                     .items
@@ -177,8 +168,7 @@ impl<'a> SymbolCollector<'a> {
                     self_ty.clone()
                 };
 
-                let (start_line, end_line) = self.span_lines(&imp.impl_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(imp, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&imp.span());
 
                 let mut meta = json!({
                     "self_type": self_ty,
@@ -205,7 +195,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Use(u) => {
-                let (start_line, end_line) = self.span_lines(&u.use_token.span);
+                let (start_line, end_line) = self.span_lines(&u.span());
                 let path = use_tree_str(&u.tree);
 
                 self.symbols.push(Symbol {
@@ -218,7 +208,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Const(c) => {
-                let (start_line, end_line) = self.span_lines(&c.const_token.span);
+                let (start_line, end_line) = self.span_lines(&c.span());
                 self.symbols.push(Symbol {
                     name: c.ident.to_string(),
                     kind: SymbolKind::Constant,
@@ -229,7 +219,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Static(s) => {
-                let (start_line, end_line) = self.span_lines(&s.static_token.span);
+                let (start_line, end_line) = self.span_lines(&s.span());
                 self.symbols.push(Symbol {
                     name: s.ident.to_string(),
                     kind: SymbolKind::Constant,
@@ -243,7 +233,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Type(t) => {
-                let (start_line, end_line) = self.span_lines(&t.type_token.span);
+                let (start_line, end_line) = self.span_lines(&t.span());
                 self.symbols.push(Symbol {
                     name: t.ident.to_string(),
                     kind: SymbolKind::TypeAlias,
@@ -255,7 +245,7 @@ impl<'a> SymbolCollector<'a> {
 
             Item::Macro(m) => {
                 if let Some(ref ident) = m.ident {
-                    let (start_line, end_line) = self.span_lines(&m.mac.path.segments[0].ident.span());
+                    let (start_line, end_line) = self.span_lines(&m.span());
                     self.symbols.push(Symbol {
                         name: ident.to_string(),
                         kind: SymbolKind::Macro,
@@ -267,7 +257,7 @@ impl<'a> SymbolCollector<'a> {
             }
 
             Item::Mod(m) => {
-                let (start_line, end_line) = self.span_lines(&m.mod_token.span);
+                let (start_line, end_line) = self.span_lines(&m.span());
                 self.symbols.push(Symbol {
                     name: m.ident.to_string(),
                     kind: SymbolKind::Module,
@@ -284,8 +274,7 @@ impl<'a> SymbolCollector<'a> {
     fn visit_impl_item(&mut self, item: &syn::ImplItem) {
         match item {
             syn::ImplItem::Fn(method) => {
-                let (start_line, end_line) = self.span_lines(&method.sig.fn_token.span);
-                let end_line = self.find_block_end(end_line, source_end_line(method, self.source, self.line_offsets));
+                let (start_line, end_line) = self.span_lines(&method.span());
 
                 let mut meta = json!({
                     "visibility": vis_str(&method.vis),
@@ -305,7 +294,7 @@ impl<'a> SymbolCollector<'a> {
                 });
             }
             syn::ImplItem::Const(c) => {
-                let (start_line, _) = self.span_lines(&c.const_token.span);
+                let (start_line, _) = self.span_lines(&c.span());
                 self.symbols.push(Symbol {
                     name: c.ident.to_string(),
                     kind: SymbolKind::Constant,
@@ -315,7 +304,7 @@ impl<'a> SymbolCollector<'a> {
                 });
             }
             syn::ImplItem::Type(t) => {
-                let (start_line, _) = self.span_lines(&t.type_token.span);
+                let (start_line, _) = self.span_lines(&t.span());
                 self.symbols.push(Symbol {
                     name: t.ident.to_string(),
                     kind: SymbolKind::TypeAlias,
@@ -335,11 +324,6 @@ impl<'a> SymbolCollector<'a> {
         (start.max(1), end.max(start))
     }
 
-    /// Heuristic: if syn's span only covers the keyword (e.g. `fn`),
-    /// use the source-derived end line if it's larger.
-    fn find_block_end(&self, keyword_end: usize, source_derived_end: usize) -> usize {
-        keyword_end.max(source_derived_end)
-    }
 }
 
 // ── Top-Level Definitions ──────────────────────────────────────────────
@@ -387,26 +371,15 @@ fn extract_top_level_defs(source: &str) -> Vec<TopLevelDef> {
     defs
 }
 
-/// Get span info for an item, using source scanning to find the true end.
+/// Get span info for an item, using the full item span for accurate ranges.
 fn item_span_info(
     item: &Item,
     source: &str,
     line_offsets: &[usize],
 ) -> (usize, usize, usize, usize) {
-    // syn spans from proc-macro2 only have line info in non-proc-macro context.
-    // Use the source_end_line helper to find the closing brace.
-    let keyword_span = match item {
-        Item::Fn(f) => f.sig.fn_token.span,
-        Item::Struct(s) => s.struct_token.span,
-        Item::Enum(e) => e.enum_token.span,
-        Item::Trait(t) => t.trait_token.span,
-        Item::Impl(i) => i.impl_token.span,
-        _ => return (1, 1, 0, 0),
-    };
-
-    let start_line = keyword_span.start().line.max(1);
-    let derived_end = source_end_line(item, source, line_offsets);
-    let end_line = keyword_span.end().line.max(start_line).max(derived_end);
+    let span = item.span();
+    let start_line = span.start().line.max(1);
+    let end_line = span.end().line.max(start_line);
 
     // Compute byte offsets from line numbers.
     let start_byte = line_to_byte(line_offsets, start_line);
@@ -443,7 +416,7 @@ fn find_item_start(source: &str, keyword_byte: usize) -> usize {
 // ── Code Metrics ───────────────────────────────────────────────────────
 
 fn compute_metrics(source: &str) -> CodeMetrics {
-    let total_lines = source.lines().count().max(1);
+    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
     let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
     let comment_lines = source
         .lines()
@@ -610,22 +583,6 @@ fn extract_derives(attrs: &[syn::Attribute]) -> Vec<String> {
     derives
 }
 
-/// Estimate the end line of a syntax item by scanning source for closing braces.
-///
-/// syn's proc-macro2 spans don't always cover the full item in non-macro
-/// contexts.  This function provides a fallback by finding the matching
-/// closing brace after the item's keyword.
-fn source_end_line<T>(_item: &T, source: &str, line_offsets: &[usize]) -> usize {
-    // In practice, syn spans work correctly when parsing files directly
-    // (not inside proc macros).  This is a no-op fallback that returns 0,
-    // letting the caller use the span-derived end line.
-    //
-    // If we find syn spans are insufficient, this can be upgraded to
-    // brace-matching logic.
-    let _ = (source, line_offsets);
-    0
-}
-
 fn build_line_offsets(source: &str) -> Vec<usize> {
     let mut offsets = vec![0]; // line 1 starts at byte 0
     for (i, ch) in source.char_indices() {
@@ -731,7 +688,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_extract_symbols() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
 
         assert!(names.contains(&"std::collections::HashMap"), "missing HashMap import: {names:?}");
@@ -746,7 +703,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_symbol_kinds() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
 
         let config = analysis.symbols.iter().find(|s| s.name == "Config" && s.kind == SymbolKind::Struct).unwrap();
         assert_eq!(config.kind, SymbolKind::Struct);
@@ -763,7 +720,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_struct_derives() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let config = analysis.symbols.iter()
             .find(|s| s.name == "Config" && s.kind == SymbolKind::Struct)
             .unwrap();
@@ -775,7 +732,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_enum_variants() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let app_error = analysis.symbols.iter().find(|s| s.name == "AppError").unwrap();
         let variants = app_error.metadata["variants"].as_array().unwrap();
         let names: Vec<&str> = variants.iter().map(|v| v.as_str().unwrap()).collect();
@@ -785,7 +742,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_function_metadata() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let load = analysis.symbols.iter().find(|s| s.name == "load").unwrap();
         assert_eq!(load.metadata["is_async"], true);
         assert_eq!(load.metadata["visibility"], "pub");
@@ -796,14 +753,14 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_impl_context() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let new_fn = analysis.symbols.iter().find(|s| s.name == "new").unwrap();
         assert!(new_fn.metadata["impl_context"].as_str().unwrap().contains("Config"));
     }
 
     #[test]
     fn test_trait_methods() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let processor = analysis.symbols.iter().find(|s| s.name == "Processor").unwrap();
         let methods = processor.metadata["methods"].as_array().unwrap();
         assert_eq!(methods[0], "process");
@@ -811,7 +768,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_top_level_defs() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let def_names: Vec<&str> = analysis.top_level_defs.iter().map(|d| d.name.as_str()).collect();
         assert!(def_names.contains(&"Config"), "missing Config def: {def_names:?}");
         assert!(def_names.contains(&"AppError"), "missing AppError def: {def_names:?}");
@@ -821,7 +778,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_metrics() {
-        let analysis = analyze(SAMPLE_RUST);
+        let analysis = analyze(SAMPLE_RUST).unwrap();
         let m = &analysis.metrics;
         assert!(m.total_lines > 50);
         assert!(m.lines_of_code > 0);
@@ -833,7 +790,7 @@ pub fn run(items: &[String]) -> usize {
 
     #[test]
     fn test_empty_source() {
-        let analysis = analyze("");
+        let analysis = analyze("").unwrap();
         assert!(analysis.symbols.is_empty());
         assert!(analysis.top_level_defs.is_empty());
     }

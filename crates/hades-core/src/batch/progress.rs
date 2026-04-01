@@ -156,9 +156,13 @@ mod tests {
         let reporter = ProgressReporter::new(10, Duration::from_secs(10));
         // First report should go through (last_report is in the past).
         reporter.report("item_1", ProgressStatus::Processing, false);
+        // Capture last_report after the first (accepted) report.
+        let after_first = *reporter.last_report.lock().unwrap();
         // Immediate second report should be suppressed (within 10s interval).
-        // We can't easily test stderr output, but we verify no panic.
         reporter.report("item_2", ProgressStatus::Processing, false);
+        let after_second = *reporter.last_report.lock().unwrap();
+        // Throttled report must not update last_report.
+        assert_eq!(after_first, after_second, "throttled report should not update last_report");
     }
 
     #[test]

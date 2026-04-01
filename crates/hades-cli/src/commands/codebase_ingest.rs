@@ -63,11 +63,12 @@ pub struct CodebaseIngestFailure {
 }
 
 /// Run the codebase ingest command.
+// TODO: support --batch to enable parallel/batched ingestion
 pub async fn run(
     config: &HadesConfig,
     path: PathBuf,
     language: Option<&str>,
-    _batch: bool,
+    batch: bool,
 ) -> Result<()> {
     let cmd_start = Instant::now();
 
@@ -132,15 +133,20 @@ pub async fn run(
     // Track Python files and their imports for edge resolution.
     let mut python_imports: HashMap<String, Vec<String>> = HashMap::new();
 
+    // Auto-activate batch mode for large input sets.
+    let batch_mode = batch || files.len() > 5;
+
     let total_files = files.len();
     for (idx, file_path) in files.iter().enumerate() {
-        let progress = json!({
-            "type": "progress",
-            "current": idx + 1,
-            "total": total_files,
-            "percent": ((idx + 1) as f64 / total_files as f64 * 100.0),
-        });
-        eprintln!("{}", serde_json::to_string(&progress).unwrap_or_default());
+        if batch_mode {
+            let progress = json!({
+                "type": "progress",
+                "current": idx + 1,
+                "total": total_files,
+                "percent": ((idx + 1) as f64 / total_files as f64 * 100.0),
+            });
+            eprintln!("{}", serde_json::to_string(&progress).unwrap_or_default());
+        }
 
         let item_start = Instant::now();
         let rel_path = file_path
@@ -276,7 +282,17 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
         }
         let entry_path = entry.path();
         let path_str = entry_path.to_string_lossy();
-        if lang_override.is_some() || Language::from_path(&path_str).is_some() {
+        let include = if Language::from_path(&path_str).is_some() {
+            // File has a recognized source extension — always include.
+            true
+        } else if lang_override.is_some() {
+            // Language override active: include extensionless files only
+            // (skip .md, .json, images, etc.).
+            entry_path.extension().is_none()
+        } else {
+            false
+        };
+        if include {
             files.push(entry_path.to_path_buf());
         }
     }
@@ -557,12 +573,23 @@ fn resolve_python_imports(
     // Build a mapping from Python module name → relative file path.
     let mut module_to_file: HashMap<String, String> = HashMap::new();
     for rel_path in python_imports.keys() {
-        // "core/models.py" → "core.models"
-        let module = rel_path
-            .strip_suffix(".py")
-            .or_else(|| rel_path.strip_suffix(".pyi"))
-            .unwrap_or(rel_path)
-            .replace('/', ".");
+        // Convert path to module name using Path components (platform-safe).
+        // "core/models.py" → ["core", "models"] → "core.models"
+        let p = Path::new(rel_path);
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        // Collect directory components + file stem.
+        let mut parts: Vec<&str> = p
+            .parent()
+            .map(|parent| parent.components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect())
+            .unwrap_or_default();
+        parts.push(stem);
+
+        let module = parts.join(".");
 
         // Strip trailing .__init__ for package init files.
         let module = module
@@ -674,9 +701,21 @@ mod tests {
         let files = discover_files(dir.path(), None).unwrap();
         assert_eq!(files.len(), 0);
 
-        // With override: file is included.
+        // With override: extensionless file is included.
         let files = discover_files(dir.path(), Some(Language::Python)).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_discover_files_override_excludes_non_source() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("script"), "x = 1\n").unwrap(); // no extension — included
+        fs::write(dir.path().join("readme.md"), "# hi\n").unwrap(); // has extension — excluded
+        fs::write(dir.path().join("data.json"), "{}").unwrap(); // has extension — excluded
+        fs::write(dir.path().join("real.py"), "x = 1\n").unwrap(); // recognized — included
+
+        let files = discover_files(dir.path(), Some(Language::Python)).unwrap();
+        assert_eq!(files.len(), 2); // script + real.py, not readme.md or data.json
     }
 
     #[test]

@@ -466,6 +466,13 @@ impl MappedGraph {
             .map_err(|_| TensorError::MissingTensor {
                 name: "node_features".into(),
             })?;
+        if view.dtype() != Dtype::F32 {
+            return Err(TensorError::DtypeMismatch {
+                name: "node_features".into(),
+                expected: Dtype::F32,
+                actual: view.dtype(),
+            });
+        }
         let bytes = view.data();
         let slice = unsafe {
             std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)

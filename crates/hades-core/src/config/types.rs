@@ -29,6 +29,7 @@ pub struct HadesConfig {
     pub sync: SyncConfig,
     pub arxiv: ArxivConfig,
     pub logging: LoggingConfig,
+    pub batch_processing: BatchProcessingConfig,
 }
 
 impl HadesConfig {
@@ -432,6 +433,35 @@ impl Default for SyncConfig {
             default_lookback_days: 7,
             batch_size: 8,
             max_results: 1000,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch processing
+// ---------------------------------------------------------------------------
+
+/// Batch processing configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BatchProcessingConfig {
+    /// Maximum concurrent items in flight.
+    pub concurrency: usize,
+    /// Minimum seconds between progress updates.
+    pub progress_interval_secs: f64,
+    /// Requests per second for rate limiting (0 = unlimited).
+    pub rate_limit_rps: f64,
+    /// Maximum retry attempts for rate-limited requests.
+    pub rate_limit_retries: u32,
+}
+
+impl Default for BatchProcessingConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 1,
+            progress_interval_secs: 1.0,
+            rate_limit_rps: 0.0,
+            rate_limit_retries: 3,
         }
     }
 }

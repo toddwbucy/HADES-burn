@@ -109,6 +109,14 @@ enum Commands {
         /// Force re-processing of existing documents.
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Reset batch state (clear previous checkpoint).
+        #[arg(long)]
+        reset: bool,
+
+        /// Maximum concurrent items (overrides config).
+        #[arg(long)]
+        concurrency: Option<usize>,
     },
 
     /// Create a compliance edge linking a document to a smell node.
@@ -184,6 +192,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Ingest {
             inputs, id, batch, resume, metadata, task, claims, collection, force,
+            reset, concurrency,
         } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -198,6 +207,8 @@ fn main() -> anyhow::Result<()> {
                 task.as_deref(),
                 id.as_deref(),
                 resume,
+                reset,
+                concurrency,
             ));
             return match result {
                 Ok(()) => Ok(()),

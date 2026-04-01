@@ -1,4 +1,5 @@
 pub mod arxiv;
+pub mod batch;
 pub mod chunking;
 pub mod code;
 pub mod config;

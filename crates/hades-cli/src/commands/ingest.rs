@@ -5,18 +5,22 @@
 //! - Local file ingest (extract + chunk + embed + store)
 //! - Mixed inputs (arXiv IDs and file paths in one invocation)
 //! - Batch mode with per-document error isolation
+//! - Resumable checkpointing with progress reporting
+//! - Bounded concurrency and rate limiting
 //! - Custom metadata merging
 //! - Collection profile selection
 //! - Force re-processing (surgical delete + re-insert)
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{json, Value};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use hades_core::arxiv::{ArxivClient, is_arxiv_id, normalize_arxiv_id};
+use hades_core::batch::{BatchProcessor, BatchProcessorConfig, RateLimiter};
 use hades_core::chunking::{ChunkingStrategy, TokenChunking};
 use hades_core::db::collections::CollectionProfile;
 use hades_core::db::keys;
@@ -39,29 +43,6 @@ const PROTECTED_KEYS: &[&str] = &["_key", "status", "source", "arxiv_id"];
 enum InputKind {
     Arxiv(String),
     File(PathBuf),
-}
-
-/// Per-document result for JSON output.
-#[derive(serde::Serialize)]
-struct ItemResult {
-    /// The input identifier (arXiv ID or file path).
-    input: String,
-    /// Whether this item was processed successfully.
-    success: bool,
-    /// Number of chunks produced.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    num_chunks: Option<usize>,
-    /// Paper title (arXiv papers).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    /// Whether we skipped because it already exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skipped: Option<bool>,
-    /// Error message if failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    /// Processing duration in milliseconds.
-    duration_ms: u64,
 }
 
 /// Ingest command failed with partial results.
@@ -90,6 +71,8 @@ pub async fn run(
     task: Option<&str>,
     id: Option<&str>,
     resume: bool,
+    reset: bool,
+    concurrency: Option<usize>,
 ) -> Result<()> {
     let cmd_start = Instant::now();
 
@@ -135,9 +118,6 @@ pub async fn run(
         })
         .collect();
 
-    // Auto-activate batch mode for large input sets.
-    let batch_mode = batch || resume || classified.len() > 5;
-
     // Guard: refuse to write to production databases.
     config.require_writable_database()?;
 
@@ -163,123 +143,169 @@ pub async fn run(
         overwrite: force,
     };
 
-    let pipeline = Pipeline::new(extractor, embedder, db.clone(), pipeline_config);
-    let chunker = TokenChunking {
+    let pipeline = Arc::new(Pipeline::new(extractor, embedder, db.clone(), pipeline_config));
+    let chunker = Arc::new(TokenChunking {
         chunk_size: config.embedding.chunking.size_tokens as usize,
         overlap: config.embedding.chunking.overlap_tokens as usize,
-    };
+    });
 
     // -- ArXiv client (only created if we have arXiv inputs) -------------------
     let arxiv_client = if classified.iter().any(|k| matches!(k, InputKind::Arxiv(_))) {
-        Some(ArxivClient::new().context("failed to create ArXiv client")?)
+        Some(Arc::new(
+            ArxivClient::new().context("failed to create ArXiv client")?,
+        ))
     } else {
         None
     };
 
-    // -- Process each input with per-document error isolation -------------------
-    let mut results: Vec<ItemResult> = Vec::with_capacity(classified.len());
+    // -- Configure batch processor ---------------------------------------------
+    let batch_concurrency = concurrency
+        .unwrap_or(config.batch_processing.concurrency)
+        .max(1);
 
-    for (idx, kind) in classified.iter().enumerate() {
-        if batch_mode {
-            let progress = json!({
-                "type": "progress",
-                "current": idx + 1,
-                "total": classified.len(),
-                "percent": ((idx + 1) as f64 / classified.len() as f64 * 100.0),
-            });
-            eprintln!("{}", serde_json::to_string(&progress).unwrap_or_default());
-        }
+    let rate_limiter = if config.batch_processing.rate_limit_rps > 0.0 {
+        Some(Arc::new(RateLimiter::new(
+            config.batch_processing.rate_limit_rps,
+            config.batch_processing.rate_limit_retries,
+        )))
+    } else {
+        None
+    };
 
-        let item_start = Instant::now();
-        match kind {
-            InputKind::Arxiv(arxiv_id) => {
-                let result = ingest_arxiv_paper(
-                    arxiv_client.as_ref().unwrap(),
-                    &pipeline,
-                    &chunker,
-                    &db,
-                    profile,
-                    arxiv_id,
-                    config,
-                    force,
-                    extra_metadata.as_ref(),
-                    id,
-                )
-                .await;
-                let duration = item_start.elapsed().as_millis() as u64;
-                match result {
-                    Ok(r) => results.push(ItemResult {
-                        input: arxiv_id.clone(),
-                        duration_ms: duration,
-                        ..r
-                    }),
-                    Err(e) => {
-                        error!(arxiv_id, error = %e, "ingest failed");
-                        results.push(ItemResult {
-                            input: arxiv_id.clone(),
-                            success: false,
-                            num_chunks: None,
-                            title: None,
-                            skipped: None,
-                            error: Some(e.to_string()),
-                            duration_ms: duration,
-                        });
+    let batch_config = BatchProcessorConfig {
+        concurrency: batch_concurrency,
+        state_file: if batch || resume || classified.len() > 1 {
+            Some(PathBuf::from(".hades-batch-state.json"))
+        } else {
+            None
+        },
+        resume,
+        reset,
+        progress_interval: Duration::from_secs_f64(
+            config.batch_processing.progress_interval_secs,
+        ),
+        rate_limiter,
+    };
+
+    let processor = BatchProcessor::new(batch_config);
+
+    // -- Build items for batch processor ---------------------------------------
+    let config = Arc::new(config.clone());
+    let custom_id: Option<Arc<str>> = id.map(Arc::from);
+    let extra_metadata = extra_metadata.map(Arc::new);
+
+    let items: Vec<(String, InputKind)> = classified
+        .into_iter()
+        .map(|kind| {
+            let item_id = match &kind {
+                InputKind::Arxiv(s) => s.clone(),
+                InputKind::File(p) => p.display().to_string(),
+            };
+            (item_id, kind)
+        })
+        .collect();
+
+    // -- Process batch ---------------------------------------------------------
+    let summary = processor
+        .process(items, move |_item_id, kind| {
+            let pipeline = pipeline.clone();
+            let chunker = chunker.clone();
+            let db = db.clone();
+            let arxiv_client = arxiv_client.clone();
+            let config = config.clone();
+            let custom_id = custom_id.clone();
+            let extra_metadata = extra_metadata.clone();
+
+            async move {
+                match kind {
+                    InputKind::Arxiv(arxiv_id) => {
+                        ingest_arxiv_paper(
+                            arxiv_client.as_deref().unwrap(),
+                            &pipeline,
+                            chunker.as_ref(),
+                            &db,
+                            profile,
+                            &arxiv_id,
+                            &config,
+                            force,
+                            extra_metadata.as_deref(),
+                            custom_id.as_deref(),
+                        )
+                        .await
+                    }
+                    InputKind::File(path) => {
+                        ingest_file(
+                            &pipeline,
+                            chunker.as_ref(),
+                            &db,
+                            profile,
+                            &path,
+                            force,
+                            extra_metadata.as_deref(),
+                            custom_id.as_deref(),
+                        )
+                        .await
                     }
                 }
             }
-            InputKind::File(path) => {
-                let result = ingest_file(
-                    &pipeline,
-                    &chunker,
-                    &db,
-                    profile,
-                    path,
-                    force,
-                    extra_metadata.as_ref(),
-                    id,
-                )
-                .await;
-                let duration = item_start.elapsed().as_millis() as u64;
-                let display = path.display().to_string();
-                match result {
-                    Ok(r) => results.push(ItemResult {
-                        input: display,
-                        duration_ms: duration,
-                        ..r
-                    }),
-                    Err(e) => {
-                        error!(path = %path.display(), error = %e, "ingest failed");
-                        results.push(ItemResult {
-                            input: display,
-                            success: false,
-                            num_chunks: None,
-                            title: None,
-                            skipped: None,
-                            error: Some(e.to_string()),
-                            duration_ms: duration,
-                        });
-                    }
-                }
-            }
-        }
-    }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("batch processing error: {e}"))?;
 
     // -- Output summary --------------------------------------------------------
-    let total = results.len();
-    let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = total - succeeded;
-    let skipped = results.iter().filter(|r| r.skipped == Some(true)).count();
     let duration_ms = cmd_start.elapsed().as_millis() as u64;
 
+    let result_values: Vec<Value> = summary
+        .results
+        .iter()
+        .map(|r| {
+            let mut val = json!({
+                "input": r.item_id,
+                "success": r.success,
+                "duration_ms": r.duration_ms,
+            });
+            if r.skipped == Some(true) {
+                val["skipped"] = json!(true);
+            }
+            // Merge domain-specific fields from the process_fn result.
+            if let Some(ref data) = r.data
+                && let Some(obj) = data.as_object()
+            {
+                for (k, v) in obj {
+                    val[k] = v.clone();
+                }
+            }
+            if let Some(ref err) = r.error {
+                val["error"] = json!(err.message);
+            }
+            val
+        })
+        .collect();
+
+    // Count skipped from both checkpoint resume and database-exists checks.
+    let skipped = summary.skipped
+        + summary
+            .results
+            .iter()
+            .filter(|r| {
+                r.skipped != Some(true)
+                    && r.data
+                        .as_ref()
+                        .and_then(|d| d.get("skipped"))
+                        .and_then(|v| v.as_bool())
+                        == Some(true)
+            })
+            .count();
+
     let output = json!({
-        "success": failed == 0,
+        "success": summary.failed == 0,
         "command": "ingest",
         "data": {
-            "total": total,
-            "completed": succeeded,
-            "failed": failed,
+            "total": summary.total,
+            "completed": summary.completed,
+            "failed": summary.failed,
             "skipped": skipped,
-            "results": results,
+            "results": result_values,
         },
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "duration_ms": duration_ms,
@@ -287,8 +313,12 @@ pub async fn run(
 
     println!("{}", serde_json::to_string_pretty(&output)?);
 
-    if failed > 0 {
-        return Err(IngestFailure { total, failed }.into());
+    if summary.failed > 0 {
+        return Err(IngestFailure {
+            total: summary.total,
+            failed: summary.failed,
+        }
+        .into());
     }
     Ok(())
 }
@@ -299,7 +329,7 @@ pub async fn run(
 async fn ingest_arxiv_paper(
     arxiv: &ArxivClient,
     pipeline: &Pipeline,
-    chunker: &dyn ChunkingStrategy,
+    chunker: &(dyn ChunkingStrategy + Send + Sync),
     db: &ArangoPool,
     profile: &CollectionProfile,
     arxiv_id: &str,
@@ -307,7 +337,7 @@ async fn ingest_arxiv_paper(
     force: bool,
     extra_metadata: Option<&Value>,
     custom_id: Option<&str>,
-) -> Result<ItemResult> {
+) -> Result<Value> {
     let normalized = normalize_arxiv_id(arxiv_id);
     let doc_key = custom_id
         .map(keys::normalize_document_key)
@@ -316,15 +346,7 @@ async fn ingest_arxiv_paper(
     // Check if already exists (unless --force).
     if !force && document_exists(db, profile.metadata, &doc_key).await? {
         info!(doc_key, "already ingested, skipping (use --force to re-process)");
-        return Ok(ItemResult {
-            input: String::new(), // filled by caller
-            success: true,
-            num_chunks: None,
-            title: None,
-            skipped: Some(true),
-            error: None,
-            duration_ms: 0,
-        });
+        return Ok(json!({"skipped": true}));
     }
 
     // Fetch metadata from arXiv API.
@@ -357,57 +379,55 @@ async fn ingest_arxiv_paper(
     // Process through pipeline.
     let result = pipeline.process_document(&pdf_path, &doc_key, chunker).await;
 
-    // Store arXiv-specific metadata (title, authors, abstract, etc.) as a merge.
-    if result.success {
-        let mut arxiv_meta = json!({
-            "title": paper.title,
-            "authors": paper.authors,
-            "abstract": paper.abstract_text,
-            "categories": paper.categories,
-            "primary_category": paper.primary_category,
-            "published": paper.published.to_rfc3339(),
-            "updated": paper.updated.to_rfc3339(),
-            "arxiv_id": paper.arxiv_id,
-            "source": "arxiv",
-            "status": "PROCESSED",
-        });
-        if let Some(doi) = &paper.doi {
-            arxiv_meta["doi"] = json!(doi);
-        }
-        if let Some(jr) = &paper.journal_ref {
-            arxiv_meta["journal_ref"] = json!(jr);
-        }
-        // Merge user-provided extra metadata, skipping protected keys.
-        merge_extra_metadata(&mut arxiv_meta, extra_metadata);
-        // Identity fields are sacrosanct — reassert after merge.
-        arxiv_meta["_key"] = json!(doc_key);
-
-        // Update the metadata document with arXiv-specific fields.
-        if let Err(e) = hades_core::db::crud::update_document(
-            db,
-            profile.metadata,
-            &doc_key,
-            &arxiv_meta,
-        )
-        .await
-        {
-            warn!(doc_key, error = %e, "failed to update arxiv metadata (document was still stored)");
-        }
+    if !result.success {
+        bail!(
+            "{}",
+            result
+                .error
+                .unwrap_or_else(|| "unknown pipeline error".into())
+        );
     }
 
-    Ok(ItemResult {
-        input: String::new(), // filled by caller
-        success: result.success,
-        num_chunks: if result.success {
-            Some(result.chunk_count)
-        } else {
-            None
-        },
-        title: Some(paper.title.clone()),
-        skipped: None,
-        error: result.error,
-        duration_ms: 0, // filled by caller
-    })
+    // Store arXiv-specific metadata (title, authors, abstract, etc.) as a merge.
+    let mut arxiv_meta = json!({
+        "title": paper.title,
+        "authors": paper.authors,
+        "abstract": paper.abstract_text,
+        "categories": paper.categories,
+        "primary_category": paper.primary_category,
+        "published": paper.published.to_rfc3339(),
+        "updated": paper.updated.to_rfc3339(),
+        "arxiv_id": paper.arxiv_id,
+        "source": "arxiv",
+        "status": "PROCESSED",
+    });
+    if let Some(doi) = &paper.doi {
+        arxiv_meta["doi"] = json!(doi);
+    }
+    if let Some(jr) = &paper.journal_ref {
+        arxiv_meta["journal_ref"] = json!(jr);
+    }
+    // Merge user-provided extra metadata, skipping protected keys.
+    merge_extra_metadata(&mut arxiv_meta, extra_metadata);
+    // Identity fields are sacrosanct — reassert after merge.
+    arxiv_meta["_key"] = json!(doc_key);
+
+    // Update the metadata document with arXiv-specific fields.
+    if let Err(e) = hades_core::db::crud::update_document(
+        db,
+        profile.metadata,
+        &doc_key,
+        &arxiv_meta,
+    )
+    .await
+    {
+        warn!(doc_key, error = %e, "failed to update arxiv metadata (document was still stored)");
+    }
+
+    Ok(json!({
+        "num_chunks": result.chunk_count,
+        "title": paper.title,
+    }))
 }
 
 // ── Local file ingest ────────────────────────────────────────────────────
@@ -415,14 +435,14 @@ async fn ingest_arxiv_paper(
 #[allow(clippy::too_many_arguments)]
 async fn ingest_file(
     pipeline: &Pipeline,
-    chunker: &dyn ChunkingStrategy,
+    chunker: &(dyn ChunkingStrategy + Send + Sync),
     db: &ArangoPool,
     profile: &CollectionProfile,
     path: &Path,
     force: bool,
     extra_metadata: Option<&Value>,
     custom_id: Option<&str>,
-) -> Result<ItemResult> {
+) -> Result<Value> {
     if !path.exists() {
         bail!("file not found: {}", path.display());
     }
@@ -440,61 +460,49 @@ async fn ingest_file(
     // Check if already exists (unless --force).
     if !force && document_exists(db, profile.metadata, &doc_key).await? {
         info!(doc_key, "already ingested, skipping (use --force to re-process)");
-        return Ok(ItemResult {
-            input: String::new(),
-            success: true,
-            num_chunks: None,
-            title: None,
-            skipped: Some(true),
-            error: None,
-            duration_ms: 0,
-        });
+        return Ok(json!({"skipped": true}));
     }
 
     // Process through pipeline.
     let result = pipeline.process_document(path, &doc_key, chunker).await;
 
+    if !result.success {
+        bail!(
+            "{}",
+            result
+                .error
+                .unwrap_or_else(|| "unknown pipeline error".into())
+        );
+    }
+
     // Update metadata with source info + extra metadata.
-    if result.success {
-        let mut file_meta = json!({
-            "source": "local",
-            "source_path": path.display().to_string(),
-            "status": "PROCESSED",
-        });
+    let mut file_meta = json!({
+        "source": "local",
+        "source_path": path.display().to_string(),
+        "status": "PROCESSED",
+    });
 
-        // Detect code files and tag them.
-        if is_code_file(path) {
-            file_meta["pipeline"] = json!("code");
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                file_meta["file_type"] = json!(format!("{ext}_source"));
-            }
-        }
-
-        // Merge user-provided extra metadata, skipping protected keys.
-        merge_extra_metadata(&mut file_meta, extra_metadata);
-        file_meta["_key"] = json!(doc_key);
-
-        if let Err(e) =
-            hades_core::db::crud::update_document(db, profile.metadata, &doc_key, &file_meta)
-                .await
-        {
-            warn!(doc_key, error = %e, "failed to update file metadata");
+    // Detect code files and tag them.
+    if is_code_file(path) {
+        file_meta["pipeline"] = json!("code");
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            file_meta["file_type"] = json!(format!("{ext}_source"));
         }
     }
 
-    Ok(ItemResult {
-        input: String::new(),
-        success: result.success,
-        num_chunks: if result.success {
-            Some(result.chunk_count)
-        } else {
-            None
-        },
-        title: None,
-        skipped: None,
-        error: result.error,
-        duration_ms: 0,
-    })
+    // Merge user-provided extra metadata, skipping protected keys.
+    merge_extra_metadata(&mut file_meta, extra_metadata);
+    file_meta["_key"] = json!(doc_key);
+
+    if let Err(e) =
+        hades_core::db::crud::update_document(db, profile.metadata, &doc_key, &file_meta).await
+    {
+        warn!(doc_key, error = %e, "failed to update file metadata");
+    }
+
+    Ok(json!({
+        "num_chunks": result.chunk_count,
+    }))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

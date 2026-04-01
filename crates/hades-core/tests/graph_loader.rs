@@ -127,8 +127,8 @@ async fn test_load_full_graph() {
     );
 }
 
-#[tokio::test]
-async fn test_edge_collection_names_match_schema() {
+#[test]
+fn test_edge_collection_names_match_schema() {
     // Verify the edge collection names used by the loader match the schema constant
     assert_eq!(EDGE_COLLECTION_NAMES.len(), NUM_RELATIONS);
 

@@ -103,10 +103,6 @@ pub async fn load(pool: &ArangoPool) -> Result<LoadResult, GraphLoaderError> {
     let num_nodes = id_map.len();
     let num_edges = raw_edges.len();
 
-    if num_nodes > u32::MAX as usize {
-        return Err(GraphLoaderError::TooManyNodes { num_nodes });
-    }
-
     info!(num_nodes, num_edges, "edge loading complete");
 
     // ------------------------------------------------------------------
@@ -219,8 +215,10 @@ async fn load_edge_collection(
             .as_str()
             .ok_or(GraphLoaderError::MalformedEdge { index: i })?;
 
-        let src_idx = id_map.get_or_create(src_id) as u32;
-        let dst_idx = id_map.get_or_create(dst_id) as u32;
+        let src_idx = u32::try_from(id_map.get_or_create(src_id))
+            .map_err(|_| GraphLoaderError::TooManyNodes { num_nodes: id_map.len() })?;
+        let dst_idx = u32::try_from(id_map.get_or_create(dst_id))
+            .map_err(|_| GraphLoaderError::TooManyNodes { num_nodes: id_map.len() })?;
         raw_edges.push((src_idx, dst_idx, rel_idx as u32));
         count += 1;
     }
@@ -305,11 +303,15 @@ async fn load_collection_embeddings(
                 }
             };
 
-            // Parse f64 JSON numbers → f32 feature vector
-            let embedding: Vec<f32> = emb_arr
+            // Parse f64 JSON numbers → f32 feature vector; skip if any element is non-numeric
+            let embedding: Option<Vec<f32>> = emb_arr
                 .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
+            let Some(embedding) = embedding else {
+                warn!(key, collection = col_name, "embedding contains non-numeric values, skipping");
+                continue;
+            };
 
             graph.set_node_features(node_idx, &embedding);
             total_embedded += 1;

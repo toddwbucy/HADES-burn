@@ -21,3 +21,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

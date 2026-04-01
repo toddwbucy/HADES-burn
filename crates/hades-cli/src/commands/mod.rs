@@ -6,6 +6,7 @@
 pub mod arxiv;
 pub mod arxiv_sync;
 pub mod codebase;
+pub mod codebase_ingest;
 pub mod db;
 pub mod embed;
 pub mod graph_embed;

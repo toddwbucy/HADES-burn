@@ -38,11 +38,68 @@ static DEFAULT: CollectionProfile = CollectionProfile {
     embeddings: "embeddings",
 };
 
-static ALL_PROFILES: [(&str, &CollectionProfile); 3] = [
+static ALL_PROFILES: [(&str, &CollectionProfile); 4] = [
     ("arxiv", &ARXIV),
     ("sync", &SYNC),
     ("default", &DEFAULT),
+    ("codebase", &CODEBASE_PROFILE),
 ];
+
+// ---------------------------------------------------------------------------
+// Codebase-specific collections
+// ---------------------------------------------------------------------------
+
+/// Base collection profile for codebase ingestion (files → chunks → embeddings).
+static CODEBASE_PROFILE: CollectionProfile = CollectionProfile {
+    metadata: "codebase_files",
+    chunks: "codebase_chunks",
+    embeddings: "codebase_embeddings",
+};
+
+/// Extended collection set for codebase ingestion.
+///
+/// Beyond the standard metadata/chunks/embeddings triple, codebase
+/// analysis produces symbol-level metadata and graph edges (imports,
+/// defines, calls, implements).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CodebaseCollections {
+    /// File-level metadata (language, metrics, symbol_hash).
+    pub files: &'static str,
+    /// AST-aligned text chunks.
+    pub chunks: &'static str,
+    /// Embedding vectors per chunk.
+    pub embeddings: &'static str,
+    /// Symbol-level metadata (name, kind, span, parent file).
+    pub symbols: &'static str,
+    /// Graph edges (imports, defines, calls, implements).
+    /// This is an **edge** collection (type 3) in ArangoDB.
+    pub edges: &'static str,
+}
+
+/// The singleton codebase collection set.
+pub static CODEBASE: CodebaseCollections = CodebaseCollections {
+    files: "codebase_files",
+    chunks: "codebase_chunks",
+    embeddings: "codebase_embeddings",
+    symbols: "codebase_symbols",
+    edges: "codebase_edges",
+};
+
+impl CodebaseCollections {
+    /// All collection names, in order suitable for creation.
+    ///
+    /// Returns `(name, collection_type)` pairs where type 2 = document,
+    /// 3 = edge.
+    pub fn all_collections(&self) -> [(&str, u32); 5] {
+        [
+            (self.files, 2),
+            (self.chunks, 2),
+            (self.embeddings, 2),
+            (self.symbols, 2),
+            (self.edges, 3),
+        ]
+    }
+}
 
 impl CollectionProfile {
     /// Look up a profile by name.
@@ -126,10 +183,29 @@ mod tests {
     #[test]
     fn test_all_profiles() {
         let all = CollectionProfile::all();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"arxiv"));
         assert!(names.contains(&"sync"));
         assert!(names.contains(&"default"));
+        assert!(names.contains(&"codebase"));
+    }
+
+    #[test]
+    fn test_codebase_profile() {
+        let p = CollectionProfile::get("codebase").unwrap();
+        assert_eq!(p.metadata, "codebase_files");
+        assert_eq!(p.chunks, "codebase_chunks");
+        assert_eq!(p.embeddings, "codebase_embeddings");
+    }
+
+    #[test]
+    fn test_codebase_collections() {
+        let cols = CODEBASE.all_collections();
+        assert_eq!(cols.len(), 5);
+        // First 4 are document collections (type 2).
+        assert!(cols[..4].iter().all(|(_, t)| *t == 2));
+        // Last one (edges) is an edge collection (type 3).
+        assert_eq!(cols[4], ("codebase_edges", 3));
     }
 }

@@ -167,6 +167,9 @@ pub enum GraphDataError {
         col_idx: u32,
         num_collections: usize,
     },
+
+    #[error("node {node_idx}: collection index unset (sentinel u32::MAX) — call set before validate")]
+    NodeCollectionUnset { node_idx: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +316,12 @@ impl GraphData {
     }
 
     /// Validate internal consistency.
+    ///
+    /// When `collection_names` is empty (e.g. immediately after [`with_capacity()`]),
+    /// `node_collections` values are not checked — they remain at the `u32::MAX`
+    /// sentinel set by `with_capacity()`. Once `collection_names` is populated,
+    /// every `node_collections` entry must be a valid index into it. Sentinel
+    /// values are reported as [`GraphDataError::NodeCollectionUnset`].
     pub fn validate(&self) -> Result<(), GraphDataError> {
         if self.node_features.len() != self.num_nodes * self.feature_dim {
             return Err(GraphDataError::NodeFeaturesLengthMismatch {
@@ -333,9 +342,13 @@ impl GraphData {
                 expected: self.num_nodes,
             });
         }
-        // Validate node_collections indices against collection_names
+        // Validate node_collections indices against collection_names.
+        // Skipped when collection_names is empty (pre-population phase).
         if !self.collection_names.is_empty() {
             for (i, &col_idx) in self.node_collections.iter().enumerate() {
+                if col_idx == u32::MAX {
+                    return Err(GraphDataError::NodeCollectionUnset { node_idx: i });
+                }
                 if (col_idx as usize) >= self.collection_names.len() {
                     return Err(GraphDataError::NodeCollectionOutOfBounds {
                         node_idx: i,
@@ -584,6 +597,23 @@ mod tests {
         assert!(
             matches!(err, GraphDataError::NodeCollectionOutOfBounds { node_idx: 1, col_idx: 5, .. }),
             "expected NodeCollectionOutOfBounds, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_graph_data_validate_sentinel_detected() {
+        let mut g = GraphData::with_capacity(2, 0);
+        // No collection_names → sentinel u32::MAX is allowed
+        assert!(g.validate().is_ok());
+
+        // Once collection_names is set, sentinel is rejected
+        g.collection_names = vec!["col_a".into()];
+        g.node_collections[0] = 0;
+        // node_collections[1] is still u32::MAX from with_capacity
+        let err = g.validate().unwrap_err();
+        assert!(
+            matches!(err, GraphDataError::NodeCollectionUnset { node_idx: 1 }),
+            "expected NodeCollectionUnset, got: {err}"
         );
     }
 

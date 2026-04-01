@@ -160,6 +160,13 @@ pub enum GraphDataError {
         rel_type: u32,
         num_relations: usize,
     },
+
+    #[error("node {node_idx}: collection index {col_idx} >= collection_names length {num_collections}")]
+    NodeCollectionOutOfBounds {
+        node_idx: usize,
+        col_idx: u32,
+        num_collections: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +330,18 @@ impl GraphData {
                 actual: self.node_collections.len(),
                 expected: self.num_nodes,
             });
+        }
+        // Validate node_collections indices against collection_names
+        if !self.collection_names.is_empty() {
+            for (i, &col_idx) in self.node_collections.iter().enumerate() {
+                if (col_idx as usize) >= self.collection_names.len() {
+                    return Err(GraphDataError::NodeCollectionOutOfBounds {
+                        node_idx: i,
+                        col_idx,
+                        num_collections: self.collection_names.len(),
+                    });
+                }
+            }
         }
         if self.edge_src.len() != self.num_edges {
             return Err(GraphDataError::EdgeSrcLengthMismatch {
@@ -546,6 +565,23 @@ mod tests {
         assert!(
             matches!(err, GraphDataError::HasEmbeddingLengthMismatch { .. }),
             "expected HasEmbeddingLengthMismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_graph_data_validate_node_collection_bounds() {
+        let mut g = GraphData::with_capacity(2, 0);
+        g.collection_names = vec!["col_a".into(), "col_b".into()];
+        g.node_collections[0] = 0;
+        g.node_collections[1] = 1;
+        assert!(g.validate().is_ok());
+
+        // Set out-of-bounds collection index
+        g.node_collections[1] = 5;
+        let err = g.validate().unwrap_err();
+        assert!(
+            matches!(err, GraphDataError::NodeCollectionOutOfBounds { node_idx: 1, col_idx: 5, .. }),
+            "expected NodeCollectionOutOfBounds, got: {err}"
         );
     }
 

@@ -197,62 +197,78 @@ fn definition_collections() -> Vec<&'static str> {
     v
 }
 
-/// All vertex collections that can reference axioms (everything except infra).
+/// Migration target collections: paper-scoped + extra paper collections.
 ///
-/// In the Python code this is `ALL_VERTEX_COLLECTIONS - {paper_edges, builds, build_runs}`.
-/// We inline a representative list covering all paper-scoped, NL-global, and extra collections.
-///
-/// # Leak safety
-///
-/// Uses `Box::leak` to produce `&'static str` from dynamically-formatted
-/// `{prefix}_{type}` strings. This is intentional: these collections are
-/// program-lifetime static data, initialized once via `LazyLock`. **Do not
-/// call this function outside of `LazyLock` initialization** — repeated
-/// calls would leak memory.
-fn axiom_compliant_collections() -> Vec<&'static str> {
-    let mut v = Vec::with_capacity(80);
-
-    // Paper-scoped: prefix × type
-    for prefix in PAPER_PREFIXES {
-        for ctype in CONCEPT_TYPES {
-            let s: &'static str = Box::leak(format!("{prefix}_{ctype}").into_boxed_str());
-            v.push(s);
-        }
-    }
-
-    // Extra paper-scoped
-    v.extend([
-        "hope_assumptions", "hope_blockers", "hope_code_smells",
-        "hope_context_sources", "hope_examples", "hope_extensions",
-        "hope_nl_reframings", "hope_optimizers", "hope_probes",
-        "hope_python_signatures", "hope_triton_specs", "hope_validation_reports",
-        "conveyance_definitions", "conveyance_equations", "conveyance_hypotheses",
-        "conveyance_philosophy", "conveyance_protocols", "community_implementations",
-    ]);
-
-    // NL-global
-    v.extend([
+/// Reuses the already-leaked `&'static str` from `AXIOM_COMPLIANT_COLLECTIONS`
+/// by filtering out NL-global and hecate_specs entries.
+fn migration_target_collections() -> Vec<&'static str> {
+    // NL-global collections to exclude from migration targets
+    const NL_GLOBAL: &[&str] = &[
         "nl_axioms", "nl_reframings", "nl_build_paths", "nl_code_smells",
         "nl_ethnographic_notes", "nl_ethnography", "nl_optimizers",
         "nl_probe_patterns", "nl_roadmap", "nl_system", "nl_toolchain", "nl_articles",
-    ]);
-
-    // Infra (only hecate_specs; paper_edges/builds/build_runs excluded)
-    v.push("hecate_specs");
-
-    v.sort();
-    v.dedup();
-    v
+        "hecate_specs",
+    ];
+    AXIOM_COMPLIANT_COLLECTIONS
+        .iter()
+        .copied()
+        .filter(|s| !NL_GLOBAL.contains(s))
+        .collect()
 }
+
+/// All vertex collections that can reference axioms (everything except infra).
+///
+/// In the Python code this is `ALL_VERTEX_COLLECTIONS - {paper_edges, builds, build_runs}`.
+///
+/// Uses `Box::leak` to produce `&'static str` from dynamically-formatted
+/// `{prefix}_{type}` strings. This is safe because the `LazyLock` ensures
+/// the leaks happen exactly once at program startup.
+static AXIOM_COMPLIANT_COLLECTIONS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut v = Vec::with_capacity(80);
+
+        // Paper-scoped: prefix × type
+        for prefix in PAPER_PREFIXES {
+            for ctype in CONCEPT_TYPES {
+                let s: &'static str = Box::leak(format!("{prefix}_{ctype}").into_boxed_str());
+                v.push(s);
+            }
+        }
+
+        // Extra paper-scoped
+        v.extend([
+            "hope_assumptions", "hope_blockers", "hope_code_smells",
+            "hope_context_sources", "hope_examples", "hope_extensions",
+            "hope_nl_reframings", "hope_optimizers", "hope_probes",
+            "hope_python_signatures", "hope_triton_specs", "hope_validation_reports",
+            "conveyance_definitions", "conveyance_equations", "conveyance_hypotheses",
+            "conveyance_philosophy", "conveyance_protocols", "community_implementations",
+        ]);
+
+        // NL-global
+        v.extend([
+            "nl_axioms", "nl_reframings", "nl_build_paths", "nl_code_smells",
+            "nl_ethnographic_notes", "nl_ethnography", "nl_optimizers",
+            "nl_probe_patterns", "nl_roadmap", "nl_system", "nl_toolchain", "nl_articles",
+        ]);
+
+        // Infra (only hecate_specs; paper_edges/builds/build_runs excluded)
+        v.push("hecate_specs");
+
+        v.sort();
+        v.dedup();
+        v
+    });
 
 /// All vertex collections (the full union).
-fn all_vertex_collections() -> Vec<&'static str> {
-    let mut v = axiom_compliant_collections();
-    v.extend(["paper_edges", "builds", "build_runs"]);
-    v.sort();
-    v.dedup();
-    v
-}
+static ALL_VERTEX_COLLECTIONS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut v = AXIOM_COMPLIANT_COLLECTIONS.clone();
+        v.extend(["paper_edges", "builds", "build_runs"]);
+        v.sort();
+        v.dedup();
+        v
+    });
 
 // ---------------------------------------------------------------------------
 // Edge collection instances (indices 0..15)
@@ -260,7 +276,17 @@ fn all_vertex_collections() -> Vec<&'static str> {
 
 /// All 16 edge collection definitions for materialization.
 ///
-/// Index positions are stable — do not reorder.
+/// **These indices are distinct from [`EDGE_COLLECTION_NAMES`] indices.**
+///
+/// - `ALL_EDGE_COLLECTIONS` indices are used by
+///   [`NamedGraphDef::edge_collection_indices`] and the materialization
+///   pipeline. Example: `nl_validated_against_edges` is index **1** here.
+/// - `EDGE_COLLECTION_NAMES` indices are RGCN relation-type indices used
+///   in [`GraphData::edge_type`]. Example: `nl_validated_against_edges`
+///   is index **19** there.
+///
+/// **Do not reorder either array** — doing so breaks materialization
+/// (this array) or trained RGCN models (`EDGE_COLLECTION_NAMES`).
 pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
     std::sync::LazyLock::new(|| {
         vec![
@@ -268,7 +294,7 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
             EdgeCollectionDef {
                 name: "nl_axiom_basis_edges",
                 source_field: "axiom_basis",
-                from_collections: axiom_compliant_collections(),
+                from_collections: AXIOM_COMPLIANT_COLLECTIONS.clone(),
                 to_collections: axiom_collections(),
                 description: "Links any NL concept to its IS axiom. The most universal edge.",
                 is_array: false,
@@ -278,7 +304,7 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
             EdgeCollectionDef {
                 name: "nl_validated_against_edges",
                 source_field: "validated_against",
-                from_collections: axiom_compliant_collections(),
+                from_collections: AXIOM_COMPLIANT_COLLECTIONS.clone(),
                 to_collections: axiom_collections(),
                 description: "Links any NL concept to its IS_NOT anti-axiom.",
                 is_array: false,
@@ -338,7 +364,7 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
             EdgeCollectionDef {
                 name: "nl_reframing_link_edges",
                 source_field: "nl_reframing_link",
-                from_collections: axiom_compliant_collections(),
+                from_collections: AXIOM_COMPLIANT_COLLECTIONS.clone(),
                 to_collections: vec!["nl_reframings", "hope_nl_reframings"],
                 description: "Concept → its NL reframing (philosophical lens).",
                 is_array: false,
@@ -353,27 +379,7 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
                     "nl_ethnographic_notes", "nl_ethnography", "nl_optimizers",
                     "nl_probe_patterns", "nl_roadmap", "nl_system", "nl_toolchain", "nl_articles",
                 ],
-                to_collections: {
-                    let mut v = Vec::with_capacity(70);
-                    // Extra paper collections + all paper-scoped
-                    v.extend([
-                        "hope_assumptions", "hope_blockers", "hope_code_smells",
-                        "hope_context_sources", "hope_examples", "hope_extensions",
-                        "hope_nl_reframings", "hope_optimizers", "hope_probes",
-                        "hope_python_signatures", "hope_triton_specs", "hope_validation_reports",
-                        "conveyance_definitions", "conveyance_equations", "conveyance_hypotheses",
-                        "conveyance_philosophy", "conveyance_protocols", "community_implementations",
-                    ]);
-                    for prefix in PAPER_PREFIXES {
-                        for ctype in CONCEPT_TYPES {
-                            let s: &'static str = Box::leak(format!("{prefix}_{ctype}").into_boxed_str());
-                            v.push(s);
-                        }
-                    }
-                    v.sort();
-                    v.dedup();
-                    v
-                },
+                to_collections: migration_target_collections(),
                 description: "Provenance from promoted nl_* docs back to original paper source.",
                 is_array: false,
                 edge_attributes: vec![],
@@ -429,8 +435,8 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
             EdgeCollectionDef {
                 name: "nl_cross_paper_edges",
                 source_field: "from_node",
-                from_collections: all_vertex_collections(),
-                to_collections: all_vertex_collections(),
+                from_collections: ALL_VERTEX_COLLECTIONS.clone(),
+                to_collections: ALL_VERTEX_COLLECTIONS.clone(),
                 description: "Cross-paper concept relationships from paper_edges collection.",
                 is_array: false,
                 edge_attributes: vec!["name", "description", "relationship", "source_paper", "target_paper"],
@@ -439,7 +445,7 @@ pub static ALL_EDGE_COLLECTIONS: std::sync::LazyLock<Vec<EdgeCollectionDef>> =
             EdgeCollectionDef {
                 name: "nl_smell_compliance_edges",
                 source_field: "smell_compliance",
-                from_collections: axiom_compliant_collections(),
+                from_collections: AXIOM_COMPLIANT_COLLECTIONS.clone(),
                 to_collections: vec!["nl_code_smells", "hope_code_smells"],
                 description: "Concept → code smell compliance records.",
                 is_array: false,

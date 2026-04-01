@@ -4,9 +4,11 @@
 //! (`core/database/nl_graph_schema.py`) and defines the tensor-like
 //! data structures consumed by the graph loader and training pipeline.
 
+pub mod loader;
 pub mod schema;
 pub mod types;
 
+pub use loader::{GraphLoaderError, load};
 pub use schema::{
     EdgeCollectionDef, NamedGraphDef, NlGraphSchema, ALL_EDGE_COLLECTIONS,
     ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM, NL_GRAPH_SCHEMA, NUM_RELATIONS,

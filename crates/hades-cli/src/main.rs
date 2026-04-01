@@ -7,6 +7,7 @@
 mod commands;
 mod dispatch;
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process;
 
@@ -87,7 +88,7 @@ enum Commands {
         batch: bool,
 
         /// Resume a previously interrupted batch.
-        #[arg(short = 'r', long)]
+        #[arg(short = 'r', long, conflicts_with = "reset")]
         resume: bool,
 
         /// Custom metadata as JSON.
@@ -109,6 +110,14 @@ enum Commands {
         /// Force re-processing of existing documents.
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Reset batch state (clear previous checkpoint).
+        #[arg(long, conflicts_with = "resume")]
+        reset: bool,
+
+        /// Maximum concurrent items (overrides config, must be >= 1).
+        #[arg(long)]
+        concurrency: Option<NonZeroUsize>,
     },
 
     /// Create a compliance edge linking a document to a smell node.
@@ -184,6 +193,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Ingest {
             inputs, id, batch, resume, metadata, task, claims, collection, force,
+            reset, concurrency,
         } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -198,6 +208,8 @@ fn main() -> anyhow::Result<()> {
                 task.as_deref(),
                 id.as_deref(),
                 resume,
+                reset,
+                concurrency.map(NonZeroUsize::get),
             ));
             return match result {
                 Ok(()) => Ok(()),

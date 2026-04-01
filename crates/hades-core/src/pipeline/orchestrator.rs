@@ -144,7 +144,7 @@ impl Pipeline {
         &self,
         file_path: &Path,
         doc_id: &str,
-        chunker: &dyn ChunkingStrategy,
+        chunker: &(dyn ChunkingStrategy + Send + Sync),
     ) -> DocumentResult {
         let start = Instant::now();
         let doc_key = keys::normalize_document_key(doc_id);
@@ -185,7 +185,7 @@ impl Pipeline {
     pub async fn process_batch(
         &self,
         documents: &[(&Path, &str)],
-        chunker: &dyn ChunkingStrategy,
+        chunker: &(dyn ChunkingStrategy + Send + Sync),
     ) -> PipelineSummary {
         let batch_start = Instant::now();
         let mut results = Vec::with_capacity(documents.len());
@@ -282,7 +282,7 @@ impl Pipeline {
         &self,
         file_path: &Path,
         doc_key: &str,
-        chunker: &dyn ChunkingStrategy,
+        chunker: &(dyn ChunkingStrategy + Send + Sync),
     ) -> Result<usize, PipelineError> {
         // 1. Extract
         let extract_result = self
@@ -300,7 +300,7 @@ impl Pipeline {
         &self,
         doc_key: &str,
         extract_result: &ExtractResult,
-        chunker: &dyn ChunkingStrategy,
+        chunker: &(dyn ChunkingStrategy + Send + Sync),
     ) -> Result<usize, PipelineError> {
         // 2. Chunk
         let chunks = chunker.chunk(&extract_result.full_text);

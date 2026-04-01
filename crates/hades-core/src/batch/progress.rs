@@ -68,7 +68,9 @@ impl ProgressReporter {
             start: now,
             min_interval,
             // Set last_report far enough in the past to allow the first report.
-            last_report: Mutex::new(now - min_interval),
+            // Use checked_sub to avoid panic if min_interval exceeds time since
+            // the monotonic clock epoch (e.g., very early in process lifetime).
+            last_report: Mutex::new(now.checked_sub(min_interval).unwrap_or(now)),
         }
     }
 

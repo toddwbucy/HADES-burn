@@ -61,9 +61,16 @@ impl RateLimiter {
 
     /// Compute the backoff delay for a given retry attempt.
     ///
-    /// Uses exponential backoff: `2^attempt * min_delay`.
+    /// Uses exponential backoff: `2^attempt * base_delay`.
+    /// When rate limiting is unlimited (`min_delay` is zero), a 1-second
+    /// floor is applied so that retries still back off meaningfully.
     pub fn backoff_delay(&self, attempt: u32) -> Duration {
-        self.min_delay * 2u32.pow(attempt)
+        let base = if self.min_delay.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            self.min_delay
+        };
+        base * 2u32.pow(attempt)
     }
 
     /// Maximum number of retry attempts.
@@ -114,6 +121,15 @@ mod tests {
         assert_eq!(limiter.backoff_delay(1), Duration::from_millis(1000));
         assert_eq!(limiter.backoff_delay(2), Duration::from_millis(2000));
         assert_eq!(limiter.backoff_delay(3), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn test_backoff_delay_unlimited_rate() {
+        // With unlimited rate (0 rps), backoff uses a 1-second floor.
+        let limiter = RateLimiter::new(0.0, 3);
+        assert_eq!(limiter.backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(limiter.backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(limiter.backoff_delay(2), Duration::from_secs(4));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 mod commands;
 mod dispatch;
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process;
 
@@ -87,7 +88,7 @@ enum Commands {
         batch: bool,
 
         /// Resume a previously interrupted batch.
-        #[arg(short = 'r', long)]
+        #[arg(short = 'r', long, conflicts_with = "reset")]
         resume: bool,
 
         /// Custom metadata as JSON.
@@ -111,12 +112,12 @@ enum Commands {
         force: bool,
 
         /// Reset batch state (clear previous checkpoint).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "resume")]
         reset: bool,
 
-        /// Maximum concurrent items (overrides config).
+        /// Maximum concurrent items (overrides config, must be >= 1).
         #[arg(long)]
-        concurrency: Option<usize>,
+        concurrency: Option<NonZeroUsize>,
     },
 
     /// Create a compliance edge linking a document to a smell node.
@@ -208,7 +209,7 @@ fn main() -> anyhow::Result<()> {
                 id.as_deref(),
                 resume,
                 reset,
-                concurrency,
+                concurrency.map(NonZeroUsize::get),
             ));
             return match result {
                 Ok(()) => Ok(()),

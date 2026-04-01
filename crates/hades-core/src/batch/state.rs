@@ -45,10 +45,11 @@ impl BatchState {
     /// Returns `Ok(None)` if the file does not exist.
     /// Returns `Err` if the file exists but is corrupt.
     pub fn load(path: &Path) -> Result<Option<Self>, super::BatchError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(path)?;
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         let state: Self = serde_json::from_str(&content)?;
         debug!(
             completed = state.completed.len(),
@@ -74,11 +75,14 @@ impl BatchState {
 
     /// Delete the state file.
     pub fn clear(path: &Path) -> Result<(), super::BatchError> {
-        if path.exists() {
-            fs::remove_file(path)?;
-            debug!("cleared batch state file");
+        match fs::remove_file(path) {
+            Ok(()) => {
+                debug!("cleared batch state file");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
         }
-        Ok(())
     }
 
     /// Record a successful item.

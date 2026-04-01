@@ -157,6 +157,9 @@ impl BatchProcessor {
         let rate_limiter = self.config.rate_limiter.clone();
 
         // Spawn tasks onto JoinSet.
+        // Map task IDs to item IDs so panicked tasks can be identified.
+        let mut task_id_map: std::collections::HashMap<tokio::task::Id, String> =
+            std::collections::HashMap::new();
         let mut join_set: JoinSet<ItemResult> = JoinSet::new();
         let mut results: Vec<ItemResult> = Vec::with_capacity(total);
 
@@ -182,7 +185,7 @@ impl BatchProcessor {
             let rl_clone = rate_limiter.clone();
             let id = item_id.clone();
 
-            join_set.spawn(async move {
+            let handle = join_set.spawn(async move {
                 // Rate limit if configured.
                 if let Some(ref rl) = rl_clone {
                     rl.acquire().await;
@@ -218,6 +221,7 @@ impl BatchProcessor {
                     },
                 }
             });
+            task_id_map.insert(handle.id(), item_id);
 
             // Collect completed tasks as we go (prevents unbounded memory growth).
             while let Some(Ok(result)) = join_set.try_join_next() {
@@ -232,16 +236,19 @@ impl BatchProcessor {
                     self.record_result(&mut state, &progress, result, &mut results);
                 }
                 Err(e) => {
-                    // Task panicked — record as a generic failure.
-                    error!(error = %e, "task panicked");
+                    // Task panicked — recover the item ID from the task ID map.
+                    let panicked_id = task_id_map
+                        .remove(&e.id())
+                        .unwrap_or_else(|| "unknown".into());
+                    error!(item_id = %panicked_id, error = %e, "task panicked");
                     let item_error = ItemError {
-                        item_id: "unknown".into(),
+                        item_id: panicked_id.clone(),
                         stage: "spawn".into(),
                         message: format!("task panicked: {e}"),
                         duration_ms: 0,
                     };
                     results.push(ItemResult {
-                        item_id: "unknown".into(),
+                        item_id: panicked_id,
                         success: false,
                         skipped: None,
                         data: None,

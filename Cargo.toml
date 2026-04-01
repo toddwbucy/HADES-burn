@@ -87,3 +87,9 @@ rustpython-parser = "0.4"
 syn = { version = "2", features = ["full", "visit"] }
 sha2 = "0.11"
 proc-macro2 = { version = "1", features = ["span-locations"] }
+
+# File traversal
+walkdir = "2"
+
+# Test utilities
+tempfile = "3"

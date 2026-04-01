@@ -228,6 +228,27 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::arxiv_sync::status(&config, limit));
         }
+        Commands::Codebase(CodebaseCmd::Ingest { path, language, batch }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(commands::codebase_ingest::run(
+                &config,
+                path,
+                language.as_deref(),
+                batch,
+            ));
+            return match result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if e.downcast_ref::<commands::codebase_ingest::CodebaseIngestFailure>()
+                        .is_some()
+                    {
+                        process::exit(1);
+                    }
+                    Err(e)
+                }
+            };
+        }
         _ => {} // Fall through to Python passthrough.
     }
 

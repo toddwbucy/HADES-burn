@@ -698,4 +698,34 @@ mod tests {
         assert!(PAPER_PREFIXES.contains(&"hope"));
         assert!(PAPER_PREFIXES.contains(&"titans_revisited"));
     }
+
+    #[test]
+    fn test_paper_typed_synced_with_prefixes() {
+        // Concept types used in edge collection definitions.
+        // Not all CONCEPT_TYPES have paper_typed entries (e.g. "algorithms"
+        // only exists as hope_algorithms, not for all papers).
+        let edge_types = ["axioms", "equations", "definitions", "abstractions", "lineage"];
+
+        for &ctype in &edge_types {
+            let entries = paper_typed(ctype);
+            assert_eq!(
+                entries.len(),
+                PAPER_PREFIXES.len(),
+                "paper_typed({ctype:?}) has {} entries but PAPER_PREFIXES has {}",
+                entries.len(),
+                PAPER_PREFIXES.len(),
+            );
+            // Each entry should be "{prefix}_{ctype}" in PAPER_PREFIXES order
+            for (entry, &prefix) in entries.iter().zip(PAPER_PREFIXES) {
+                let expected_suffix = format!("_{ctype}");
+                assert!(
+                    entry.starts_with(prefix) && entry.ends_with(&expected_suffix),
+                    "paper_typed({ctype:?}): expected {prefix}_{ctype}, got {entry}"
+                );
+            }
+        }
+
+        // Unknown concept types should return empty
+        assert!(paper_typed("nonexistent").is_empty());
+    }
 }

@@ -254,6 +254,7 @@ async fn load_collection_embeddings(
         .collect();
 
     let mut total_embedded = 0;
+    let mut skipped = 0usize;
 
     // Process in batches to keep AQL bind variable size reasonable
     for batch in keyed_nodes.chunks(EMBEDDING_BATCH_KEYS) {
@@ -292,7 +293,10 @@ async fn load_collection_embeddings(
             // Skip null / wrong-dimension embeddings
             let emb_arr = match arr[1].as_array() {
                 Some(a) if a.len() == JINA_DIM => a,
-                _ => continue,
+                _ => {
+                    skipped += 1;
+                    continue;
+                }
             };
 
             let node_idx = match key_to_idx.get(key) {
@@ -316,6 +320,14 @@ async fn load_collection_embeddings(
             graph.set_node_features(node_idx, &embedding);
             total_embedded += 1;
         }
+    }
+
+    if skipped > 0 {
+        warn!(
+            collection = col_name,
+            skipped,
+            "embeddings skipped (null or wrong dimension)"
+        );
     }
 
     Ok(total_embedded)

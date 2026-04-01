@@ -20,11 +20,18 @@ fn arango_socket() -> PathBuf {
     )
 }
 
+fn arango_user() -> String {
+    std::env::var("ARANGO_USER").unwrap_or_else(|_| "root".to_string())
+}
+
 fn arango_password() -> String {
     std::env::var("ARANGO_PASSWORD").expect("ARANGO_PASSWORD must be set for integration tests.")
 }
 
 /// Pool targeting NestedLearning (read-only — no writes).
+///
+/// Uses `ARANGO_USER` env var (default: `"root"`). Set to a read-only
+/// user (e.g. `"nl_readonly"`) to enforce least-privilege access.
 fn nl_pool() -> Option<ArangoPool> {
     let socket = arango_socket();
     if !socket.exists() {
@@ -42,7 +49,7 @@ fn nl_pool() -> Option<ArangoPool> {
     }
 
     let client =
-        ArangoClient::with_socket(socket, "NestedLearning", "root", &arango_password());
+        ArangoClient::with_socket(socket, "NestedLearning", &arango_user(), &arango_password());
     Some(ArangoPool::new(client.clone(), client))
 }
 
@@ -110,32 +117,49 @@ async fn test_load_full_graph() {
     }
 
     // Print summary for manual inspection
-    eprintln!(
-        "\n=== Graph Load Summary ===\n\
-         Nodes:        {}\n\
-         Edges:        {}\n\
-         Relations:    {}\n\
-         Collections:  {}\n\
-         Embedded:     {}/{} ({:.1}%)\n",
-        graph.num_nodes,
-        graph.num_edges,
-        graph.num_relations,
-        graph.collection_names.len(),
-        graph.embedded_count(),
-        graph.num_nodes,
-        graph.embedding_coverage() * 100.0,
+    tracing::info!(
+        num_nodes = graph.num_nodes,
+        num_edges = graph.num_edges,
+        num_relations = graph.num_relations,
+        num_collections = graph.collection_names.len(),
+        embedded = graph.embedded_count(),
+        total = graph.num_nodes,
+        coverage_pct = format_args!("{:.1}", graph.embedding_coverage() * 100.0),
+        "graph load summary"
     );
 }
 
 #[test]
 fn test_edge_collection_names_match_schema() {
-    // Verify the edge collection names used by the loader match the schema constant
-    assert_eq!(EDGE_COLLECTION_NAMES.len(), NUM_RELATIONS);
+    // Full ordered assertion — catches mid-array reordering or renames.
+    // These positions are RGCN relation-type indices; reordering breaks trained models.
+    const EXPECTED: &[&str] = &[
+        "nl_axiom_basis_edges",           //  0
+        "nl_axiom_inherits_edges",        //  1
+        "nl_axiom_violation_edges",       //  2
+        "nl_cross_paper_edges",           //  3
+        "nl_code_callgraph_edges",        //  4
+        "nl_code_equation_edges",         //  5
+        "nl_code_test_edges",             //  6
+        "nl_definition_source_edges",     //  7
+        "nl_equation_depends_edges",      //  8
+        "nl_equation_source_edges",       //  9
+        "nl_hecate_trace_edges",          // 10
+        "nl_lineage_chain_edges",         // 11
+        "nl_migration_edges",             // 12
+        "nl_paper_cross_reference_edges", // 13
+        "nl_reframing_link_edges",        // 14
+        "nl_signature_equation_edges",    // 15
+        "nl_smell_compliance_edges",      // 16
+        "nl_smell_source_edges",          // 17
+        "nl_structural_embodiment_edges", // 18
+        "nl_validated_against_edges",     // 19
+        "persephone_edges",               // 20
+        "nl_smell_spec_edges",            // 21
+    ];
 
-    // First collection should be nl_axiom_basis_edges (index 0)
-    assert_eq!(EDGE_COLLECTION_NAMES[0], "nl_axiom_basis_edges");
-    // Last collection should be nl_smell_spec_edges (index 21)
-    assert_eq!(EDGE_COLLECTION_NAMES[21], "nl_smell_spec_edges");
+    assert_eq!(EDGE_COLLECTION_NAMES.len(), NUM_RELATIONS);
+    assert_eq!(EDGE_COLLECTION_NAMES, EXPECTED);
 }
 
 #[tokio::test]
@@ -150,13 +174,16 @@ async fn test_idmap_collection_grouping() {
     let total: usize = groups.values().map(|v| v.len()).sum();
     assert_eq!(total, id_map.len());
 
-    // Every node should have a valid collection prefix
+    // Every node's _id prefix (before '/') must exactly match its group key
     for (col, nodes) in &groups {
         assert!(!col.is_empty(), "collection name should not be empty");
         for (arango_id, _) in nodes {
-            assert!(
-                arango_id.starts_with(col),
-                "node {arango_id} should start with collection {col}"
+            let (prefix, _key) = arango_id
+                .split_once('/')
+                .unwrap_or_else(|| panic!("arango_id {arango_id} missing '/' separator"));
+            assert_eq!(
+                prefix, *col,
+                "node {arango_id} has prefix {prefix}, expected {col}"
             );
         }
     }

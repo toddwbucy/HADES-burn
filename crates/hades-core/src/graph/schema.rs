@@ -201,14 +201,20 @@ fn definition_collections() -> Vec<&'static str> {
 ///
 /// In the Python code this is `ALL_VERTEX_COLLECTIONS - {paper_edges, builds, build_runs}`.
 /// We inline a representative list covering all paper-scoped, NL-global, and extra collections.
+///
+/// # Leak safety
+///
+/// Uses `Box::leak` to produce `&'static str` from dynamically-formatted
+/// `{prefix}_{type}` strings. This is intentional: these collections are
+/// program-lifetime static data, initialized once via `LazyLock`. **Do not
+/// call this function outside of `LazyLock` initialization** — repeated
+/// calls would leak memory.
 fn axiom_compliant_collections() -> Vec<&'static str> {
     let mut v = Vec::with_capacity(80);
 
     // Paper-scoped: prefix × type
     for prefix in PAPER_PREFIXES {
         for ctype in CONCEPT_TYPES {
-            // Leak a static string for each combo.
-            // These are computed once at startup and live for the program lifetime.
             let s: &'static str = Box::leak(format!("{prefix}_{ctype}").into_boxed_str());
             v.push(s);
         }
@@ -491,6 +497,9 @@ pub const EDGE_COLLECTION_NAMES: &[&str] = &[
 pub const NUM_RELATIONS: usize = EDGE_COLLECTION_NAMES.len(); // 22
 
 /// Jina V4 embedding dimension.
+///
+/// Must match `EmbeddingModelConfig::dimension` in the runtime config.
+/// The graph loader (P4.2) validates this at load time.
 pub const JINA_DIM: usize = 2048;
 
 /// Look up the relation index for an edge collection name.

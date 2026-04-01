@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::schema::{JINA_DIM, NUM_RELATIONS};
 
@@ -54,8 +55,9 @@ impl IDMap {
             return idx;
         }
         let idx = self.idx_to_arango.len();
-        self.arango_to_idx.insert(arango_id.to_string(), idx);
-        self.idx_to_arango.push(arango_id.to_string());
+        let owned = arango_id.to_string();
+        self.arango_to_idx.insert(owned.clone(), idx);
+        self.idx_to_arango.push(owned);
         idx
     }
 
@@ -114,6 +116,50 @@ impl Default for IDMap {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// GraphDataError
+// ---------------------------------------------------------------------------
+
+/// Validation error for [`GraphData`] internal consistency.
+#[derive(Debug, Error)]
+pub enum GraphDataError {
+    #[error("node_features length {actual} != num_nodes {num_nodes} × feature_dim {feature_dim}")]
+    NodeFeaturesLengthMismatch {
+        actual: usize,
+        num_nodes: usize,
+        feature_dim: usize,
+    },
+
+    #[error("has_embedding length {actual} != num_nodes {expected}")]
+    HasEmbeddingLengthMismatch { actual: usize, expected: usize },
+
+    #[error("node_collections length {actual} != num_nodes {expected}")]
+    NodeCollectionsLengthMismatch { actual: usize, expected: usize },
+
+    #[error("edge_src length {actual} != num_edges {expected}")]
+    EdgeSrcLengthMismatch { actual: usize, expected: usize },
+
+    #[error("edge_dst length {actual} != num_edges {expected}")]
+    EdgeDstLengthMismatch { actual: usize, expected: usize },
+
+    #[error("edge_type length {actual} != num_edges {expected}")]
+    EdgeTypeLengthMismatch { actual: usize, expected: usize },
+
+    #[error("edge at index {edge_idx}: node index {node_idx} >= num_nodes {num_nodes}")]
+    EdgeNodeOutOfBounds {
+        edge_idx: usize,
+        node_idx: u32,
+        num_nodes: usize,
+    },
+
+    #[error("edge at index {edge_idx}: relation type {rel_type} >= num_relations {num_relations}")]
+    EdgeRelationOutOfBounds {
+        edge_idx: usize,
+        rel_type: u32,
+        num_relations: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -204,11 +250,21 @@ impl GraphData {
     }
 
     /// Add an edge to the graph.
-    pub fn add_edge(&mut self, src: u32, dst: u32, rel_type: u32) {
+    ///
+    /// Returns `false` if `src` or `dst` is out of bounds for `num_nodes`,
+    /// or if `rel_type` is out of bounds for `num_relations`.
+    pub fn add_edge(&mut self, src: u32, dst: u32, rel_type: u32) -> bool {
+        if (src as usize) >= self.num_nodes
+            || (dst as usize) >= self.num_nodes
+            || (rel_type as usize) >= self.num_relations
+        {
+            return false;
+        }
         self.edge_src.push(src);
         self.edge_dst.push(dst);
         self.edge_type.push(rel_type);
         self.num_edges += 1;
+        true
     }
 
     /// Set the node feature vector for a given node index.
@@ -248,49 +304,69 @@ impl GraphData {
     }
 
     /// Validate internal consistency.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), GraphDataError> {
         if self.node_features.len() != self.num_nodes * self.feature_dim {
-            return Err(format!(
-                "node_features length {} != num_nodes {} × feature_dim {}",
-                self.node_features.len(),
-                self.num_nodes,
-                self.feature_dim
-            ));
+            return Err(GraphDataError::NodeFeaturesLengthMismatch {
+                actual: self.node_features.len(),
+                num_nodes: self.num_nodes,
+                feature_dim: self.feature_dim,
+            });
         }
         if self.has_embedding.len() != self.num_nodes {
-            return Err(format!(
-                "has_embedding length {} != num_nodes {}",
-                self.has_embedding.len(),
-                self.num_nodes
-            ));
+            return Err(GraphDataError::HasEmbeddingLengthMismatch {
+                actual: self.has_embedding.len(),
+                expected: self.num_nodes,
+            });
         }
         if self.node_collections.len() != self.num_nodes {
-            return Err(format!(
-                "node_collections length {} != num_nodes {}",
-                self.node_collections.len(),
-                self.num_nodes
-            ));
+            return Err(GraphDataError::NodeCollectionsLengthMismatch {
+                actual: self.node_collections.len(),
+                expected: self.num_nodes,
+            });
         }
         if self.edge_src.len() != self.num_edges {
-            return Err(format!(
-                "edge_src length {} != num_edges {}",
-                self.edge_src.len(),
-                self.num_edges
-            ));
+            return Err(GraphDataError::EdgeSrcLengthMismatch {
+                actual: self.edge_src.len(),
+                expected: self.num_edges,
+            });
         }
         if self.edge_dst.len() != self.num_edges {
-            return Err(format!(
-                "edge_dst length {} != num_edges {}",
-                self.edge_dst.len(),
-                self.num_edges
-            ));
+            return Err(GraphDataError::EdgeDstLengthMismatch {
+                actual: self.edge_dst.len(),
+                expected: self.num_edges,
+            });
         }
         if self.edge_type.len() != self.num_edges {
-            return Err(format!(
-                "edge_type length {} != num_edges {}",
-                self.edge_type.len(),
-                self.num_edges
-            ));
+            return Err(GraphDataError::EdgeTypeLengthMismatch {
+                actual: self.edge_type.len(),
+                expected: self.num_edges,
+            });
+        }
+        // Validate edge indices are in bounds
+        for (i, (&src, &dst)) in self.edge_src.iter().zip(&self.edge_dst).enumerate() {
+            if (src as usize) >= self.num_nodes {
+                return Err(GraphDataError::EdgeNodeOutOfBounds {
+                    edge_idx: i,
+                    node_idx: src,
+                    num_nodes: self.num_nodes,
+                });
+            }
+            if (dst as usize) >= self.num_nodes {
+                return Err(GraphDataError::EdgeNodeOutOfBounds {
+                    edge_idx: i,
+                    node_idx: dst,
+                    num_nodes: self.num_nodes,
+                });
+            }
+        }
+        for (i, &rel) in self.edge_type.iter().enumerate() {
+            if (rel as usize) >= self.num_relations {
+                return Err(GraphDataError::EdgeRelationOutOfBounds {
+                    edge_idx: i,
+                    rel_type: rel,
+                    num_relations: self.num_relations,
+                });
+            }
         }
         Ok(())
     }
@@ -390,14 +466,30 @@ mod tests {
     #[test]
     fn test_graph_data_add_edge() {
         let mut g = GraphData::with_capacity(10, 0);
-        g.add_edge(0, 1, 0);
-        g.add_edge(1, 2, 3);
+        assert!(g.add_edge(0, 1, 0));
+        assert!(g.add_edge(1, 2, 3));
 
         assert_eq!(g.num_edges, 2);
         assert_eq!(g.edge_src, vec![0, 1]);
         assert_eq!(g.edge_dst, vec![1, 2]);
         assert_eq!(g.edge_type, vec![0, 3]);
         assert!(g.validate().is_ok());
+    }
+
+    #[test]
+    fn test_graph_data_add_edge_bounds() {
+        let mut g = GraphData::with_capacity(5, 0);
+
+        // src out of bounds
+        assert!(!g.add_edge(99, 0, 0));
+        // dst out of bounds
+        assert!(!g.add_edge(0, 99, 0));
+        // rel_type out of bounds
+        assert!(!g.add_edge(0, 1, NUM_RELATIONS as u32));
+        // all valid
+        assert!(g.add_edge(0, 4, 0));
+
+        assert_eq!(g.num_edges, 1, "only the valid edge should be added");
     }
 
     #[test]
@@ -450,7 +542,11 @@ mod tests {
     fn test_graph_data_validate_catches_mismatch() {
         let mut g = GraphData::with_capacity(2, 0);
         g.has_embedding.push(false); // extra element
-        assert!(g.validate().is_err());
+        let err = g.validate().unwrap_err();
+        assert!(
+            matches!(err, GraphDataError::HasEmbeddingLengthMismatch { .. }),
+            "expected HasEmbeddingLengthMismatch, got: {err}"
+        );
     }
 
     #[test]

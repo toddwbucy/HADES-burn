@@ -9,6 +9,7 @@ pub mod types;
 
 pub use schema::{
     EdgeCollectionDef, NamedGraphDef, NlGraphSchema, ALL_EDGE_COLLECTIONS,
-    ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, NL_GRAPH_SCHEMA, NUM_RELATIONS,
+    ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM, NL_GRAPH_SCHEMA, NUM_RELATIONS,
+    relation_index,
 };
-pub use types::{GraphData, IDMap};
+pub use types::{GraphData, GraphDataError, IDMap};

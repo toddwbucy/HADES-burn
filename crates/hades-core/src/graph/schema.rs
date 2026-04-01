@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Paper prefixes and concept types
@@ -42,7 +42,10 @@ pub const CONCEPT_TYPES: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// Definition of an ArangoDB edge collection to be materialized.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// All string fields are `&'static str` — these structs are only constructed
+/// as compile-time statics in `ALL_EDGE_COLLECTIONS`. Not deserializable.
+#[derive(Debug, Clone, Serialize)]
 pub struct EdgeCollectionDef {
     /// ArangoDB edge collection name.
     pub name: &'static str,
@@ -61,7 +64,9 @@ pub struct EdgeCollectionDef {
 }
 
 /// Definition of an ArangoDB named graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// All string fields are `&'static str` — only constructed as statics.
+#[derive(Debug, Clone, Serialize)]
 pub struct NamedGraphDef {
     /// Graph name (used in `GRAPH "name"` AQL clauses).
     pub name: &'static str,
@@ -227,16 +232,20 @@ static AXIOM_COMPLIANT_COLLECTIONS: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| {
         let mut v = Vec::with_capacity(80);
 
-        // Paper-scoped: prefix × type
+        // Paper-scoped: prefix × type (excluding "algorithms" — only hope has it)
         for prefix in PAPER_PREFIXES {
             for ctype in CONCEPT_TYPES {
+                if *ctype == "algorithms" {
+                    continue;
+                }
                 let s: &'static str = Box::leak(format!("{prefix}_{ctype}").into_boxed_str());
                 v.push(s);
             }
         }
 
-        // Extra paper-scoped
+        // Extra paper-scoped (hope_algorithms is the only cross-paper algorithms collection)
         v.extend([
+            "hope_algorithms",
             "hope_assumptions", "hope_blockers", "hope_code_smells",
             "hope_context_sources", "hope_examples", "hope_extensions",
             "hope_nl_reframings", "hope_optimizers", "hope_probes",

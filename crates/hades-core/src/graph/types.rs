@@ -5,7 +5,6 @@
 //! framework-specific tensors (Burn, PyTorch via IPC) happens in the
 //! serialization layer (P4.3).
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -52,15 +51,14 @@ impl IDMap {
     /// If the `_id` has been seen before, returns the existing index.
     /// Otherwise assigns the next contiguous index.
     pub fn get_or_create(&mut self, arango_id: &str) -> usize {
-        match self.arango_to_idx.entry(arango_id.to_string()) {
-            Entry::Occupied(e) => *e.get(),
-            Entry::Vacant(e) => {
-                let idx = self.idx_to_arango.len();
-                self.idx_to_arango.push(e.key().clone());
-                e.insert(idx);
-                idx
-            }
+        if let Some(&idx) = self.arango_to_idx.get(arango_id) {
+            return idx;
         }
+        let idx = self.idx_to_arango.len();
+        let key = arango_id.to_string();
+        self.idx_to_arango.push(key.clone());
+        self.arango_to_idx.insert(key, idx);
+        idx
     }
 
     /// Look up the integer index for an ArangoDB `_id`.
@@ -242,11 +240,13 @@ impl GraphData {
     /// Allocate a graph with known node and edge counts.
     ///
     /// Node features are initialized to zero (no embedding).
+    /// `node_collections` is initialized to `u32::MAX` (sentinel) so that
+    /// unset entries are caught by [`validate()`] once `collection_names` is populated.
     pub fn with_capacity(num_nodes: usize, num_edges: usize) -> Self {
         Self {
             node_features: vec![0.0; num_nodes * JINA_DIM],
             has_embedding: vec![false; num_nodes],
-            node_collections: vec![0; num_nodes],
+            node_collections: vec![u32::MAX; num_nodes],
             edge_src: Vec::with_capacity(num_edges),
             edge_dst: Vec::with_capacity(num_edges),
             edge_type: Vec::with_capacity(num_edges),

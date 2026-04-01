@@ -59,6 +59,19 @@ pub enum TensorError {
 
     #[error("metadata parse error for '{key}': {message}")]
     MetadataParse { key: String, message: String },
+
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("tensor '{name}' has dtype {actual:?}, expected {expected:?}")]
+    DtypeMismatch {
+        name: String,
+        expected: Dtype,
+        actual: Dtype,
+    },
+
+    #[error("invalid split config: val_ratio ({val}) + test_ratio ({test}) = {sum} > 1.0")]
+    InvalidSplitConfig { val: f64, test: f64, sum: f64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +137,15 @@ pub struct NegativeSamples {
 pub fn split_edges(num_edges: usize, config: &SplitConfig) -> Result<EdgeSplit, TensorError> {
     if num_edges == 0 {
         return Err(TensorError::EmptyGraph);
+    }
+
+    let sum = config.val_ratio + config.test_ratio;
+    if sum > 1.0 || config.val_ratio < 0.0 || config.test_ratio < 0.0 {
+        return Err(TensorError::InvalidSplitConfig {
+            val: config.val_ratio,
+            test: config.test_ratio,
+            sum,
+        });
     }
 
     let mut perm: Vec<u32> = (0..num_edges as u32).collect();
@@ -217,7 +239,13 @@ pub fn negative_sample(graph: &GraphData, num_neg: usize) -> NegativeSamples {
 // ---------------------------------------------------------------------------
 
 /// Helper: reinterpret a `&[T]` as `&[u8]`.
+///
+/// # Safety assumption
+/// Safetensors uses little-endian byte order. This transmute is correct
+/// on little-endian platforms (x86, ARM LE, RISC-V LE). The compile-time
+/// assertion below prevents silent corruption on big-endian targets.
 fn as_bytes<T>(slice: &[T]) -> &[u8] {
+    const { assert!(cfg!(target_endian = "little"), "safetensors requires little-endian") }
     unsafe {
         std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
     }
@@ -331,7 +359,7 @@ pub fn serialize_graph(
     metadata.insert("feature_dim".into(), graph.feature_dim.to_string());
     metadata.insert(
         "collection_names".into(),
-        serde_json::to_string(&graph.collection_names).unwrap_or_default(),
+        serde_json::to_string(&graph.collection_names)?,
     );
     metadata.insert("val_ratio".into(), config.val_ratio.to_string());
     metadata.insert("test_ratio".into(), config.test_ratio.to_string());
@@ -415,6 +443,13 @@ impl MappedGraph {
         let view = st.tensor(name).map_err(|_| TensorError::MissingTensor {
             name: name.to_string(),
         })?;
+        if view.dtype() != Dtype::U32 {
+            return Err(TensorError::DtypeMismatch {
+                name: name.to_string(),
+                expected: Dtype::U32,
+                actual: view.dtype(),
+            });
+        }
         let bytes = view.data();
         // U32: 4 bytes per element
         let slice = unsafe {
@@ -687,6 +722,25 @@ mod tests {
         assert_eq!(features[0], 1.0);
         // Node 1 should have all 0.0 (no embedding set)
         assert_eq!(features[JINA_DIM], 0.0);
+    }
+
+    #[test]
+    fn test_split_config_invalid() {
+        let bad = SplitConfig {
+            val_ratio: 0.6,
+            test_ratio: 0.6,
+            neg_sampling_ratio: 1.0,
+        };
+        let err = split_edges(100, &bad).unwrap_err();
+        assert!(matches!(err, TensorError::InvalidSplitConfig { .. }));
+
+        let negative = SplitConfig {
+            val_ratio: -0.1,
+            test_ratio: 0.1,
+            neg_sampling_ratio: 1.0,
+        };
+        let err = split_edges(100, &negative).unwrap_err();
+        assert!(matches!(err, TensorError::InvalidSplitConfig { .. }));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod chunking;
 pub mod code;
 pub mod config;
 pub mod db;
+pub mod graph;
 pub mod persephone;
 pub mod pipeline;
 

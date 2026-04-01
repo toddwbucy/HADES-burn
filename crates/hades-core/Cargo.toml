@@ -32,5 +32,11 @@ chrono.workspace = true
 urlencoding.workspace = true
 tokio-util.workspace = true
 
+# Code analysis
+rustpython-parser.workspace = true
+syn.workspace = true
+sha2.workspace = true
+proc-macro2.workspace = true
+
 [dev-dependencies]
 tempfile = "3.27.0"

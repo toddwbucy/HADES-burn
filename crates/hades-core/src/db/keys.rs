@@ -4,6 +4,7 @@
 //! into valid ArangoDB document keys.
 
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 /// Regex to strip trailing version suffix (e.g. `v1`, `v2`, `v12`).
@@ -74,6 +75,42 @@ pub fn file_key(rel_path: &str) -> String {
     rel_path.replace(['.', '/'], "_")
 }
 
+/// Build a symbol key from a file key and qualified symbol name.
+///
+/// Produces a human-readable prefix plus a truncated SHA-256 hash of the
+/// original qualified name to prevent collisions from lossy normalization
+/// (e.g., `Vec<T>` vs `Vec_T_` would otherwise map to the same key).
+///
+/// Format: `{file_key}__{readable}__{hash8}`
+///
+/// # Examples
+/// ```
+/// # use hades_core::db::keys::{file_key, symbol_key};
+/// let key = symbol_key("src_lib_rs", "Config::new");
+/// assert!(key.starts_with("src_lib_rs__Config__new__"));
+/// assert_eq!(key.len(), "src_lib_rs__Config__new__".len() + 8);
+/// ```
+pub fn symbol_key(file_key: &str, qualified_name: &str) -> String {
+    // Readable prefix: replace :: with __, strip only ArangoDB-invalid chars.
+    let readable = qualified_name
+        .replace("::", "__")
+        .replace(['<', '>', ' ', ',', ':', '\'', '"', '(', ')'], "_");
+
+    // Deterministic 8-char hex hash of the original qualified name.
+    let mut hasher = Sha256::new();
+    hasher.update(qualified_name.as_bytes());
+    let digest = hasher.finalize();
+    let hash8 = hex8(&digest);
+
+    format!("{file_key}__{readable}__{hash8}")
+}
+
+/// First 8 hex chars of a SHA-256 digest.
+fn hex8(digest: &[u8]) -> String {
+    // 4 bytes = 8 hex chars
+    digest[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +158,36 @@ mod tests {
             file_key("core/persephone/models.py"),
             "core_persephone_models_py"
         );
+    }
+
+    #[test]
+    fn test_symbol_key() {
+        let key = symbol_key("src_lib_rs", "Config::new");
+        assert!(key.starts_with("src_lib_rs__Config__new__"), "key: {key}");
+        // Hash suffix is 8 hex chars.
+        let suffix = key.strip_prefix("src_lib_rs__Config__new__").unwrap();
+        assert_eq!(suffix.len(), 8, "hash suffix: {suffix}");
+
+        let key2 = symbol_key("src_lib_rs", "Display for Config");
+        assert!(key2.starts_with("src_lib_rs__Display_for_Config__"), "key: {key2}");
+
+        let key3 = symbol_key("src_lib_rs", "Vec<String>");
+        assert!(key3.starts_with("src_lib_rs__Vec_String___"), "key: {key3}");
+    }
+
+    #[test]
+    fn test_symbol_key_deterministic() {
+        // Same input → same key.
+        let a = symbol_key("src_lib_rs", "Config::new");
+        let b = symbol_key("src_lib_rs", "Config::new");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_symbol_key_no_collision() {
+        // Different qualified names → different keys even if readable prefix matches.
+        let a = symbol_key("src_lib_rs", "Vec<T>");
+        let b = symbol_key("src_lib_rs", "Vec_T_");
+        assert_ne!(a, b, "should not collide: a={a}, b={b}");
     }
 }

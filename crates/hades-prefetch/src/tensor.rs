@@ -72,6 +72,9 @@ pub enum TensorError {
 
     #[error("invalid split config: val_ratio ({val}) + test_ratio ({test}) = {sum} > 1.0")]
     InvalidSplitConfig { val: f64, test: f64, sum: f64 },
+
+    #[error("serialization validation failed: {message}")]
+    ValidationFailed { message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +264,37 @@ pub fn serialize_graph(
     neg: &NegativeSamples,
     config: &SplitConfig,
 ) -> Result<Vec<u8>, TensorError> {
+    // Validate split indices are within edge bounds
+    let num_edges = graph.num_edges as u32;
+    for &idx in split.train_idx.iter().chain(&split.val_idx).chain(&split.test_idx) {
+        if idx >= num_edges {
+            return Err(TensorError::ValidationFailed {
+                message: format!("split index {idx} >= num_edges {}", graph.num_edges),
+            });
+        }
+    }
+
+    // Validate negative sample consistency and node bounds
+    if neg.src.len() != neg.dst.len() {
+        return Err(TensorError::ValidationFailed {
+            message: format!(
+                "neg_src length ({}) != neg_dst length ({})",
+                neg.src.len(),
+                neg.dst.len()
+            ),
+        });
+    }
+    let num_nodes = graph.num_nodes as u32;
+    for (&s, &d) in neg.src.iter().zip(&neg.dst) {
+        if s >= num_nodes || d >= num_nodes {
+            return Err(TensorError::ValidationFailed {
+                message: format!(
+                    "negative sample ({s}, {d}) out of bounds for {num_nodes} nodes"
+                ),
+            });
+        }
+    }
+
     // Convert has_embedding Vec<bool> → Vec<u8> (safetensors BOOL is 1 byte)
     let has_emb_u8: Vec<u8> = graph.has_embedding.iter().map(|&b| b as u8).collect();
 
@@ -402,34 +436,20 @@ pub fn serialize_to_file(
 /// without copying. The `MappedGraph` holds the mmap and provides typed
 /// accessors for the training loop.
 pub struct MappedGraph {
-    /// Raw memory map — must outlive any tensor references.
-    _mmap: Mmap,
-    /// Byte slice of the full file (borrows from _mmap).
-    ///
-    /// This is safe because `_mmap` is owned and `data` borrows from it.
-    /// We use a raw pointer to avoid self-referential borrow issues.
-    data: *const [u8],
+    mmap: Mmap,
 }
-
-// SAFETY: MappedGraph is Send+Sync because:
-// - _mmap is Send+Sync (memmap2::Mmap is)
-// - data is a read-only pointer derived from _mmap
-unsafe impl Send for MappedGraph {}
-unsafe impl Sync for MappedGraph {}
 
 impl MappedGraph {
     /// Open a safetensors file via memory mapping.
     pub fn open(path: &Path) -> Result<Self, TensorError> {
         let file = fs::File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
-        let data = mmap.as_ref() as *const [u8];
-        Ok(Self { _mmap: mmap, data })
+        Ok(Self { mmap })
     }
 
     /// Get the raw safetensors data.
     fn data(&self) -> &[u8] {
-        // SAFETY: data points into _mmap which is alive for the lifetime of self
-        unsafe { &*self.data }
+        &self.mmap
     }
 
     /// Parse the safetensors header and access tensors.
@@ -451,11 +471,11 @@ impl MappedGraph {
             });
         }
         let bytes = view.data();
-        // U32: 4 bytes per element
-        let slice = unsafe {
-            std::slice::from_raw_parts(bytes.as_ptr() as *const u32, bytes.len() / 4)
-        };
-        Ok(slice.to_vec())
+        let result: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Ok(result)
     }
 
     /// Read the F32 node features as a flat `Vec<f32>`.
@@ -474,10 +494,11 @@ impl MappedGraph {
             });
         }
         let bytes = view.data();
-        let slice = unsafe {
-            std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4)
-        };
-        Ok(slice.to_vec())
+        let result: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Ok(result)
     }
 
     /// Read a metadata value from the safetensors header.

@@ -57,6 +57,10 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
         .map(|a| a.len())
         .ok_or_else(|| anyhow::anyhow!("structural embedding is not an array for {node_id}"))?;
 
+    if embed_dim == 0 {
+        anyhow::bail!("structural embedding is empty (0 dimensions) for {node_id}");
+    }
+
     let label = node
         .get("title")
         .and_then(|v| v.as_str())
@@ -142,6 +146,8 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
 
     // Step 3: Search each collection for nearest neighbors.
     let mut all_neighbors: Vec<serde_json::Value> = Vec::new();
+    let mut collections_succeeded: usize = 0;
+    let mut last_error: Option<String> = None;
 
     let search_aql =
         "LET te = @target_emb \
@@ -181,6 +187,7 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
         .await
         {
             Ok(result) => {
+                collections_succeeded += 1;
                 all_neighbors.extend(result.results);
             }
             Err(e) => {
@@ -191,8 +198,17 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
                     error = %e,
                     "skipping collection"
                 );
+                last_error = Some(e.to_string());
             }
         }
+    }
+
+    if collections_succeeded == 0 && !collections.is_empty() {
+        anyhow::bail!(
+            "all {count} collection queries failed; last error: {err}",
+            count = collections.len(),
+            err = last_error.as_deref().unwrap_or("unknown"),
+        );
     }
 
     // Step 4: Sort globally and take top-k.

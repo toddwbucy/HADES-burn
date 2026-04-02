@@ -40,6 +40,20 @@ pub async fn run(
     checkpoint_dir: &str,
     no_export: bool,
 ) -> Result<()> {
+    // ── Validate split ratios ───────────────────────────────────────
+    if !(0.0..=1.0).contains(&val_ratio) {
+        anyhow::bail!("--val-ratio must be between 0.0 and 1.0, got {val_ratio}");
+    }
+    if !(0.0..=1.0).contains(&test_ratio) {
+        anyhow::bail!("--test-ratio must be between 0.0 and 1.0, got {test_ratio}");
+    }
+    if val_ratio + test_ratio > 1.0 {
+        anyhow::bail!(
+            "--val-ratio ({val_ratio}) + --test-ratio ({test_ratio}) = {} > 1.0",
+            val_ratio + test_ratio
+        );
+    }
+
     // ── Source database (read-only) ──────────────────────────────────
     let source_pool = ArangoPool::from_config(config)
         .context("failed to connect to source ArangoDB")?;
@@ -87,9 +101,9 @@ pub async fn run(
         weight_decay,
         epochs: epochs as usize,
         patience: patience as usize,
-        val_every: 1,
+        val_every: 1,           // validate every epoch (matches Python)
         neg_sampling_ratio: neg_ratio,
-        prefetch_depth: 2,
+        prefetch_depth: 2,      // double-buffered (one ahead of GPU)
         device: config.gpu.device.clone(),
     };
 
@@ -117,7 +131,7 @@ pub async fn run(
     // ── Export embeddings ─────────────────────────────────────────────
     let mut export_count = 0;
     if !no_export {
-        // Get embeddings from the trained model
+        // None = return embeddings inline over gRPC (no file output)
         let emb_result = training_client
             .get_embeddings(None)
             .await

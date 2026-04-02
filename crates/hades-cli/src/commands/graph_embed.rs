@@ -56,6 +56,8 @@ pub enum GraphEmbedCmd {
         export_to: Option<String>,
 
         /// Checkpoint directory for model snapshots.
+        /// The default /tmp/hades-train is ephemeral and cleared on reboot;
+        /// for production training, use a persistent path (e.g. /var/lib/hades/train).
         #[arg(long, default_value = "/tmp/hades-train")]
         checkpoint_dir: String,
 

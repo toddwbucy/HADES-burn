@@ -118,11 +118,15 @@ pub async fn run(
     };
 
     // ── Train ────────────────────────────────────────────────────────
+    // Destructure: graph and split move into the orchestrator,
+    // id_map is kept for the export step.
+    let hades_prefetch::TrainingData { graph, id_map, split } = data;
+
     let orchestrator = Orchestrator::new(training_client.clone(), train_config);
     let result = orchestrator
         .train(
-            data.graph.clone(),
-            data.split.clone(),
+            graph,
+            split,
             &safetensors_path,
             &safetensors_dir,
         )
@@ -149,7 +153,8 @@ pub async fn run(
             .await
             .context("failed to retrieve embeddings")?;
 
-        let emb_bytes = std::fs::read(&embeddings_path)
+        let emb_bytes = tokio::fs::read(&embeddings_path)
+            .await
             .context("failed to read embeddings file")?;
         let embeddings = decode_f32_embeddings(&emb_bytes)
             .context("failed to decode embedding bytes")?;
@@ -163,7 +168,7 @@ pub async fn run(
 
         let export_result = export_embeddings(
             pool,
-            &data.id_map,
+            &id_map,
             &embeddings,
             emb_result.embed_dim as usize,
             &ExportConfig::default(),
@@ -172,7 +177,7 @@ pub async fn run(
         .context("embedding export failed")?;
 
         export_count = export_result.total_exported;
-        let expected_total = data.id_map.len();
+        let expected_total = id_map.len();
         if export_count < expected_total {
             warn!(
                 db = %pool.database(),

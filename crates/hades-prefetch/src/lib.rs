@@ -1,12 +1,16 @@
 //! Async graph-aware batch prefetcher for RGCN training.
 //!
 //! Provides tensor serialization (safetensors), edge splitting,
-//! negative sampling, memory-mapped graph access, and async double-buffered
-//! prefetching for the training pipeline.
+//! negative sampling, memory-mapped graph access, async double-buffered
+//! prefetching, and a training orchestrator for the training pipeline.
 
+pub mod orchestrator;
 pub mod prefetcher;
 pub mod tensor;
 
+pub use orchestrator::{
+    EpochMetrics, Orchestrator, OrchestratorError, TrainConfig, TrainResult,
+};
 pub use prefetcher::{
     EpochBatch, PrefetchConfig, PrefetchError, Prefetcher, TrainingData,
     prepare_training_data,

@@ -218,10 +218,13 @@ impl TrainingClient {
             device: device.to_string(),
         };
 
+        let mut req = tonic::Request::new(request);
+        req.set_timeout(self.config.slow_timeout);
+
         let response = self
             .inner
             .clone()
-            .init_model(request)
+            .init_model(req)
             .await?
             .into_inner();
 
@@ -247,10 +250,13 @@ impl TrainingClient {
             safetensors_path: safetensors_path.as_ref().to_string_lossy().into_owned(),
         };
 
+        let mut req = tonic::Request::new(request);
+        req.set_timeout(self.config.slow_timeout);
+
         let response = self
             .inner
             .clone()
-            .load_graph(request)
+            .load_graph(req)
             .await?
             .into_inner();
 
@@ -349,10 +355,13 @@ impl TrainingClient {
                 .unwrap_or_default(),
         };
 
+        let mut req = tonic::Request::new(request);
+        req.set_timeout(self.config.slow_timeout);
+
         let response = self
             .inner
             .clone()
-            .get_embeddings(request)
+            .get_embeddings(req)
             .await?
             .into_inner();
 
@@ -427,10 +436,7 @@ impl TrainingClient {
 
         Ok(InitResult {
             num_parameters: response.num_parameters,
-            device: response
-                .model_config
-                .map(|_| device.unwrap_or("unknown").to_string())
-                .unwrap_or_default(),
+            device: device.unwrap_or("unknown").to_string(),
         })
     }
 

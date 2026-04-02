@@ -130,15 +130,20 @@ message LoadGraphResponse {
 // TrainStep
 // ---------------------------------------------------------------------------
 
+// Training step input.
+//
+// neg_src and neg_dst are parallel arrays of equal length: each negative
+// sample is the pair (neg_src[i], neg_dst[i]). They are sampled globally
+// (not per positive edge) and are independent of train_edge_indices.
 message TrainStepRequest {
   // Edge indices for the positive (training) edges in this step.
   // Indices into the edge arrays loaded via LoadGraph.
   repeated uint32 train_edge_indices = 1;
 
-  // Negative sample source node indices.
+  // Negative sample source node indices (parallel with neg_dst).
   repeated uint32 neg_src = 2;
 
-  // Negative sample destination node indices.
+  // Negative sample destination node indices (parallel with neg_src).
   repeated uint32 neg_dst = 3;
 }
 

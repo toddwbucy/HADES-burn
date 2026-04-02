@@ -326,8 +326,11 @@ pub async fn prepare_training_data(
         "graph loaded, preparing training data"
     );
 
+    // Wrap in Arc now — avoids a full deep clone into spawn_blocking
+    let graph = Arc::new(graph);
+
     // split + negative sample + serialize — CPU-bound
-    let graph_ref = graph.clone();
+    let graph_ref = Arc::clone(&graph);
     let config_clone = config.clone();
     let path = output_path.to_path_buf();
 
@@ -348,7 +351,7 @@ pub async fn prepare_training_data(
     );
 
     Ok(TrainingData {
-        graph: Arc::new(graph),
+        graph,
         id_map,
         split: Arc::new(split),
     })

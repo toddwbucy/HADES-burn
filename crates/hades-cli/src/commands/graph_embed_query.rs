@@ -28,17 +28,14 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
     let pool = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;
 
-    // Backtick-quote the collection name to prevent AQL injection.
-    let aql = format!(
-        "FOR d IN `{col}` FILTER d._key == @key \
-         RETURN {{ _id: d._id, structural_embedding: d.structural_embedding, \
-         title: d.title, name: d.name }}"
-    );
+    let aql = "FOR d IN @@col FILTER d._key == @key \
+         RETURN { _id: d._id, structural_embedding: d.structural_embedding, \
+         title: d.title, name: d.name }";
 
     let result = query::query_single(
         &pool,
-        &aql,
-        Some(&json!({ "key": key })),
+        aql,
+        Some(&json!({ "@col": col, "key": key })),
         ExecutionTarget::Reader,
     )
     .await
@@ -96,29 +93,38 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
         .context("failed to connect to ArangoDB")?;
 
     // Step 1: Fetch the target node's embedding.
-    let emb_aql = format!(
-        "FOR d IN `{col}` FILTER d._key == @key RETURN d.structural_embedding"
-    );
+    let emb_aql = "FOR d IN @@col FILTER d._key == @key RETURN d.structural_embedding";
 
     let result = query::query_single(
         &pool,
-        &emb_aql,
-        Some(&json!({ "key": key })),
+        emb_aql,
+        Some(&json!({ "@col": col, "key": key })),
         ExecutionTarget::Reader,
     )
     .await
     .context("failed to query node embedding")?;
 
-    let target_emb = result
-        .filter(|v| !v.is_null())
-        .ok_or_else(|| {
-            anyhow::anyhow!("no structural embedding for {node_id}")
-        })?;
+    // Distinguish "node not found" from "node has no embedding".
+    let emb_value = result.ok_or_else(|| {
+        anyhow::anyhow!("node not found: {node_id}")
+    })?;
+
+    let target_emb = if emb_value.is_null() {
+        anyhow::bail!(
+            "no structural embedding for {node_id} — run 'hades graph-embed train' first"
+        );
+    } else {
+        emb_value
+    };
 
     let embed_dim = target_emb
         .as_array()
         .map(|a| a.len())
-        .ok_or_else(|| anyhow::anyhow!("structural embedding is not an array"))?;
+        .ok_or_else(|| anyhow::anyhow!("structural embedding is not an array for {node_id}"))?;
+
+    if embed_dim == 0 {
+        anyhow::bail!("structural embedding is empty (0 dimensions) for {node_id}");
+    }
 
     // Step 2: Discover document collections (type 2, non-system).
     let collections: Vec<CollectionInfo> = list_collections(&pool, true)
@@ -137,27 +143,26 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
     // Step 3: Search each collection for nearest neighbors.
     let mut all_neighbors: Vec<serde_json::Value> = Vec::new();
 
-    for col_info in &collections {
-        // Backtick-quote to prevent AQL injection.
-        let search_aql = format!(
-            "LET te = @target_emb \
-             FOR d IN `{}` \
-               FILTER d.structural_embedding != null \
-               FILTER LENGTH(d.structural_embedding) == @dim \
-               FILTER d._id != @target_id \
-               LET sim = SUM(FOR i IN 0..@dim_minus_1 RETURN te[i] * d.structural_embedding[i]) \
-               SORT sim DESC \
-               LIMIT @k \
-               RETURN {{ \
-                 id: d._id, \
-                 label: d.title || d.name || d._key, \
-                 collection: \"{}\", \
-                 similarity: ROUND(sim * 10000) / 10000 \
-               }}",
-            col_info.name, col_info.name,
-        );
+    let search_aql =
+        "LET te = @target_emb \
+         FOR d IN @@col \
+           FILTER d.structural_embedding != null \
+           FILTER LENGTH(d.structural_embedding) == @dim \
+           FILTER d._id != @target_id \
+           LET sim = SUM(FOR i IN 0..@dim_minus_1 RETURN te[i] * d.structural_embedding[i]) \
+           SORT sim DESC \
+           LIMIT @k \
+           RETURN { \
+             id: d._id, \
+             label: NOT_NULL(d.title, d.name, d._key), \
+             collection: @col_name, \
+             similarity: ROUND(sim * 10000) / 10000 \
+           }";
 
+    for col_info in &collections {
         let bind_vars = json!({
+            "@col": col_info.name,
+            "col_name": col_info.name,
             "target_emb": target_emb,
             "dim": embed_dim,
             "dim_minus_1": embed_dim - 1,
@@ -167,7 +172,7 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
 
         match query::query(
             &pool,
-            &search_aql,
+            search_aql,
             Some(&bind_vars),
             None,
             false,
@@ -218,13 +223,24 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse a `collection/key` node ID.
+/// Parse and validate a `collection/key` node ID.
+///
+/// Rejects missing slash, empty collection, and empty key.
 fn parse_node_id(node_id: &str) -> Result<(&str, &str)> {
-    node_id
+    let (col, key) = node_id
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!(
             "node ID must be in 'collection/key' format, got: {node_id}"
-        ))
+        ))?;
+
+    if col.is_empty() {
+        anyhow::bail!("node ID has empty collection name: {node_id}");
+    }
+    if key.is_empty() {
+        anyhow::bail!("node ID has empty key: {node_id}");
+    }
+
+    Ok((col, key))
 }
 
 #[cfg(test)]
@@ -249,5 +265,17 @@ mod tests {
     fn test_parse_node_id_no_slash() {
         let err = parse_node_id("just_a_key").unwrap_err();
         assert!(err.to_string().contains("collection/key"));
+    }
+
+    #[test]
+    fn test_parse_node_id_empty_collection() {
+        let err = parse_node_id("/some_key").unwrap_err();
+        assert!(err.to_string().contains("empty collection"));
+    }
+
+    #[test]
+    fn test_parse_node_id_empty_key() {
+        let err = parse_node_id("collection/").unwrap_err();
+        assert!(err.to_string().contains("empty key"));
     }
 }

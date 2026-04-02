@@ -734,6 +734,7 @@ name = "hades-prefetch"
 version = "0.1.0"
 dependencies = [
  "hades-core",
+ "hades-proto",
  "memmap2",
  "rand 0.9.2",
  "safetensors",

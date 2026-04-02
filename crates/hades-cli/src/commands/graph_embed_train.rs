@@ -47,9 +47,10 @@ pub async fn run(
     if !(0.0..=1.0).contains(&test_ratio) {
         anyhow::bail!("--test-ratio must be between 0.0 and 1.0, got {test_ratio}");
     }
-    if val_ratio + test_ratio > 1.0 {
+    if val_ratio + test_ratio >= 1.0 {
         anyhow::bail!(
-            "--val-ratio ({val_ratio}) + --test-ratio ({test_ratio}) = {} > 1.0",
+            "--val-ratio ({val_ratio}) + --test-ratio ({test_ratio}) = {:.4} \
+             leaves no training data (sum must be < 1.0)",
             val_ratio + test_ratio
         );
     }
@@ -59,6 +60,11 @@ pub async fn run(
         .context("failed to connect to source ArangoDB")?;
 
     info!(db = %source_pool.database(), "connected to source database");
+
+    // ── Preflight export target ──────────────────────────────────────
+    // Validate and connect to the export database before training so
+    // misconfiguration fails fast rather than after a long training run.
+    let export_pool = resolve_export_pool(config, export_to, no_export, &source_pool)?;
 
     // ── Prepare training data ────────────────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);
@@ -130,7 +136,7 @@ pub async fn run(
 
     // ── Export embeddings ─────────────────────────────────────────────
     let mut export_count = 0;
-    if !no_export {
+    if let Some(pool) = &export_pool {
         // None = return embeddings inline over gRPC (no file output)
         let emb_result = training_client
             .get_embeddings(None)
@@ -140,27 +146,15 @@ pub async fn run(
         let embeddings = decode_f32_embeddings(&emb_result.embeddings)
             .context("failed to decode embedding bytes")?;
 
-        // Determine target database
-        let export_pool = if let Some(target_db) = export_to {
-            let mut export_config = config.clone();
-            export_config.database.name = target_db.to_string();
-            export_config.require_writable_database()?;
-            ArangoPool::from_config(&export_config)
-                .context("failed to connect to export target database")?
-        } else {
-            config.require_writable_database()?;
-            source_pool
-        };
-
         info!(
-            db = %export_pool.database(),
+            db = %pool.database(),
             num_nodes = emb_result.num_nodes,
             embed_dim = emb_result.embed_dim,
             "exporting embeddings"
         );
 
         let export_result = export_embeddings(
-            &export_pool,
+            pool,
             &data.id_map,
             &embeddings,
             emb_result.embed_dim as usize,
@@ -198,4 +192,34 @@ pub async fn run(
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+/// Preflight the export target: validate writable DB and connect.
+///
+/// Returns `None` when `no_export` is true, or `Some(pool)` pointing at
+/// the export target (either `export_to` DB or the source DB).
+fn resolve_export_pool(
+    config: &HadesConfig,
+    export_to: Option<&str>,
+    no_export: bool,
+    source_pool: &ArangoPool,
+) -> Result<Option<ArangoPool>> {
+    if no_export {
+        return Ok(None);
+    }
+
+    let pool = if let Some(target_db) = export_to {
+        let mut export_config = config.clone();
+        export_config.database.name = target_db.to_string();
+        export_config.require_writable_database()?;
+        ArangoPool::from_config(&export_config)
+            .context("failed to connect to export target database")?
+    } else {
+        config.require_writable_database()?;
+        // Re-use existing source connection
+        source_pool.clone()
+    };
+
+    info!(db = %pool.database(), "export target validated");
+    Ok(Some(pool))
 }

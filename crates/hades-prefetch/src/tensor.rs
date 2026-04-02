@@ -26,6 +26,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use memmap2::Mmap;
@@ -143,7 +144,12 @@ pub fn split_edges(num_edges: usize, config: &SplitConfig) -> Result<EdgeSplit, 
     }
 
     let sum = config.val_ratio + config.test_ratio;
-    if sum > 1.0 || config.val_ratio < 0.0 || config.test_ratio < 0.0 {
+    if !config.val_ratio.is_finite()
+        || !config.test_ratio.is_finite()
+        || sum > 1.0
+        || config.val_ratio < 0.0
+        || config.test_ratio < 0.0
+    {
         return Err(TensorError::InvalidSplitConfig {
             val: config.val_ratio,
             test: config.test_ratio,
@@ -407,6 +413,10 @@ pub fn serialize_graph(
 }
 
 /// Serialize a graph to a safetensors file on disk.
+///
+/// Uses atomic write semantics: data is written to a temporary file in the
+/// same directory, flushed, then renamed to the target path. This prevents
+/// concurrent `MappedGraph::open()` from seeing a partial file.
 pub fn serialize_to_file(
     path: &Path,
     graph: &GraphData,
@@ -415,7 +425,15 @@ pub fn serialize_to_file(
     config: &SplitConfig,
 ) -> Result<(), TensorError> {
     let bytes = serialize_graph(graph, split, neg, config)?;
-    fs::write(path, &bytes)?;
+
+    // Write to a temp file, then atomically rename
+    let tmp_path = path.with_extension("safetensors.tmp");
+    let mut file = fs::File::create(&tmp_path)?;
+    file.write_all(&bytes)?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp_path, path)?;
 
     info!(
         path = %path.display(),
@@ -556,6 +574,14 @@ pub fn prepare_and_serialize(
     graph: &GraphData,
     config: &SplitConfig,
 ) -> Result<(), TensorError> {
+    if !config.neg_sampling_ratio.is_finite() || config.neg_sampling_ratio < 0.0 {
+        return Err(TensorError::InvalidSplitConfig {
+            val: config.val_ratio,
+            test: config.test_ratio,
+            sum: config.val_ratio + config.test_ratio,
+        });
+    }
+
     let split = split_edges(graph.num_edges, config)?;
 
     // Negative samples: 1 per positive train edge by default

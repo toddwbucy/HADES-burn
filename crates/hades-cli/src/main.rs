@@ -261,6 +261,20 @@ fn main() -> anyhow::Result<()> {
                 }
             };
         }
+        Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::graph_embed_query::run_embed(
+                &config, &node_id,
+            ));
+        }
+        Commands::GraphEmbed(GraphEmbedCmd::Neighbors { node_id, limit }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::graph_embed_query::run_neighbors(
+                &config, &node_id, limit,
+            ));
+        }
         Commands::GraphEmbed(GraphEmbedCmd::Train {
             epochs, dimension, hidden_dim, num_bases, dropout, lr, weight_decay,
             patience, val_ratio, test_ratio, neg_ratio, export_to, checkpoint_dir,

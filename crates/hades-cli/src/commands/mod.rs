@@ -10,6 +10,7 @@ pub mod codebase_ingest;
 pub mod db;
 pub mod embed;
 pub mod graph_embed;
+pub mod graph_embed_query;
 pub mod graph_embed_train;
 pub mod ingest;
 pub mod smell;

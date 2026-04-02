@@ -68,6 +68,13 @@ pub async fn run(
     // misconfiguration fails fast rather than after a long training run.
     let export_pool = resolve_export_pool(config, export_to, no_export, &source_pool)?;
 
+    // ── Connect to training service ──────────────────────────────────
+    // Check service availability before the expensive graph-load step
+    // so misconfiguration fails fast.
+    let training_client = TrainingClient::connect(TrainingClientConfig::default())
+        .await
+        .context("failed to connect to Persephone training service")?;
+
     // ── Prepare training data ────────────────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);
     std::fs::create_dir_all(&safetensors_dir)
@@ -93,11 +100,6 @@ pub async fn run(
         test = data.split.test_idx.len(),
         "training data ready"
     );
-
-    // ── Connect to training service ──────────────────────────────────
-    let training_client = TrainingClient::connect(TrainingClientConfig::default())
-        .await
-        .context("failed to connect to Persephone training service")?;
 
     // ── Build orchestrator config ────────────────────────────────────
     let train_config = TrainConfig {
@@ -139,13 +141,17 @@ pub async fn run(
     // ── Export embeddings ─────────────────────────────────────────────
     let mut export_count = 0;
     if let Some(pool) = &export_pool {
-        // None = return embeddings inline over gRPC (no file output)
+        // Write embeddings to file instead of inline gRPC to avoid
+        // message-size limits on large graphs.
+        let embeddings_path = safetensors_dir.join("embeddings.bin");
         let emb_result = training_client
-            .get_embeddings(None)
+            .get_embeddings(Some(&embeddings_path))
             .await
             .context("failed to retrieve embeddings")?;
 
-        let embeddings = decode_f32_embeddings(&emb_result.embeddings)
+        let emb_bytes = std::fs::read(&embeddings_path)
+            .context("failed to read embeddings file")?;
+        let embeddings = decode_f32_embeddings(&emb_bytes)
             .context("failed to decode embedding bytes")?;
 
         info!(

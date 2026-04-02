@@ -239,4 +239,7 @@ message LoadCheckpointResponse {
 
   // Number of trainable parameters.
   uint64 num_parameters = 2;
+
+  // Device the model was loaded onto (e.g. "cuda:0").
+  string device = 3;
 }

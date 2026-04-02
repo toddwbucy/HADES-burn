@@ -79,6 +79,10 @@ pub enum TrainingError {
     /// Invalid response from the service.
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+
+    /// Path contains invalid UTF-8.
+    #[error("path contains invalid UTF-8: {0}")]
+    InvalidPath(PathBuf),
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +151,14 @@ pub struct CheckpointResult {
     pub path: String,
     /// Checkpoint file size in bytes.
     pub size_bytes: u64,
+}
+
+/// Convert a path to a UTF-8 string, returning an error for non-UTF-8 paths.
+#[allow(clippy::result_large_err)] // TrainingError is large due to tonic::Status
+fn path_to_string(path: &Path) -> Result<String, TrainingError> {
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| TrainingError::InvalidPath(path.to_path_buf()))
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +259,7 @@ impl TrainingClient {
         safetensors_path: impl AsRef<Path>,
     ) -> Result<LoadGraphResult, TrainingError> {
         let request = LoadGraphRequest {
-            safetensors_path: safetensors_path.as_ref().to_string_lossy().into_owned(),
+            safetensors_path: path_to_string(safetensors_path.as_ref())?,
         };
 
         let mut req = tonic::Request::new(request);
@@ -388,13 +400,16 @@ impl TrainingClient {
         path: impl AsRef<Path>,
     ) -> Result<CheckpointResult, TrainingError> {
         let request = CheckpointRequest {
-            path: path.as_ref().to_string_lossy().into_owned(),
+            path: path_to_string(path.as_ref())?,
         };
+
+        let mut req = tonic::Request::new(request);
+        req.set_timeout(self.config.slow_timeout);
 
         let response = self
             .inner
             .clone()
-            .checkpoint(request)
+            .checkpoint(req)
             .await?
             .into_inner();
 
@@ -418,14 +433,17 @@ impl TrainingClient {
         device: Option<&str>,
     ) -> Result<InitResult, TrainingError> {
         let request = LoadCheckpointRequest {
-            path: path.as_ref().to_string_lossy().into_owned(),
+            path: path_to_string(path.as_ref())?,
             device: device.unwrap_or_default().to_string(),
         };
+
+        let mut req = tonic::Request::new(request);
+        req.set_timeout(self.config.slow_timeout);
 
         let response = self
             .inner
             .clone()
-            .load_checkpoint(request)
+            .load_checkpoint(req)
             .await?
             .into_inner();
 
@@ -434,9 +452,15 @@ impl TrainingClient {
             "checkpoint loaded"
         );
 
+        let resolved_device = if response.device.is_empty() {
+            device.unwrap_or("unknown").to_string()
+        } else {
+            response.device
+        };
+
         Ok(InitResult {
             num_parameters: response.num_parameters,
-            device: device.unwrap_or("unknown").to_string(),
+            device: resolved_device,
         })
     }
 

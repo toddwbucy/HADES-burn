@@ -684,6 +684,7 @@ dependencies = [
  "chrono",
  "clap",
  "hades-core",
+ "hades-prefetch",
  "serde",
  "serde_json",
  "tempfile",

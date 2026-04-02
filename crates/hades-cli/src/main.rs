@@ -261,6 +261,31 @@ fn main() -> anyhow::Result<()> {
                 }
             };
         }
+        Commands::GraphEmbed(GraphEmbedCmd::Train {
+            epochs, dimension, hidden_dim, num_bases, dropout, lr, weight_decay,
+            patience, val_ratio, test_ratio, neg_ratio, export_to, checkpoint_dir,
+            no_export,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::graph_embed_train::run(
+                &config,
+                epochs,
+                dimension,
+                hidden_dim,
+                num_bases,
+                dropout,
+                lr,
+                weight_decay,
+                patience,
+                val_ratio,
+                test_ratio,
+                neg_ratio,
+                export_to.as_deref(),
+                &checkpoint_dir,
+                no_export,
+            ));
+        }
         _ => {} // Fall through to Python passthrough.
     }
 

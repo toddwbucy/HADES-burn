@@ -102,10 +102,12 @@ impl PrefetchConfig {
         Ok(())
     }
 
-    /// Estimate memory usage per buffered epoch in bytes.
+    /// Estimate data memory per buffered epoch in bytes.
     ///
     /// Each `NegativeSamples` holds two `Vec<u32>` of length
     /// `num_edges × neg_sampling_ratio`.  We buffer train + val negatives.
+    /// This counts only element bytes, not per-Vec heap headers (~96 bytes
+    /// per batch for four `Vec<u32>`) — negligible for real workloads.
     pub fn estimate_batch_bytes(&self, num_train_edges: usize, num_val_edges: usize) -> usize {
         let train_neg = (num_train_edges as f64 * self.neg_sampling_ratio) as usize;
         let val_neg = (num_val_edges as f64 * self.neg_sampling_ratio) as usize;

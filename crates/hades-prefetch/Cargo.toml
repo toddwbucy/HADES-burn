@@ -8,9 +8,11 @@ description = "Async graph-aware batch prefetcher for training integration"
 
 [dependencies]
 hades-core = { path = "../hades-core" }
+hades-proto = { path = "../hades-proto" }
 safetensors.workspace = true
 memmap2.workspace = true
 rand.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true

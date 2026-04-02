@@ -18,3 +18,8 @@ pub mod embedding {
 pub mod extraction {
     tonic::include_proto!("persephone.extraction");
 }
+
+/// Training service — RGCN link prediction on knowledge graphs.
+pub mod training {
+    tonic::include_proto!("persephone.training");
+}

@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("{proto_root}/persephone/common/common.proto"),
                 format!("{proto_root}/persephone/embedding/embedding.proto"),
                 format!("{proto_root}/persephone/extraction/extraction.proto"),
+                format!("{proto_root}/persephone/training/training.proto"),
             ],
             &[proto_root],
         )?;

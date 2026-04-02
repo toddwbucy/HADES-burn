@@ -167,6 +167,14 @@ pub fn split_edges(num_edges: usize, config: &SplitConfig) -> Result<EdgeSplit, 
     let test_size = (num_edges as f64 * config.test_ratio) as usize;
     let train_size = num_edges - val_size - test_size;
 
+    if train_size == 0 {
+        return Err(TensorError::InvalidSplitConfig {
+            val: config.val_ratio,
+            test: config.test_ratio,
+            sum: config.val_ratio + config.test_ratio,
+        });
+    }
+
     let train_idx = perm[..train_size].to_vec();
     let val_idx = perm[train_size..train_size + val_size].to_vec();
     let test_idx = perm[train_size + val_size..].to_vec();

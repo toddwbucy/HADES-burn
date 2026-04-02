@@ -76,6 +76,9 @@ pub enum TensorError {
 
     #[error("serialization validation failed: {message}")]
     ValidationFailed { message: String },
+
+    #[error("invalid neg_sampling_ratio: {neg} (must be finite and non-negative)")]
+    InvalidNegSamplingRatio { neg: f64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -453,12 +456,26 @@ pub fn serialize_to_file(
 /// The file is mapped into memory and tensors are accessed as byte slices
 /// without copying. The `MappedGraph` holds the mmap and provides typed
 /// accessors for the training loop.
+///
+/// # Safety
+///
+/// The underlying file must not be modified or truncated while the map is
+/// active. External modification can cause SIGBUS or undefined behavior.
+/// [`serialize_to_file`] uses atomic write (write-to-tmp + rename) to
+/// reduce risk, but concurrent non-atomic writers or file truncation can
+/// still corrupt the mapping. For full safety, use exclusive file locking
+/// or open a read-only snapshot.
 pub struct MappedGraph {
     mmap: Mmap,
 }
 
 impl MappedGraph {
     /// Open a safetensors file via memory mapping.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the file is not concurrently modified.
+    /// See [`MappedGraph`] for details.
     pub fn open(path: &Path) -> Result<Self, TensorError> {
         let file = fs::File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
@@ -575,10 +592,8 @@ pub fn prepare_and_serialize(
     config: &SplitConfig,
 ) -> Result<(), TensorError> {
     if !config.neg_sampling_ratio.is_finite() || config.neg_sampling_ratio < 0.0 {
-        return Err(TensorError::InvalidSplitConfig {
-            val: config.val_ratio,
-            test: config.test_ratio,
-            sum: config.val_ratio + config.test_ratio,
+        return Err(TensorError::InvalidNegSamplingRatio {
+            neg: config.neg_sampling_ratio,
         });
     }
 
@@ -795,6 +810,56 @@ mod tests {
         };
         let err = split_edges(100, &negative).unwrap_err();
         assert!(matches!(err, TensorError::InvalidSplitConfig { .. }));
+    }
+
+    #[test]
+    fn test_split_config_nan_inf() {
+        // NaN val_ratio
+        let nan_val = SplitConfig {
+            val_ratio: f64::NAN,
+            test_ratio: 0.1,
+            neg_sampling_ratio: 1.0,
+        };
+        assert!(matches!(
+            split_edges(100, &nan_val).unwrap_err(),
+            TensorError::InvalidSplitConfig { .. }
+        ));
+
+        // Infinity test_ratio
+        let inf_test = SplitConfig {
+            val_ratio: 0.1,
+            test_ratio: f64::INFINITY,
+            neg_sampling_ratio: 1.0,
+        };
+        assert!(matches!(
+            split_edges(100, &inf_test).unwrap_err(),
+            TensorError::InvalidSplitConfig { .. }
+        ));
+
+        // NaN neg_sampling_ratio — caught in prepare_and_serialize
+        let nan_neg = SplitConfig {
+            val_ratio: 0.1,
+            test_ratio: 0.1,
+            neg_sampling_ratio: f64::NAN,
+        };
+        let graph = test_graph();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nan.safetensors");
+        assert!(matches!(
+            prepare_and_serialize(&path, &graph, &nan_neg).unwrap_err(),
+            TensorError::InvalidNegSamplingRatio { .. }
+        ));
+
+        // Negative neg_sampling_ratio
+        let neg_neg = SplitConfig {
+            val_ratio: 0.1,
+            test_ratio: 0.1,
+            neg_sampling_ratio: -1.0,
+        };
+        assert!(matches!(
+            prepare_and_serialize(&path, &graph, &neg_neg).unwrap_err(),
+            TensorError::InvalidNegSamplingRatio { .. }
+        ));
     }
 
     #[test]

@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde_json::json;
-use tracing::info;
+use serde_json::{Value, json};
+use tracing::{info, warn};
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
@@ -38,6 +38,8 @@ pub async fn run(
     neg_ratio: f64,
     export_to: Option<&str>,
     checkpoint_dir: &str,
+    val_every: usize,
+    prefetch_depth: usize,
     no_export: bool,
 ) -> Result<()> {
     // ── Validate split ratios ───────────────────────────────────────
@@ -107,9 +109,9 @@ pub async fn run(
         weight_decay,
         epochs: epochs as usize,
         patience: patience as usize,
-        val_every: 1,           // validate every epoch (matches Python)
+        val_every,
         neg_sampling_ratio: neg_ratio,
-        prefetch_depth: 2,      // double-buffered (one ahead of GPU)
+        prefetch_depth,
         device: config.gpu.device.clone(),
     };
 
@@ -164,7 +166,18 @@ pub async fn run(
         .context("embedding export failed")?;
 
         export_count = export_result.total_exported;
-        info!(total = export_count, "embeddings exported");
+        let expected_total = data.id_map.len();
+        if export_count < expected_total {
+            warn!(
+                db = %pool.database(),
+                total_exported = export_count,
+                expected_total,
+                skipped = expected_total - export_count,
+                "partial export — some documents were not updated"
+            );
+        } else {
+            info!(total = export_count, "embeddings exported");
+        }
     }
 
     // ── JSON output to stdout ────────────────────────────────────────
@@ -185,7 +198,9 @@ pub async fn run(
         "export": {
             "enabled": !no_export,
             "count": export_count,
-            "target_db": export_to.unwrap_or(config.effective_database()),
+            "target_db": if no_export { Value::Null } else {
+                Value::String(export_to.unwrap_or(config.effective_database()).to_string())
+            },
         },
         "checkpoint_path": result.checkpoint_path,
     });

@@ -264,7 +264,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GraphEmbed(GraphEmbedCmd::Train {
             epochs, dimension, hidden_dim, num_bases, dropout, lr, weight_decay,
             patience, val_ratio, test_ratio, neg_ratio, export_to, checkpoint_dir,
-            no_export,
+            val_every, prefetch_depth, no_export,
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -283,6 +283,8 @@ fn main() -> anyhow::Result<()> {
                 neg_ratio,
                 export_to.as_deref(),
                 &checkpoint_dir,
+                val_every,
+                prefetch_depth,
                 no_export,
             ));
         }

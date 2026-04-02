@@ -61,6 +61,14 @@ pub enum GraphEmbedCmd {
         #[arg(long, default_value = "/tmp/hades-train")]
         checkpoint_dir: String,
 
+        /// Validate every N epochs (default: every epoch).
+        #[arg(long, default_value_t = 1)]
+        val_every: usize,
+
+        /// Prefetch buffer depth for CPU→GPU pipelining.
+        #[arg(long, default_value_t = 2)]
+        prefetch_depth: usize,
+
         /// Skip embedding export after training.
         #[arg(long)]
         no_export: bool,

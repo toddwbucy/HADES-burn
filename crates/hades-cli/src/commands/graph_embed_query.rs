@@ -55,7 +55,7 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
     let embed_dim = embedding
         .as_array()
         .map(|a| a.len())
-        .unwrap_or(0);
+        .ok_or_else(|| anyhow::anyhow!("structural embedding is not an array for {node_id}"))?;
 
     let label = node
         .get("title")

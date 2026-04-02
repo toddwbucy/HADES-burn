@@ -5,6 +5,10 @@ use hades_proto::embedding::{EmbedRequest, EmbedResponse, Embedding, ProviderInf
 use hades_proto::extraction::{
     ExtractRequest, ExtractResponse, ExtractorInfo, SourceType, Table,
 };
+use hades_proto::training::{
+    CheckpointRequest, EvaluateRequest, GetEmbeddingsRequest, InitModelRequest,
+    LoadCheckpointRequest, LoadGraphRequest, ModelConfig, OptimizerConfig, TrainStepRequest,
+};
 
 #[test]
 fn test_common_types() {
@@ -97,4 +101,68 @@ fn test_extraction_types() {
         gpu_available: true,
     };
     assert_eq!(info.supported_extensions.len(), 2);
+}
+
+#[test]
+fn test_training_types() {
+    let model_config = ModelConfig {
+        num_relations: 22,
+        num_collection_types: 62,
+        hidden_dim: 256,
+        embed_dim: 128,
+        num_bases: 21,
+        dropout: 0.2,
+    };
+    assert_eq!(model_config.num_relations, 22);
+    assert_eq!(model_config.embed_dim, 128);
+
+    let optimizer = OptimizerConfig {
+        learning_rate: 0.01,
+        weight_decay: 5e-4,
+    };
+    assert!(optimizer.learning_rate > 0.0);
+
+    let init_req = InitModelRequest {
+        model: Some(model_config),
+        optimizer: Some(optimizer),
+        device: "cuda:2".to_string(),
+    };
+    assert!(init_req.model.is_some());
+    assert_eq!(init_req.device, "cuda:2");
+
+    let load_req = LoadGraphRequest {
+        safetensors_path: "/tmp/graph.safetensors".to_string(),
+    };
+    assert!(!load_req.safetensors_path.is_empty());
+
+    let step_req = TrainStepRequest {
+        train_edge_indices: vec![0, 1, 2, 3],
+        neg_src: vec![5, 6],
+        neg_dst: vec![7, 8],
+    };
+    assert_eq!(step_req.train_edge_indices.len(), 4);
+    assert_eq!(step_req.neg_src.len(), step_req.neg_dst.len());
+
+    let eval_req = EvaluateRequest {
+        edge_indices: vec![10, 11],
+        neg_src: vec![0],
+        neg_dst: vec![1],
+    };
+    assert_eq!(eval_req.edge_indices.len(), 2);
+
+    let emb_req = GetEmbeddingsRequest {
+        output_path: "/tmp/embeddings.safetensors".to_string(),
+    };
+    assert!(!emb_req.output_path.is_empty());
+
+    let ckpt_req = CheckpointRequest {
+        path: "/tmp/model.pt".to_string(),
+    };
+    assert!(!ckpt_req.path.is_empty());
+
+    let load_ckpt = LoadCheckpointRequest {
+        path: "/tmp/model.pt".to_string(),
+        device: "cuda:0".to_string(),
+    };
+    assert_eq!(load_ckpt.device, "cuda:0");
 }

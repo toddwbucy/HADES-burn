@@ -1,0 +1,237 @@
+// Persephone Training Service — RGCN link prediction on knowledge graphs.
+//
+// The Rust orchestrator drives the training loop: it loads the graph from
+// ArangoDB, computes edge splits and negative samples via safetensors IPC,
+// and issues per-step RPCs to the Python provider which owns the GPU, model
+// parameters, and optimizer state.
+//
+// Lifecycle:
+//   1. InitModel   — provider creates encoder + predictor on GPU
+//   2. LoadGraph   — provider loads safetensors file into GPU memory
+//   3. TrainStep*  — repeated forward+backward+optimizer steps (per epoch)
+//   4. Evaluate    — score on val/test edges (no gradients)
+//   5. GetEmbeddings — full forward pass, return structural embeddings
+//   6. Checkpoint / LoadCheckpoint — save/restore model state
+
+syntax = "proto3";
+
+package persephone.training;
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+// Training service for RGCN link prediction.
+service TrainingService {
+  // Initialize the model with the given architecture config.
+  // Must be called before LoadGraph or TrainStep.
+  rpc InitModel(InitModelRequest) returns (InitModelResponse);
+
+  // Load a safetensors graph file into GPU memory.
+  // Must be called after InitModel and before TrainStep.
+  rpc LoadGraph(LoadGraphRequest) returns (LoadGraphResponse);
+
+  // Execute one training step: forward → loss → backward → optimizer.step().
+  // Returns the training loss for the step.
+  rpc TrainStep(TrainStepRequest) returns (TrainStepResponse);
+
+  // Evaluate on a set of edges (val or test) without gradient computation.
+  // Returns loss, accuracy, and AUC.
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+
+  // Run a full forward pass and return structural embeddings for all nodes.
+  // No gradients. Used after training completes to export embeddings.
+  rpc GetEmbeddings(GetEmbeddingsRequest) returns (GetEmbeddingsResponse);
+
+  // Save the current model state (encoder + predictor) to a checkpoint file.
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+
+  // Load a previously saved checkpoint, restoring model weights.
+  rpc LoadCheckpoint(LoadCheckpointRequest) returns (LoadCheckpointResponse);
+}
+
+// ---------------------------------------------------------------------------
+// InitModel
+// ---------------------------------------------------------------------------
+
+// Model architecture configuration.
+message ModelConfig {
+  // Number of edge relation types (default: 22).
+  uint32 num_relations = 1;
+
+  // Number of distinct vertex collection types.
+  uint32 num_collection_types = 2;
+
+  // Hidden layer dimension (default: 256).
+  uint32 hidden_dim = 3;
+
+  // Output structural embedding dimension (default: 128).
+  uint32 embed_dim = 4;
+
+  // Number of basis matrices for RGCN decomposition (default: 21).
+  uint32 num_bases = 5;
+
+  // Dropout rate (default: 0.2).
+  float dropout = 6;
+}
+
+// Optimizer configuration.
+message OptimizerConfig {
+  // Learning rate (default: 0.01).
+  float learning_rate = 1;
+
+  // L2 regularization weight (default: 5e-4).
+  float weight_decay = 2;
+}
+
+message InitModelRequest {
+  // Model architecture.
+  ModelConfig model = 1;
+
+  // Optimizer settings.
+  OptimizerConfig optimizer = 2;
+
+  // Target device (e.g. "cuda:0", "cuda:2", "cpu").
+  string device = 3;
+}
+
+message InitModelResponse {
+  // Total number of trainable parameters.
+  uint64 num_parameters = 1;
+
+  // Device the model was placed on.
+  string device = 2;
+}
+
+// ---------------------------------------------------------------------------
+// LoadGraph
+// ---------------------------------------------------------------------------
+
+message LoadGraphRequest {
+  // Absolute path to the safetensors file produced by hades-prefetch.
+  string safetensors_path = 1;
+}
+
+message LoadGraphResponse {
+  // Number of nodes loaded.
+  uint64 num_nodes = 1;
+
+  // Number of edges loaded.
+  uint64 num_edges = 2;
+
+  // Feature dimension.
+  uint32 feature_dim = 3;
+
+  // GPU memory used in bytes (approximate).
+  uint64 gpu_memory_bytes = 4;
+}
+
+// ---------------------------------------------------------------------------
+// TrainStep
+// ---------------------------------------------------------------------------
+
+message TrainStepRequest {
+  // Edge indices for the positive (training) edges in this step.
+  // Indices into the edge arrays loaded via LoadGraph.
+  repeated uint32 train_edge_indices = 1;
+
+  // Negative sample source node indices.
+  repeated uint32 neg_src = 2;
+
+  // Negative sample destination node indices.
+  repeated uint32 neg_dst = 3;
+}
+
+message TrainStepResponse {
+  // Binary cross-entropy loss for this step.
+  float loss = 1;
+
+  // Training accuracy for this step (fraction of correct predictions).
+  float accuracy = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Evaluate
+// ---------------------------------------------------------------------------
+
+message EvaluateRequest {
+  // Edge indices for the evaluation split (val or test).
+  repeated uint32 edge_indices = 1;
+
+  // Negative sample source node indices for evaluation.
+  repeated uint32 neg_src = 2;
+
+  // Negative sample destination node indices for evaluation.
+  repeated uint32 neg_dst = 3;
+}
+
+message EvaluateResponse {
+  // Binary cross-entropy loss.
+  float loss = 1;
+
+  // Classification accuracy (threshold 0.5).
+  float accuracy = 2;
+
+  // Area under the ROC curve.
+  float auc = 3;
+}
+
+// ---------------------------------------------------------------------------
+// GetEmbeddings
+// ---------------------------------------------------------------------------
+
+message GetEmbeddingsRequest {
+  // Optional: path to write embeddings as a safetensors file.
+  // If empty, embeddings are returned inline in the response.
+  string output_path = 1;
+}
+
+message GetEmbeddingsResponse {
+  // Number of nodes embedded.
+  uint64 num_nodes = 1;
+
+  // Embedding dimension.
+  uint32 embed_dim = 2;
+
+  // Structural embeddings [N * embed_dim] flattened, F32.
+  // Only populated if output_path was empty in the request.
+  // For large graphs, prefer file output to avoid gRPC message size limits.
+  bytes embeddings = 3;
+
+  // Path where embeddings were written (if output_path was set).
+  string output_path = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint
+// ---------------------------------------------------------------------------
+
+message CheckpointRequest {
+  // Path to save the checkpoint file (.pt).
+  string path = 1;
+}
+
+message CheckpointResponse {
+  // Path where the checkpoint was saved.
+  string path = 1;
+
+  // Size of the checkpoint file in bytes.
+  uint64 size_bytes = 2;
+}
+
+message LoadCheckpointRequest {
+  // Path to the checkpoint file to load.
+  string path = 1;
+
+  // Target device to load onto (e.g. "cuda:0").
+  // If empty, uses the device from InitModel.
+  string device = 2;
+}
+
+message LoadCheckpointResponse {
+  // Model config from the loaded checkpoint.
+  ModelConfig model_config = 1;
+
+  // Number of trainable parameters.
+  uint64 num_parameters = 2;
+}

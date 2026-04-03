@@ -550,7 +550,7 @@ mod handlers {
                  id: d._id, \
                  label: NOT_NULL(d.title, d.name, d._key), \
                  collection: @col_name, \
-                 similarity: ROUND(sim * 10000) / 10000 \
+                 similarity: sim \
                }";
 
         for col_info in &collections {
@@ -592,6 +592,13 @@ mod handlers {
         });
         all_neighbors.truncate(limit as usize);
 
+        // Round similarity for presentation after global ordering is final.
+        for neighbor in &mut all_neighbors {
+            if let Some(sim) = neighbor.get("similarity").and_then(|v| v.as_f64()) {
+                neighbor["similarity"] = json!((sim * 10000.0).round() / 10000.0);
+            }
+        }
+
         Ok(json!({
             "query_node": node_id,
             "k": limit,
@@ -618,6 +625,12 @@ mod handlers {
             return Err(HandlerError::InvalidNodeId {
                 node_id: node_id.to_string(),
                 reason: "empty key".into(),
+            });
+        }
+        if key.contains('/') {
+            return Err(HandlerError::InvalidNodeId {
+                node_id: node_id.to_string(),
+                reason: "key must not contain '/'".into(),
             });
         }
 

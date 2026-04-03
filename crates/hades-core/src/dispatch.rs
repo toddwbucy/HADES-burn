@@ -54,10 +54,6 @@ pub enum HandlerError {
     #[error("limit must be 1..={max}, got {limit}")]
     InvalidLimit { limit: u32, max: u32 },
 
-    /// Every per-collection query failed during fan-out.
-    #[error("all {count} collection queries failed; last error: {last_error}")]
-    AllCollectionsFailed { count: usize, last_error: String },
-
     /// A database query failed.
     #[error("{context}")]
     Query {
@@ -607,7 +603,7 @@ mod handlers {
     }
 
     /// Parse and validate a `collection/key` node ID.
-    fn parse_node_id(node_id: &str) -> Result<(&str, &str), HandlerError> {
+    pub(super) fn parse_node_id(node_id: &str) -> Result<(&str, &str), HandlerError> {
         let (col, key) = node_id
             .split_once('/')
             .ok_or_else(|| HandlerError::InvalidNodeId {
@@ -741,5 +737,34 @@ mod tests {
             "params": {}
         });
         assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    // -- parse_node_id -------------------------------------------------------
+
+    #[test]
+    fn test_parse_node_id_valid() {
+        let (col, key) = handlers::parse_node_id("papers/p123").unwrap();
+        assert_eq!(col, "papers");
+        assert_eq!(key, "p123");
+    }
+
+    #[test]
+    fn test_parse_node_id_no_slash() {
+        assert!(handlers::parse_node_id("no_slash").is_err());
+    }
+
+    #[test]
+    fn test_parse_node_id_multiple_slashes() {
+        assert!(handlers::parse_node_id("a/b/c").is_err());
+    }
+
+    #[test]
+    fn test_parse_node_id_empty_collection() {
+        assert!(handlers::parse_node_id("/key").is_err());
+    }
+
+    #[test]
+    fn test_parse_node_id_empty_key() {
+        assert!(handlers::parse_node_id("col/").is_err());
     }
 }

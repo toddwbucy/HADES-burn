@@ -317,6 +317,85 @@ fn main() -> anyhow::Result<()> {
                 socket.as_deref(),
             ));
         }
+        // ── Native DB read commands ─────────────────────────────────────
+        Commands::Db(commands::db::DbCmd::Get { collection, key, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_get(&config, &collection, &key));
+        }
+        Commands::Db(commands::db::DbCmd::Count { collection }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_count(&config, &collection));
+        }
+        Commands::Db(commands::db::DbCmd::Collections { .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_collections(&config));
+        }
+        Commands::Db(commands::db::DbCmd::Check { document_id }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_check(&config, &document_id));
+        }
+        Commands::Db(commands::db::DbCmd::Recent { limit, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_recent(&config, limit));
+        }
+        Commands::Db(commands::db::DbCmd::List { collection, limit, paper, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_list(
+                &config,
+                collection.as_deref(),
+                limit,
+                paper.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Aql { aql, bind, limit, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_aql(
+                &config,
+                &aql,
+                bind.as_deref(),
+                limit,
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Health { verbose }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_health(&config, verbose));
+        }
+        Commands::Db(commands::db::DbCmd::Stats { .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_stats(&config));
+        }
+        Commands::Db(commands::db::DbCmd::Export { collection, output, limit, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_export(
+                &config,
+                &collection,
+                output.as_deref(),
+                limit,
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::IndexStatus { collection, .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_index_status(
+                &config,
+                collection.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Databases { .. }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_read::run_databases(&config));
+        }
         _ => {} // Fall through to Python passthrough.
     }
 

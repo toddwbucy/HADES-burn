@@ -42,6 +42,10 @@ pub enum HandlerError {
     #[error("node not found: {0}")]
     NodeNotFound(String),
 
+    /// The requested document does not exist.
+    #[error("document not found: {collection}/{key}")]
+    DocumentNotFound { collection: String, key: String },
+
     /// The node exists but has no structural embedding.
     #[error("no structural embedding for {node_id} — run 'hades graph-embed train' first")]
     NoEmbedding { node_id: String },
@@ -53,6 +57,10 @@ pub enum HandlerError {
     /// A `limit` parameter is out of bounds.
     #[error("limit must be 1..={max}, got {limit}")]
     InvalidLimit { limit: u32, max: u32 },
+
+    /// An invalid parameter was provided.
+    #[error("invalid parameter '{name}': {reason}")]
+    InvalidParameter { name: String, reason: String },
 
     /// A database query failed.
     #[error("{context}")]
@@ -391,6 +399,56 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
 
+        // ── Database read commands ─────────────────────────────────────
+        DaemonCommand::DbGet { collection, key } => {
+            handlers::db_get(pool, &collection, &key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCount { collection } => {
+            handlers::db_count(pool, &collection)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCollections {} => {
+            handlers::db_collections(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCheck { document_id } => {
+            handlers::db_check(pool, &document_id)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbRecent { limit } => {
+            let limit = limit.unwrap_or(10).min(MAX_LIMIT);
+            handlers::db_recent(pool, limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbList { collection, limit, paper } => {
+            let limit = limit.unwrap_or(20).min(MAX_LIMIT);
+            handlers::db_list(pool, collection.as_deref(), limit, paper.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbAql { aql, bind, limit } => {
+            let limit = limit.map(|l| l.min(MAX_LIMIT));
+            handlers::db_aql(pool, &aql, bind.as_ref(), limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbHealth { verbose } => {
+            handlers::db_health(pool, verbose)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbStats {} => {
+            handlers::db_stats(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
         // All other commands are not yet implemented natively.
         // The daemon (P6.3) will fall back to Python subprocess.
         other => Err(DispatchError::NotImplemented(
@@ -407,12 +465,369 @@ pub async fn dispatch(
 // ---------------------------------------------------------------------------
 
 mod handlers {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::HandlerError;
-    use crate::db::crud::{list_collections, CollectionInfo};
+    use crate::db::collections::CollectionProfile;
+    use crate::db::crud::{self, list_collections, count_collection, CollectionInfo};
+    use crate::db::index;
     use crate::db::query::{self, ExecutionTarget};
     use crate::db::ArangoPool;
+
+    // ── Database read handlers ──────────────────────────────────────
+
+    /// Fetch a single document by collection and key.
+    pub async fn db_get(
+        pool: &ArangoPool,
+        collection: &str,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        crud::get_document(pool, collection, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: collection.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get {collection}/{key}"),
+                        source: e,
+                    }
+                }
+            })
+    }
+
+    /// Count documents in a collection.
+    pub async fn db_count(
+        pool: &ArangoPool,
+        collection: &str,
+    ) -> Result<Value, HandlerError> {
+        let count = count_collection(pool, collection)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to count collection '{collection}'"),
+                source: e,
+            })?;
+        Ok(json!({ "collection": collection, "count": count }))
+    }
+
+    /// List all non-system collections with document counts.
+    pub async fn db_collections(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let collections = list_collections(pool, true)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to list collections".into(),
+                source: e,
+            })?;
+
+        let mut entries = Vec::with_capacity(collections.len());
+        for col in &collections {
+            let count = count_collection(pool, &col.name).await.unwrap_or(0);
+            let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+            entries.push(json!({
+                "name": col.name,
+                "type": type_name,
+                "count": count,
+            }));
+        }
+
+        Ok(json!({
+            "database": pool.database(),
+            "collections": entries,
+            "total": entries.len(),
+        }))
+    }
+
+    /// Check if a document exists by its full _id (collection/key).
+    pub async fn db_check(
+        pool: &ArangoPool,
+        document_id: &str,
+    ) -> Result<Value, HandlerError> {
+        let (col, key) = parse_node_id(document_id)?;
+        let exists = match crud::get_document(pool, col, key).await {
+            Ok(_) => true,
+            Err(e) if e.is_not_found() => false,
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to check {document_id}"),
+                    source: e,
+                })
+            }
+        };
+        Ok(json!({ "document_id": document_id, "exists": exists }))
+    }
+
+    /// Return recently created/updated documents across collection profiles.
+    pub async fn db_recent(
+        pool: &ArangoPool,
+        limit: u32,
+    ) -> Result<Value, HandlerError> {
+        let profile = CollectionProfile::default_profile();
+        let aql = "FOR d IN @@col \
+                    SORT d.created_at DESC, d._rev DESC \
+                    LIMIT @limit \
+                    RETURN MERGE(d, { _collection: @col_name })";
+
+        let bind = json!({
+            "@col": profile.metadata,
+            "col_name": profile.metadata,
+            "limit": limit,
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(e) if e.is_not_found() => {
+                return Ok(json!({
+                    "collection": profile.metadata,
+                    "documents": [],
+                    "count": 0,
+                    "note": format!("collection '{}' does not exist in this database", profile.metadata),
+                }));
+            }
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to query recent from '{}'", profile.metadata),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(json!({
+            "collection": profile.metadata,
+            "documents": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// List documents from a collection profile with optional paper filter.
+    pub async fn db_list(
+        pool: &ArangoPool,
+        collection: Option<&str>,
+        limit: u32,
+        paper: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let profile = match collection {
+            Some(name) => CollectionProfile::get(name).ok_or_else(|| {
+                HandlerError::InvalidParameter {
+                    name: "collection".into(),
+                    reason: format!(
+                        "unknown profile '{name}' — valid profiles: {}",
+                        CollectionProfile::all()
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            })?,
+            None => CollectionProfile::default_profile(),
+        };
+
+        let (aql, bind) = if let Some(paper_id) = paper {
+            (
+                "FOR d IN @@col \
+                 FILTER d.paper_id == @paper_id || d.document_id == @paper_id || d.arxiv_id == @paper_id \
+                 LIMIT @limit \
+                 RETURN d",
+                json!({
+                    "@col": profile.metadata,
+                    "paper_id": paper_id,
+                    "limit": limit,
+                }),
+            )
+        } else {
+            (
+                "FOR d IN @@col \
+                 LIMIT @limit \
+                 RETURN d",
+                json!({
+                    "@col": profile.metadata,
+                    "limit": limit,
+                }),
+            )
+        };
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            true,
+            ExecutionTarget::Reader,
+        )
+        .await;
+
+        // Return empty list if the collection doesn't exist in this database.
+        let result = match result {
+            Ok(r) => r,
+            Err(e) if e.is_not_found() => {
+                return Ok(json!({
+                    "collection": profile.metadata,
+                    "documents": [],
+                    "count": 0,
+                    "full_count": 0,
+                    "note": format!("collection '{}' does not exist in this database", profile.metadata),
+                }));
+            }
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to list from '{}'", profile.metadata),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(json!({
+            "collection": profile.metadata,
+            "documents": result.results,
+            "count": result.results.len(),
+            "full_count": result.full_count,
+        }))
+    }
+
+    /// Execute a raw AQL query (read-only enforced).
+    pub async fn db_aql(
+        pool: &ArangoPool,
+        aql: &str,
+        bind: Option<&Value>,
+        limit: Option<u32>,
+    ) -> Result<Value, HandlerError> {
+        // Reject mutating AQL — this handler is read-only.
+        let upper = aql.to_uppercase();
+        for keyword in &["INSERT", "UPDATE", "REPLACE", "REMOVE", "UPSERT"] {
+            // Check for standalone keywords (not inside quoted strings).
+            // Simple heuristic: keyword preceded by whitespace or at start.
+            if upper.split_whitespace().any(|w| w == *keyword) {
+                return Err(HandlerError::InvalidParameter {
+                    name: "aql".into(),
+                    reason: format!(
+                        "mutating AQL ({keyword}) not allowed via db.aql — use the write-specific commands"
+                    ),
+                });
+            }
+        }
+
+        let full_aql = if let Some(lim) = limit {
+            format!("{aql} LIMIT {lim}")
+        } else {
+            aql.to_string()
+        };
+
+        let result = query::query(
+            pool,
+            &full_aql,
+            bind,
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: "AQL execution failed".into(),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "results": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// Health check — ArangoDB connectivity + optional integrity checks.
+    pub async fn db_health(
+        pool: &ArangoPool,
+        verbose: bool,
+    ) -> Result<Value, HandlerError> {
+        let status = pool.health_check().await;
+
+        let mut result = json!({
+            "database": pool.database(),
+            "arangodb": {
+                "version": status.version,
+                "reader_ok": status.reader_ok,
+                "writer_ok": status.writer_ok,
+                "shared_connection": status.shared,
+                "status": if status.reader_ok && status.writer_ok { "healthy" } else { "degraded" },
+            },
+        });
+
+        if verbose {
+            // Add per-collection info for verbose mode.
+            let collections = list_collections(pool, true).await.unwrap_or_default();
+            let mut col_details = Vec::new();
+            for col in &collections {
+                let count = count_collection(pool, &col.name).await.unwrap_or(0);
+                let indexes = index::list_indexes(pool, &col.name).await.unwrap_or_default();
+                let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+                col_details.push(json!({
+                    "name": col.name,
+                    "type": type_name,
+                    "count": count,
+                    "indexes": indexes.len(),
+                }));
+            }
+            result["collections"] = json!(col_details);
+            result["collection_count"] = json!(collections.len());
+        }
+
+        Ok(result)
+    }
+
+    /// Aggregate statistics across all collection profiles.
+    pub async fn db_stats(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let mut profiles_data = Vec::new();
+        let mut total_docs: u64 = 0;
+        let mut total_chunks: u64 = 0;
+        let mut total_embeddings: u64 = 0;
+
+        for (name, profile) in CollectionProfile::all() {
+            let meta_count = count_collection(pool, profile.metadata).await.unwrap_or(0);
+            let chunk_count = count_collection(pool, profile.chunks).await.unwrap_or(0);
+            let emb_count = count_collection(pool, profile.embeddings).await.unwrap_or(0);
+
+            total_docs += meta_count;
+            total_chunks += chunk_count;
+            total_embeddings += emb_count;
+
+            profiles_data.push(json!({
+                "name": name,
+                "metadata_collection": profile.metadata,
+                "chunks_collection": profile.chunks,
+                "embeddings_collection": profile.embeddings,
+                "documents": meta_count,
+                "chunks": chunk_count,
+                "embeddings": emb_count,
+            }));
+        }
+
+        Ok(json!({
+            "database": pool.database(),
+            "profiles": profiles_data,
+            "totals": {
+                "documents": total_docs,
+                "chunks": total_chunks,
+                "embeddings": total_embeddings,
+            },
+        }))
+    }
+
+    // ── Graph embed handlers ──────────────────────────────────────────
 
     /// Look up the pre-computed structural embedding for a node.
     pub async fn graph_embed_embed(
@@ -766,5 +1181,234 @@ mod tests {
     #[test]
     fn test_parse_node_id_empty_key() {
         assert!(handlers::parse_node_id("col/").is_err());
+    }
+
+    // -- DB command serde roundtrips ------------------------------------------
+
+    #[test]
+    fn test_command_roundtrip_db_get() {
+        let json = serde_json::json!({
+            "command": "db.get",
+            "params": { "collection": "arxiv_metadata", "key": "2409_04701" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGet { ref collection, ref key }
+                if collection == "arxiv_metadata" && key == "2409_04701"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_aql() {
+        let json = serde_json::json!({
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1", "limit": 5 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbAql { ref aql, limit: Some(5), .. } if aql == "RETURN 1"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_collections() {
+        let json = serde_json::json!({
+            "command": "db.collections",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbCollections {}));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_count() {
+        let json = serde_json::json!({
+            "command": "db.count",
+            "params": { "collection": "chunks" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCount { ref collection } if collection == "chunks"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_check() {
+        let json = serde_json::json!({
+            "command": "db.check",
+            "params": { "document_id": "arxiv_metadata/2409_04701" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCheck { ref document_id } if document_id == "arxiv_metadata/2409_04701"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_recent_defaults() {
+        let json = serde_json::json!({
+            "command": "db.recent",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbRecent { limit: None }
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_list() {
+        let json = serde_json::json!({
+            "command": "db.list",
+            "params": { "collection": "sync", "limit": 50 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbList { ref collection, limit: Some(50), .. }
+                if collection.as_deref() == Some("sync")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_health() {
+        let json = serde_json::json!({
+            "command": "db.health",
+            "params": { "verbose": true }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbHealth { verbose: true }
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_stats() {
+        let json = serde_json::json!({
+            "command": "db.stats",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbStats {}));
+    }
+
+    // -- AQL read-only enforcement --------------------------------------------
+
+    #[test]
+    fn test_db_aql_rejects_insert() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql {
+                aql: "INSERT { foo: 1 } INTO test".to_string(),
+                bind: None,
+                limit: None,
+            },
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    #[test]
+    fn test_db_aql_rejects_remove() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql {
+                aql: "FOR d IN test REMOVE d IN test".to_string(),
+                bind: None,
+                limit: None,
+            },
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    #[test]
+    fn test_db_aql_rejects_update() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql {
+                aql: "FOR d IN test UPDATE d WITH { x: 1 } IN test".to_string(),
+                bind: None,
+                limit: None,
+            },
+        ));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_db_aql_allows_return() {
+        // "RETURN 1" should pass the read-only check (will fail at AQL execution
+        // if ArangoDB is unreachable, but should not fail at validation).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql {
+                aql: "RETURN 1".to_string(),
+                bind: None,
+                limit: None,
+            },
+        ));
+
+        // This will fail with a connection error (ArangoDB not running in test),
+        // NOT with InvalidParameter — that's the important assertion.
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("RETURN 1 should not be rejected as mutating AQL");
+            }
+            _ => {} // Connection error or success — both acceptable.
+        }
+    }
+
+    // -- db_list profile validation -------------------------------------------
+
+    #[test]
+    fn test_db_list_invalid_profile() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbList {
+                collection: Some("nonexistent_profile".into()),
+                limit: Some(10),
+                paper: None,
+            },
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
     }
 }

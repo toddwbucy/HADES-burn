@@ -18,7 +18,7 @@ DDL (collection/database/index/graph creation and deletion).
 
 Length-prefixed JSON framing.  Every message (request and response) is:
 
-```
+```text
 [4 bytes: big-endian u32 payload length][JSON payload]
 ```
 
@@ -30,11 +30,11 @@ Length-prefixed JSON framing.  Every message (request and response) is:
 
 ### Example (hex)
 
-```
-00 00 00 1F {"command":"orient","params":{}}
+```text
+00 00 00 20 {"command":"orient","params":{}}
 ```
 
-The 4-byte header `0x0000001F` = 31, which is the byte length of the
+The 4-byte header `0x00000020` = 32, which is the byte length of the
 JSON payload that follows.
 
 ## Request Schema

@@ -531,7 +531,7 @@ mod handlers {
                 source: e,
             })?
             .into_iter()
-            .filter(|c| c.collection_type == 2)
+            .filter(|c| c.collection_type == CollectionInfo::DOCUMENT_TYPE)
             .collect();
 
         // Search each collection — fail fast on first error.

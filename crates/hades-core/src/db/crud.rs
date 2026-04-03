@@ -254,6 +254,11 @@ pub struct CollectionInfo {
     pub collection_type: u32,
 }
 
+impl CollectionInfo {
+    /// ArangoDB type code for document collections.
+    pub const DOCUMENT_TYPE: u32 = 2;
+}
+
 /// List collections in the database, optionally filtering system collections.
 ///
 /// System collections have names starting with `_`.

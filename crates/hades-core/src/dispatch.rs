@@ -68,7 +68,7 @@ pub enum HandlerError {
 // ---------------------------------------------------------------------------
 
 /// Structured response from a dispatched command.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonResponse {
     /// Echoed from request (null if not provided).
     pub request_id: Option<String>,

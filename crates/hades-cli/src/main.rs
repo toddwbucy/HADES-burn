@@ -161,6 +161,13 @@ enum Commands {
     /// Graph embedding operations — train and query structural embeddings.
     #[command(subcommand)]
     GraphEmbed(GraphEmbedCmd),
+
+    /// Start the HADES daemon (Unix socket query server).
+    Daemon {
+        /// Socket path (default: /run/hades/hades.sock).
+        #[arg(long)]
+        socket: Option<String>,
+    },
 }
 
 /// Initialize tracing (structured logging to stderr).
@@ -300,6 +307,14 @@ fn main() -> anyhow::Result<()> {
                 val_every,
                 prefetch_depth,
                 no_export,
+            ));
+        }
+        Commands::Daemon { socket } => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::daemon::run(
+                &config,
+                socket.as_deref(),
             ));
         }
         _ => {} // Fall through to Python passthrough.

@@ -9,7 +9,7 @@ use serde_json::json;
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
-use hades_core::dispatch;
+use hades_core::dispatch::{self, GraphEmbedEmbedParams, GraphEmbedNeighborsParams};
 
 // ---------------------------------------------------------------------------
 // graph-embed embed
@@ -23,9 +23,9 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
     let data = dispatch::dispatch(
         &pool,
         config,
-        dispatch::DaemonCommand::GraphEmbedEmbed {
+        dispatch::DaemonCommand::GraphEmbedEmbed(GraphEmbedEmbedParams {
             node_id: node_id.to_string(),
-        },
+        }),
     )
     .await?;
 
@@ -46,10 +46,10 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
     let data = dispatch::dispatch(
         &pool,
         config,
-        dispatch::DaemonCommand::GraphEmbedNeighbors {
+        dispatch::DaemonCommand::GraphEmbedNeighbors(GraphEmbedNeighborsParams {
             node_id: node_id.to_string(),
             limit: Some(limit),
-        },
+        }),
     )
     .await?;
 

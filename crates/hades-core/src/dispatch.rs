@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::HadesConfig;
-use crate::db::ArangoPool;
+use crate::db::{ArangoError, ArangoPool};
+
+/// Maximum value accepted for `limit` parameters in dispatch handlers.
+const MAX_LIMIT: u32 = 1000;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -25,7 +28,43 @@ pub enum DispatchError {
 
     /// Handler returned an error.
     #[error(transparent)]
-    Handler(#[from] anyhow::Error),
+    Handler(#[from] HandlerError),
+}
+
+/// Errors from native command handlers (typed per CLAUDE.md convention).
+#[derive(Debug, thiserror::Error)]
+pub enum HandlerError {
+    /// The node ID is not in `collection/key` format.
+    #[error("invalid node ID '{node_id}': {reason}")]
+    InvalidNodeId { node_id: String, reason: String },
+
+    /// The requested node does not exist.
+    #[error("node not found: {0}")]
+    NodeNotFound(String),
+
+    /// The node exists but has no structural embedding.
+    #[error("no structural embedding for {node_id} — run 'hades graph-embed train' first")]
+    NoEmbedding { node_id: String },
+
+    /// The structural embedding is present but malformed.
+    #[error("invalid structural embedding for {node_id}: {reason}")]
+    InvalidEmbedding { node_id: String, reason: String },
+
+    /// A `limit` parameter is out of bounds.
+    #[error("limit must be 1..={max}, got {limit}")]
+    InvalidLimit { limit: u32, max: u32 },
+
+    /// Every per-collection query failed during fan-out.
+    #[error("all {count} collection queries failed; last error: {last_error}")]
+    AllCollectionsFailed { count: usize, last_error: String },
+
+    /// A database query failed.
+    #[error("{context}")]
+    Query {
+        context: String,
+        #[source]
+        source: ArangoError,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +114,30 @@ impl DaemonResponse {
         self.request_id = id;
         self
     }
+}
+
+// ---------------------------------------------------------------------------
+// Command enum
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Param structs (deny_unknown_fields for implemented commands)
+// ---------------------------------------------------------------------------
+
+/// Params for `graph_embed.embed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEmbedEmbedParams {
+    pub node_id: String,
+}
+
+/// Params for `graph_embed.neighbors`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEmbedNeighborsParams {
+    pub node_id: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,16 +287,10 @@ pub enum DaemonCommand {
     },
 
     #[serde(rename = "graph_embed.embed")]
-    GraphEmbedEmbed {
-        node_id: String,
-    },
+    GraphEmbedEmbed(GraphEmbedEmbedParams),
 
     #[serde(rename = "graph_embed.neighbors")]
-    GraphEmbedNeighbors {
-        node_id: String,
-        #[serde(default)]
-        limit: Option<u32>,
-    },
+    GraphEmbedNeighbors(GraphEmbedNeighborsParams),
 
     // ── Tasks ───────────────────────────────────────────────────────
     #[serde(rename = "task.list")]
@@ -319,13 +376,21 @@ pub async fn dispatch(
     cmd: DaemonCommand,
 ) -> Result<Value, DispatchError> {
     match cmd {
-        DaemonCommand::GraphEmbedEmbed { node_id } => {
-            handlers::graph_embed_embed(pool, &node_id)
+        DaemonCommand::GraphEmbedEmbed(params) => {
+            handlers::graph_embed_embed(pool, &params.node_id)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::GraphEmbedNeighbors { node_id, limit } => {
-            handlers::graph_embed_neighbors(pool, &node_id, limit.unwrap_or(10))
+        DaemonCommand::GraphEmbedNeighbors(params) => {
+            let limit = params.limit.unwrap_or(10);
+            if limit == 0 {
+                return Err(DispatchError::Handler(HandlerError::InvalidLimit {
+                    limit,
+                    max: MAX_LIMIT,
+                }));
+            }
+            let limit = limit.min(MAX_LIMIT);
+            handlers::graph_embed_neighbors(pool, &params.node_id, limit)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -346,9 +411,9 @@ pub async fn dispatch(
 // ---------------------------------------------------------------------------
 
 mod handlers {
-    use anyhow::{Context, Result};
     use serde_json::json;
 
+    use super::HandlerError;
     use crate::db::crud::{list_collections, CollectionInfo};
     use crate::db::query::{self, ExecutionTarget};
     use crate::db::ArangoPool;
@@ -357,7 +422,7 @@ mod handlers {
     pub async fn graph_embed_embed(
         pool: &ArangoPool,
         node_id: &str,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, HandlerError> {
         let (col, key) = parse_node_id(node_id)?;
 
         let aql = "FOR d IN @@col FILTER d._key == @key \
@@ -371,27 +436,32 @@ mod handlers {
             ExecutionTarget::Reader,
         )
         .await
-        .context("failed to query node")?
-        .ok_or_else(|| anyhow::anyhow!("node not found: {node_id}"))?;
+        .map_err(|e| HandlerError::Query {
+            context: "failed to query node".into(),
+            source: e,
+        })?
+        .ok_or_else(|| HandlerError::NodeNotFound(node_id.to_string()))?;
 
         let embedding = node
             .get("structural_embedding")
             .filter(|v| !v.is_null())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no structural embedding for {node_id} — run 'hades graph-embed train' first"
-                )
+            .ok_or_else(|| HandlerError::NoEmbedding {
+                node_id: node_id.to_string(),
             })?;
 
         let embed_dim = embedding
             .as_array()
             .map(|a| a.len())
-            .ok_or_else(|| {
-                anyhow::anyhow!("structural embedding is not an array for {node_id}")
+            .ok_or_else(|| HandlerError::InvalidEmbedding {
+                node_id: node_id.to_string(),
+                reason: "not an array".into(),
             })?;
 
         if embed_dim == 0 {
-            anyhow::bail!("structural embedding is empty (0 dimensions) for {node_id}");
+            return Err(HandlerError::InvalidEmbedding {
+                node_id: node_id.to_string(),
+                reason: "empty (0 dimensions)".into(),
+            });
         }
 
         let label = node
@@ -413,7 +483,7 @@ mod handlers {
         pool: &ArangoPool,
         node_id: &str,
         limit: u32,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, HandlerError> {
         let (col, key) = parse_node_id(node_id)?;
 
         // Fetch target embedding.
@@ -426,38 +496,46 @@ mod handlers {
             ExecutionTarget::Reader,
         )
         .await
-        .context("failed to query node embedding")?
-        .ok_or_else(|| anyhow::anyhow!("node not found: {node_id}"))?;
+        .map_err(|e| HandlerError::Query {
+            context: "failed to query node embedding".into(),
+            source: e,
+        })?
+        .ok_or_else(|| HandlerError::NodeNotFound(node_id.to_string()))?;
 
         if emb_value.is_null() {
-            anyhow::bail!(
-                "no structural embedding for {node_id} — run 'hades graph-embed train' first"
-            );
+            return Err(HandlerError::NoEmbedding {
+                node_id: node_id.to_string(),
+            });
         }
 
         let embed_dim = emb_value
             .as_array()
             .map(|a| a.len())
-            .ok_or_else(|| {
-                anyhow::anyhow!("structural embedding is not an array for {node_id}")
+            .ok_or_else(|| HandlerError::InvalidEmbedding {
+                node_id: node_id.to_string(),
+                reason: "not an array".into(),
             })?;
 
         if embed_dim == 0 {
-            anyhow::bail!("structural embedding is empty (0 dimensions) for {node_id}");
+            return Err(HandlerError::InvalidEmbedding {
+                node_id: node_id.to_string(),
+                reason: "empty (0 dimensions)".into(),
+            });
         }
 
         // Discover document collections.
         let collections: Vec<CollectionInfo> = list_collections(pool, true)
             .await
-            .context("failed to list collections")?
+            .map_err(|e| HandlerError::Query {
+                context: "failed to list collections".into(),
+                source: e,
+            })?
             .into_iter()
             .filter(|c| c.collection_type == 2)
             .collect();
 
-        // Search each collection.
+        // Search each collection — fail fast on first error.
         let mut all_neighbors: Vec<serde_json::Value> = Vec::new();
-        let mut collections_succeeded: usize = 0;
-        let mut last_error: Option<String> = None;
 
         let search_aql =
             "LET te = @target_emb \
@@ -486,7 +564,7 @@ mod handlers {
                 "k": limit,
             });
 
-            match query::query(
+            let result = query::query(
                 pool,
                 search_aql,
                 Some(&bind_vars),
@@ -495,28 +573,15 @@ mod handlers {
                 ExecutionTarget::Reader,
             )
             .await
-            {
-                Ok(result) => {
-                    collections_succeeded += 1;
-                    all_neighbors.extend(result.results);
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        collection = col_info.name,
-                        error = %e,
-                        "skipping collection"
-                    );
-                    last_error = Some(e.to_string());
-                }
-            }
-        }
+            .map_err(|e| HandlerError::Query {
+                context: format!(
+                    "neighbor search failed on collection '{}'",
+                    col_info.name,
+                ),
+                source: e,
+            })?;
 
-        if collections_succeeded == 0 && !collections.is_empty() {
-            anyhow::bail!(
-                "all {count} collection queries failed; last error: {err}",
-                count = collections.len(),
-                err = last_error.as_deref().unwrap_or("unknown"),
-            );
+            all_neighbors.extend(result.results);
         }
 
         // Sort globally and take top-k.
@@ -535,18 +600,25 @@ mod handlers {
     }
 
     /// Parse and validate a `collection/key` node ID.
-    fn parse_node_id(node_id: &str) -> Result<(&str, &str)> {
+    fn parse_node_id(node_id: &str) -> Result<(&str, &str), HandlerError> {
         let (col, key) = node_id
             .split_once('/')
-            .ok_or_else(|| {
-                anyhow::anyhow!("node ID must be in 'collection/key' format, got: {node_id}")
+            .ok_or_else(|| HandlerError::InvalidNodeId {
+                node_id: node_id.to_string(),
+                reason: "must be in 'collection/key' format".into(),
             })?;
 
         if col.is_empty() {
-            anyhow::bail!("node ID has empty collection name: {node_id}");
+            return Err(HandlerError::InvalidNodeId {
+                node_id: node_id.to_string(),
+                reason: "empty collection name".into(),
+            });
         }
         if key.is_empty() {
-            anyhow::bail!("node ID has empty key: {node_id}");
+            return Err(HandlerError::InvalidNodeId {
+                node_id: node_id.to_string(),
+                reason: "empty key".into(),
+            });
         }
 
         Ok((col, key))
@@ -589,7 +661,10 @@ mod tests {
             "params": { "node_id": "hope_axioms/ax_001" }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
-        assert!(matches!(cmd, DaemonCommand::GraphEmbedEmbed { ref node_id } if node_id == "hope_axioms/ax_001"));
+        assert!(matches!(
+            cmd,
+            DaemonCommand::GraphEmbedEmbed(ref p) if p.node_id == "hope_axioms/ax_001"
+        ));
     }
 
     #[test]
@@ -599,7 +674,28 @@ mod tests {
             "params": { "node_id": "test/1" }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
-        assert!(matches!(cmd, DaemonCommand::GraphEmbedNeighbors { limit: None, .. }));
+        assert!(matches!(
+            cmd,
+            DaemonCommand::GraphEmbedNeighbors(ref p) if p.limit.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_embed() {
+        let json = serde_json::json!({
+            "command": "graph_embed.embed",
+            "params": { "node_id": "test/1", "extra_field": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_neighbors() {
+        let json = serde_json::json!({
+            "command": "graph_embed.neighbors",
+            "params": { "node_id": "test/1", "limit": 5, "bogus": "value" }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
     }
 
     #[test]

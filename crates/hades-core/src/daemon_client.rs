@@ -145,20 +145,30 @@ impl DaemonClient {
 
     /// Write a request frame and read the response frame.
     async fn send_recv(&mut self, payload: &[u8]) -> Result<DaemonResponse, DaemonClientError> {
-        // Write length-prefixed request.
+        // Write length-prefixed request with timeout.
         let len = payload.len() as u32;
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(payload).await?;
-        self.stream.flush().await?;
+        timeout(self.timeout, self.stream.write_all(&len.to_be_bytes()))
+            .await
+            .map_err(|_| DaemonClientError::Timeout)??;
+        timeout(self.timeout, self.stream.write_all(payload))
+            .await
+            .map_err(|_| DaemonClientError::Timeout)??;
+        timeout(self.timeout, self.stream.flush())
+            .await
+            .map_err(|_| DaemonClientError::Timeout)??;
 
         // Read length-prefixed response with timeout.
         let mut len_buf = [0u8; 4];
         timeout(self.timeout, self.stream.read_exact(&mut len_buf))
             .await
             .map_err(|_| DaemonClientError::Timeout)??;
-        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        let resp_len = u32::from_be_bytes(len_buf);
 
-        let mut resp_buf = vec![0u8; resp_len];
+        if resp_len > MAX_PAYLOAD {
+            return Err(DaemonClientError::PayloadTooLarge(resp_len as usize));
+        }
+
+        let mut resp_buf = vec![0u8; resp_len as usize];
         timeout(self.timeout, self.stream.read_exact(&mut resp_buf))
             .await
             .map_err(|_| DaemonClientError::Timeout)??;

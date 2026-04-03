@@ -5,6 +5,7 @@
 //! the shared handler layer in [`hades_core::dispatch`], and writes
 //! length-prefixed JSON responses.
 
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,8 +42,19 @@ pub async fn run(config: &HadesConfig, socket_path: Option<&str>) -> Result<()> 
     );
     let config = Arc::new(config.clone());
 
-    // Clean up stale socket file from a previous unclean shutdown.
+    // Clean up stale socket — but only after verifying it's actually a socket
+    // and that no live daemon is listening on it.
     if Path::new(socket).exists() {
+        let meta = std::fs::metadata(socket)
+            .with_context(|| format!("failed to stat {socket}"))?;
+        if !meta.file_type().is_socket() {
+            anyhow::bail!("{socket} exists but is not a Unix socket — refusing to overwrite");
+        }
+        // Probe for a live daemon.
+        if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+            anyhow::bail!("{socket} is in use — another daemon is already running");
+        }
+        // Stale socket from a previous unclean shutdown.
         std::fs::remove_file(socket).context("failed to remove stale socket")?;
     }
 
@@ -115,19 +127,46 @@ async fn handle_connection(
             return Ok(()); // close connection after oversized payload
         }
 
-        // Read the JSON payload.
+        // Read the JSON payload with timeout (client may stall after header).
         let mut payload = vec![0u8; len as usize];
-        stream
-            .read_exact(&mut payload)
-            .await
-            .context("failed to read payload")?;
+        match timeout(IDLE_TIMEOUT, stream.read_exact(&mut payload)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e).context("failed to read payload"),
+            Err(_) => return Ok(()), // client stalled mid-payload → close
+        }
 
-        // Dispatch with per-request timeout.
-        let response =
-            match timeout(REQUEST_TIMEOUT, process_request(&payload, pool, config)).await {
-                Ok(resp) => resp,
-                Err(_) => DaemonResponse::err("INTERNAL", "request timed out"),
-            };
+        // Parse request_id and command before applying dispatch timeout,
+        // so request_id is available for all error responses.
+        let (request_id, cmd) = match parse_request(&payload) {
+            Ok(parsed) => parsed,
+            Err(resp) => {
+                write_frame(&mut stream, &resp).await?;
+                continue; // keep connection open for next request
+            }
+        };
+
+        // Preserve command payload for NotImplemented subprocess fallback.
+        let cmd_value = serde_json::to_value(&cmd).ok();
+
+        // Dispatch with per-request timeout — request_id always available.
+        let response = match timeout(REQUEST_TIMEOUT, dispatch::dispatch(pool, config, cmd)).await
+        {
+            Ok(Ok(data)) => DaemonResponse::ok(data).with_request_id(request_id),
+            Ok(Err(DispatchError::NotImplemented(name))) => {
+                let mut resp = DaemonResponse::err(
+                    "NOT_IMPLEMENTED",
+                    format!("command '{name}' not yet implemented natively"),
+                );
+                resp.data = cmd_value;
+                resp.with_request_id(request_id)
+            }
+            Ok(Err(DispatchError::Handler(e))) => {
+                DaemonResponse::err(handler_error_code(&e), e.to_string())
+                    .with_request_id(request_id)
+            }
+            Err(_) => DaemonResponse::err("INTERNAL", "request timed out")
+                .with_request_id(request_id),
+        };
 
         write_frame(&mut stream, &response).await?;
     }
@@ -148,49 +187,27 @@ async fn write_frame(stream: &mut UnixStream, response: &DaemonResponse) -> Resu
 }
 
 // ---------------------------------------------------------------------------
-// Request processing
+// Request parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a raw JSON payload, dispatch the command, and return a response.
-async fn process_request(
-    payload: &[u8],
-    pool: &ArangoPool,
-    config: &HadesConfig,
-) -> DaemonResponse {
-    // Parse JSON.
-    let frame: Value = match serde_json::from_slice(payload) {
-        Ok(v) => v,
-        Err(e) => return DaemonResponse::err("MALFORMED_JSON", e.to_string()),
-    };
+/// Parse a raw JSON payload into a request_id and [`DaemonCommand`].
+///
+/// Returns `Err(DaemonResponse)` on parse failure — the caller sends it
+/// directly to the client.
+fn parse_request(payload: &[u8]) -> Result<(Option<String>, DaemonCommand), DaemonResponse> {
+    let frame: Value = serde_json::from_slice(payload)
+        .map_err(|e| DaemonResponse::err("MALFORMED_JSON", e.to_string()))?;
 
-    // Extract optional request_id (echoed in response).
     let request_id = frame
         .get("request_id")
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Deserialize the command+params portion.
-    let cmd: DaemonCommand = match serde_json::from_value(frame) {
-        Ok(c) => c,
-        Err(e) => {
-            return DaemonResponse::err("UNKNOWN_COMMAND", e.to_string())
-                .with_request_id(request_id);
-        }
-    };
+    let cmd: DaemonCommand = serde_json::from_value(frame).map_err(|e| {
+        DaemonResponse::err("UNKNOWN_COMMAND", e.to_string()).with_request_id(request_id.clone())
+    })?;
 
-    // Dispatch to the shared handler layer.
-    match dispatch::dispatch(pool, config, cmd).await {
-        Ok(data) => DaemonResponse::ok(data).with_request_id(request_id),
-        Err(DispatchError::NotImplemented(name)) => DaemonResponse::err(
-            "UNKNOWN_COMMAND",
-            format!("command '{name}' not yet implemented natively"),
-        )
-        .with_request_id(request_id),
-        Err(DispatchError::Handler(e)) => {
-            DaemonResponse::err(handler_error_code(&e), e.to_string())
-                .with_request_id(request_id)
-        }
-    }
+    Ok((request_id, cmd))
 }
 
 /// Map a [`HandlerError`] to a protocol error code string.
@@ -271,39 +288,47 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_process_request_malformed_json() {
-        // process_request needs pool+config, but malformed JSON is rejected
-        // before any DB access, so we can test with a dummy.  However,
-        // ArangoPool::from_config needs a real socket.  We test the JSON
-        // parsing path by calling the function directly where possible.
-        let resp = process_request_no_db(b"not json at all").await;
+    #[test]
+    fn test_parse_request_malformed_json() {
+        let resp = parse_request(b"not json at all").unwrap_err();
         assert!(!resp.success);
         assert_eq!(resp.error_code.as_deref(), Some("MALFORMED_JSON"));
     }
 
-    #[tokio::test]
-    async fn test_process_request_unknown_command() {
+    #[test]
+    fn test_parse_request_unknown_command() {
         let payload = serde_json::to_vec(&serde_json::json!({
             "command": "nonexistent.cmd",
             "params": {}
         }))
         .unwrap();
-        let resp = process_request_no_db(&payload).await;
+        let resp = parse_request(&payload).unwrap_err();
         assert!(!resp.success);
         assert_eq!(resp.error_code.as_deref(), Some("UNKNOWN_COMMAND"));
     }
 
-    #[tokio::test]
-    async fn test_process_request_echoes_request_id() {
+    #[test]
+    fn test_parse_request_echoes_request_id() {
         let payload = serde_json::to_vec(&serde_json::json!({
             "request_id": "req-42",
             "command": "nonexistent.cmd",
             "params": {}
         }))
         .unwrap();
-        let resp = process_request_no_db(&payload).await;
+        let resp = parse_request(&payload).unwrap_err();
         assert_eq!(resp.request_id.as_deref(), Some("req-42"));
+    }
+
+    #[test]
+    fn test_parse_request_valid_command() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "request_id": "req-1",
+            "command": "orient",
+            "params": {}
+        }))
+        .unwrap();
+        let (request_id, _cmd) = parse_request(&payload).unwrap();
+        assert_eq!(request_id.as_deref(), Some("req-1"));
     }
 
     #[tokio::test]
@@ -331,29 +356,4 @@ mod tests {
         assert_eq!(got.data.unwrap()["test"], true);
     }
 
-    /// Lightweight process_request that skips DB access for JSON-level tests.
-    /// Malformed JSON and unknown commands are rejected before dispatch.
-    async fn process_request_no_db(payload: &[u8]) -> DaemonResponse {
-        let frame: Value = match serde_json::from_slice(payload) {
-            Ok(v) => v,
-            Err(e) => return DaemonResponse::err("MALFORMED_JSON", e.to_string()),
-        };
-
-        let request_id = frame
-            .get("request_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let _cmd: DaemonCommand = match serde_json::from_value(frame) {
-            Ok(c) => c,
-            Err(e) => {
-                return DaemonResponse::err("UNKNOWN_COMMAND", e.to_string())
-                    .with_request_id(request_id);
-            }
-        };
-
-        // If we reach here the command deserialized but we have no DB pool.
-        DaemonResponse::err("INTERNAL", "no pool in test")
-            .with_request_id(request_id)
-    }
 }

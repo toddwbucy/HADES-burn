@@ -213,8 +213,10 @@ fn parse_request(payload: &[u8]) -> Result<(Option<String>, DaemonCommand), Daem
 /// Map a [`HandlerError`] to a protocol error code string.
 fn handler_error_code(e: &HandlerError) -> &'static str {
     match e {
-        HandlerError::InvalidNodeId { .. } | HandlerError::InvalidLimit { .. } => "INVALID_PARAMS",
-        HandlerError::NodeNotFound(_) => "NOT_FOUND",
+        HandlerError::InvalidNodeId { .. }
+        | HandlerError::InvalidLimit { .. }
+        | HandlerError::InvalidParameter { .. } => "INVALID_PARAMS",
+        HandlerError::NodeNotFound(_) | HandlerError::DocumentNotFound { .. } => "NOT_FOUND",
         HandlerError::NoEmbedding { .. } | HandlerError::InvalidEmbedding { .. } => "QUERY_FAILED",
         HandlerError::Query { .. } => "QUERY_FAILED",
     }

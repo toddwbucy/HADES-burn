@@ -9,6 +9,7 @@ pub mod codebase;
 pub mod codebase_ingest;
 pub mod daemon;
 pub mod db;
+pub mod db_read;
 pub mod embed;
 pub mod graph_embed;
 pub mod graph_embed_query;

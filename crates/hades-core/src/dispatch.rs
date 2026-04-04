@@ -42,6 +42,10 @@ pub enum HandlerError {
     #[error("node not found: {0}")]
     NodeNotFound(String),
 
+    /// The requested document does not exist.
+    #[error("document not found: {collection}/{key}")]
+    DocumentNotFound { collection: String, key: String },
+
     /// The node exists but has no structural embedding.
     #[error("no structural embedding for {node_id} — run 'hades graph-embed train' first")]
     NoEmbedding { node_id: String },
@@ -53,6 +57,10 @@ pub enum HandlerError {
     /// A `limit` parameter is out of bounds.
     #[error("limit must be 1..={max}, got {limit}")]
     InvalidLimit { limit: u32, max: u32 },
+
+    /// An invalid parameter was provided.
+    #[error("invalid parameter '{name}': {reason}")]
+    InvalidParameter { name: String, reason: String },
 
     /// A database query failed.
     #[error("{context}")]
@@ -117,8 +125,91 @@ impl DaemonResponse {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Param structs (deny_unknown_fields for implemented commands)
+// Param structs (deny_unknown_fields for strict wire protocol validation)
 // ---------------------------------------------------------------------------
+
+/// Params for `db.aql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbAqlParams {
+    pub aql: String,
+    #[serde(default)]
+    pub bind: Option<Value>,
+    pub limit: Option<u32>,
+}
+
+/// Params for `db.get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGetParams {
+    pub collection: String,
+    pub key: String,
+}
+
+/// Params for `db.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbListParams {
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub paper: Option<String>,
+}
+
+/// Params for `db.insert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbInsertParams {
+    pub collection: String,
+    pub data: Value,
+}
+
+/// Params for `db.update`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbUpdateParams {
+    pub collection: String,
+    pub key: String,
+    pub data: Value,
+}
+
+/// Params for `db.delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbDeleteParams {
+    pub collection: String,
+    pub key: String,
+}
+
+/// Params for `db.count`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCountParams {
+    pub collection: String,
+}
+
+/// Params for `db.health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbHealthParams {
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+/// Params for `db.check`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCheckParams {
+    pub document_id: String,
+}
+
+/// Params for `db.recent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbRecentParams {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
 
 /// Params for `graph_embed.embed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,50 +267,25 @@ pub enum DaemonCommand {
     },
 
     #[serde(rename = "db.aql")]
-    DbAql {
-        aql: String,
-        #[serde(default)]
-        bind: Option<Value>,
-        limit: Option<u32>,
-    },
+    DbAql(DbAqlParams),
 
     #[serde(rename = "db.get")]
-    DbGet {
-        collection: String,
-        key: String,
-    },
+    DbGet(DbGetParams),
 
     #[serde(rename = "db.list")]
-    DbList {
-        collection: Option<String>,
-        #[serde(default)]
-        limit: Option<u32>,
-        paper: Option<String>,
-    },
+    DbList(DbListParams),
 
     #[serde(rename = "db.insert")]
-    DbInsert {
-        collection: String,
-        data: Value,
-    },
+    DbInsert(DbInsertParams),
 
     #[serde(rename = "db.update")]
-    DbUpdate {
-        collection: String,
-        key: String,
-        data: Value,
-    },
+    DbUpdate(DbUpdateParams),
 
     #[serde(rename = "db.delete")]
-    DbDelete {
-        collection: String,
-        key: String,
-    },
+    DbDelete(DbDeleteParams),
 
     #[serde(rename = "db.count")]
-    DbCount {
-        collection: String,
-    },
+    DbCount(DbCountParams),
 
     #[serde(rename = "db.collections")]
     DbCollections {},
@@ -228,21 +294,13 @@ pub enum DaemonCommand {
     DbStats {},
 
     #[serde(rename = "db.health")]
-    DbHealth {
-        #[serde(default)]
-        verbose: bool,
-    },
+    DbHealth(DbHealthParams),
 
     #[serde(rename = "db.check")]
-    DbCheck {
-        document_id: String,
-    },
+    DbCheck(DbCheckParams),
 
     #[serde(rename = "db.recent")]
-    DbRecent {
-        #[serde(default)]
-        limit: Option<u32>,
-    },
+    DbRecent(DbRecentParams),
 
     // ── Graph traversal ─────────────────────────────────────────────
     #[serde(rename = "db.graph.traverse")]
@@ -391,6 +449,56 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
 
+        // ── Database read commands ─────────────────────────────────────
+        DaemonCommand::DbGet(params) => {
+            handlers::db_get(pool, &params.collection, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCount(params) => {
+            handlers::db_count(pool, &params.collection)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCollections {} => {
+            handlers::db_collections(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCheck(params) => {
+            handlers::db_check(pool, &params.document_id)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbRecent(params) => {
+            let limit = params.limit.unwrap_or(10).min(MAX_LIMIT);
+            handlers::db_recent(pool, limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbList(params) => {
+            let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
+            handlers::db_list(pool, params.collection.as_deref(), limit, params.paper.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbAql(params) => {
+            let limit = params.limit.map(|l| l.min(MAX_LIMIT));
+            handlers::db_aql(pool, &params.aql, params.bind.as_ref(), limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbHealth(params) => {
+            handlers::db_health(pool, params.verbose)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbStats {} => {
+            handlers::db_stats(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
         // All other commands are not yet implemented natively.
         // The daemon (P6.3) will fall back to Python subprocess.
         other => Err(DispatchError::NotImplemented(
@@ -407,12 +515,449 @@ pub async fn dispatch(
 // ---------------------------------------------------------------------------
 
 mod handlers {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::HandlerError;
-    use crate::db::crud::{list_collections, CollectionInfo};
+    use crate::db::collections::CollectionProfile;
+    use crate::db::crud::{self, list_collections, count_collection, CollectionInfo};
+    use crate::db::index;
     use crate::db::query::{self, ExecutionTarget};
     use crate::db::ArangoPool;
+
+    // ── Database read handlers ──────────────────────────────────────
+
+    /// Fetch a single document by collection and key.
+    pub async fn db_get(
+        pool: &ArangoPool,
+        collection: &str,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        crud::get_document(pool, collection, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: collection.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get {collection}/{key}"),
+                        source: e,
+                    }
+                }
+            })
+    }
+
+    /// Count documents in a collection.
+    pub async fn db_count(
+        pool: &ArangoPool,
+        collection: &str,
+    ) -> Result<Value, HandlerError> {
+        let count = count_collection(pool, collection)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to count collection '{collection}'"),
+                source: e,
+            })?;
+        Ok(json!({ "collection": collection, "count": count }))
+    }
+
+    /// List all non-system collections with document counts.
+    pub async fn db_collections(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let collections = list_collections(pool, true)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to list collections".into(),
+                source: e,
+            })?;
+
+        let mut entries = Vec::with_capacity(collections.len());
+        for col in &collections {
+            let count = match count_collection(pool, &col.name).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count collection '{}'", col.name),
+                        source: e,
+                    });
+                }
+            };
+            let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+            entries.push(json!({
+                "name": col.name,
+                "type": type_name,
+                "count": count,
+            }));
+        }
+
+        Ok(json!({
+            "database": pool.database(),
+            "collections": entries,
+            "total": entries.len(),
+        }))
+    }
+
+    /// Check if a document exists by its full _id (collection/key).
+    pub async fn db_check(
+        pool: &ArangoPool,
+        document_id: &str,
+    ) -> Result<Value, HandlerError> {
+        let (col, key) = parse_node_id(document_id)?;
+        let exists = match crud::get_document(pool, col, key).await {
+            Ok(_) => true,
+            Err(e) if e.is_not_found() => false,
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to check {document_id}"),
+                    source: e,
+                })
+            }
+        };
+        Ok(json!({ "document_id": document_id, "exists": exists }))
+    }
+
+    /// Return recently created/updated documents across collection profiles.
+    pub async fn db_recent(
+        pool: &ArangoPool,
+        limit: u32,
+    ) -> Result<Value, HandlerError> {
+        let profile = CollectionProfile::default_profile();
+        let aql = "FOR d IN @@col \
+                    SORT d.created_at DESC, d._rev DESC \
+                    LIMIT @limit \
+                    RETURN MERGE(d, { _collection: @col_name })";
+
+        let bind = json!({
+            "@col": profile.metadata,
+            "col_name": profile.metadata,
+            "limit": limit,
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(e) if e.is_not_found() => {
+                return Ok(json!({
+                    "collection": profile.metadata,
+                    "documents": [],
+                    "count": 0,
+                    "note": format!("collection '{}' does not exist in this database", profile.metadata),
+                }));
+            }
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to query recent from '{}'", profile.metadata),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(json!({
+            "collection": profile.metadata,
+            "documents": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// List documents from a collection profile with optional paper filter.
+    pub async fn db_list(
+        pool: &ArangoPool,
+        collection: Option<&str>,
+        limit: u32,
+        paper: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let profile = match collection {
+            Some(name) => CollectionProfile::get(name).ok_or_else(|| {
+                HandlerError::InvalidParameter {
+                    name: "collection".into(),
+                    reason: format!(
+                        "unknown profile '{name}' — valid profiles: {}",
+                        CollectionProfile::all()
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            })?,
+            None => CollectionProfile::default_profile(),
+        };
+
+        let (aql, bind) = if let Some(paper_id) = paper {
+            (
+                "FOR d IN @@col \
+                 FILTER d.paper_id == @paper_id || d.document_id == @paper_id || d.arxiv_id == @paper_id \
+                 LIMIT @limit \
+                 RETURN d",
+                json!({
+                    "@col": profile.metadata,
+                    "paper_id": paper_id,
+                    "limit": limit,
+                }),
+            )
+        } else {
+            (
+                "FOR d IN @@col \
+                 LIMIT @limit \
+                 RETURN d",
+                json!({
+                    "@col": profile.metadata,
+                    "limit": limit,
+                }),
+            )
+        };
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            true,
+            ExecutionTarget::Reader,
+        )
+        .await;
+
+        // Return empty list if the collection doesn't exist in this database.
+        let result = match result {
+            Ok(r) => r,
+            Err(e) if e.is_not_found() => {
+                return Ok(json!({
+                    "collection": profile.metadata,
+                    "documents": [],
+                    "count": 0,
+                    "full_count": 0,
+                    "note": format!("collection '{}' does not exist in this database", profile.metadata),
+                }));
+            }
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to list from '{}'", profile.metadata),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(json!({
+            "collection": profile.metadata,
+            "documents": result.results,
+            "count": result.results.len(),
+            "full_count": result.full_count,
+        }))
+    }
+
+    /// Execute a raw AQL query (read-only enforced).
+    pub async fn db_aql(
+        pool: &ArangoPool,
+        aql: &str,
+        bind: Option<&Value>,
+        limit: Option<u32>,
+    ) -> Result<Value, HandlerError> {
+        // Reject non-object bind values — AQL bind vars must be a map.
+        if let Some(v) = bind.filter(|v| !v.is_object()) {
+            return Err(HandlerError::InvalidParameter {
+                name: "bind".into(),
+                reason: format!(
+                    "bind must be an object/map of bind variables, got {}",
+                    match v {
+                        Value::Array(_) => "array",
+                        Value::String(_) => "string",
+                        Value::Number(_) => "number",
+                        Value::Bool(_) => "bool",
+                        Value::Null => "null",
+                        _ => "non-object",
+                    }
+                ),
+            });
+        }
+
+        // Reject mutating AQL — this handler is read-only.
+        // Strip string literals and comments first so keywords inside
+        // strings like "INSERT TITLE" don't trigger false positives.
+        let stripped = strip_aql_strings_and_comments(aql);
+        let upper = stripped.to_uppercase();
+        for keyword in &["INSERT", "UPDATE", "REPLACE", "REMOVE", "UPSERT"] {
+            if upper.split_whitespace().any(|w| w == *keyword) {
+                return Err(HandlerError::InvalidParameter {
+                    name: "aql".into(),
+                    reason: format!(
+                        "mutating AQL ({keyword}) not allowed via db.aql — use the write-specific commands"
+                    ),
+                });
+            }
+        }
+
+        let full_aql = if let Some(lim) = limit {
+            // Wrap in a subquery so LIMIT applies correctly regardless
+            // of whether the user's AQL already contains RETURN.
+            format!("FOR __r IN ({aql}) LIMIT {lim} RETURN __r")
+        } else {
+            aql.to_string()
+        };
+
+        let result = query::query(
+            pool,
+            &full_aql,
+            bind,
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: "AQL execution failed".into(),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "results": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// Health check — ArangoDB connectivity + optional integrity checks.
+    pub async fn db_health(
+        pool: &ArangoPool,
+        verbose: bool,
+    ) -> Result<Value, HandlerError> {
+        let status = pool.health_check().await;
+
+        let mut result = json!({
+            "database": pool.database(),
+            "arangodb": {
+                "version": status.version,
+                "reader_ok": status.reader_ok,
+                "writer_ok": status.writer_ok,
+                "shared_connection": status.shared,
+                "status": if status.reader_ok && status.writer_ok { "healthy" } else { "degraded" },
+            },
+        });
+
+        if verbose {
+            // Add per-collection info for verbose mode.
+            let collections = list_collections(pool, true)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "failed to list collections for health check".into(),
+                    source: e,
+                })?;
+            let mut col_details = Vec::new();
+            for col in &collections {
+                let count = match count_collection(pool, &col.name).await {
+                    Ok(n) => n,
+                    Err(e) if e.is_not_found() => 0,
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to count '{}' during health check", col.name),
+                            source: e,
+                        });
+                    }
+                };
+                let indexes = match index::list_indexes(pool, &col.name).await {
+                    Ok(idx) => idx,
+                    Err(e) if e.is_not_found() => Vec::new(),
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to list indexes for '{}'", col.name),
+                            source: e,
+                        });
+                    }
+                };
+                let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+                col_details.push(json!({
+                    "name": col.name,
+                    "type": type_name,
+                    "count": count,
+                    "indexes": indexes.len(),
+                }));
+            }
+            result["collections"] = json!(col_details);
+            result["collection_count"] = json!(collections.len());
+        }
+
+        Ok(result)
+    }
+
+    /// Aggregate statistics across all collection profiles.
+    pub async fn db_stats(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let mut profiles_data = Vec::new();
+        let mut total_docs: u64 = 0;
+        let mut total_chunks: u64 = 0;
+        let mut total_embeddings: u64 = 0;
+
+        for (name, profile) in CollectionProfile::all() {
+            let meta_count = match count_collection(pool, profile.metadata).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.metadata),
+                        source: e,
+                    });
+                }
+            };
+            let chunk_count = match count_collection(pool, profile.chunks).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.chunks),
+                        source: e,
+                    });
+                }
+            };
+            let emb_count = match count_collection(pool, profile.embeddings).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.embeddings),
+                        source: e,
+                    });
+                }
+            };
+
+            total_docs += meta_count;
+            total_chunks += chunk_count;
+            total_embeddings += emb_count;
+
+            profiles_data.push(json!({
+                "name": name,
+                "metadata_collection": profile.metadata,
+                "chunks_collection": profile.chunks,
+                "embeddings_collection": profile.embeddings,
+                "documents": meta_count,
+                "chunks": chunk_count,
+                "embeddings": emb_count,
+            }));
+        }
+
+        Ok(json!({
+            "database": pool.database(),
+            "profiles": profiles_data,
+            "totals": {
+                "documents": total_docs,
+                "chunks": total_chunks,
+                "embeddings": total_embeddings,
+            },
+        }))
+    }
+
+    // ── Graph embed handlers ──────────────────────────────────────────
 
     /// Look up the pre-computed structural embedding for a node.
     pub async fn graph_embed_embed(
@@ -602,6 +1147,78 @@ mod handlers {
         }))
     }
 
+    /// Strip string literals and comments from AQL so keyword detection
+    /// doesn't trigger on values like `"INSERT TITLE HERE"`.
+    ///
+    /// Handles single-quoted, double-quoted, and backtick-quoted strings
+    /// (with backslash escapes), plus `//` line comments and `/* */` block
+    /// comments.  Replaced regions become spaces to preserve token boundaries.
+    fn strip_aql_strings_and_comments(aql: &str) -> String {
+        let mut out = String::with_capacity(aql.len());
+        let bytes = aql.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            let b = bytes[i];
+
+            // Line comment: // ... \n
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+                while i < len && bytes[i] != b'\n' {
+                    out.push(' ');
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Block comment: /* ... */
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                while i < len {
+                    if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                        break;
+                    }
+                    out.push(' ');
+                    i += 1;
+                }
+                continue;
+            }
+
+            // String literal: '...', "...", `...` (with backslash escapes)
+            if b == b'\'' || b == b'"' || b == b'`' {
+                let quote = b;
+                out.push(' '); // replace opening quote
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        // Escaped character — skip both bytes.
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        out.push(' '); // replace closing quote
+                        i += 1;
+                        break;
+                    } else {
+                        out.push(' ');
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+
+            out.push(b as char);
+            i += 1;
+        }
+
+        out
+    }
+
     /// Parse and validate a `collection/key` node ID.
     pub(super) fn parse_node_id(node_id: &str) -> Result<(&str, &str), HandlerError> {
         let (col, key) = node_id
@@ -766,5 +1383,327 @@ mod tests {
     #[test]
     fn test_parse_node_id_empty_key() {
         assert!(handlers::parse_node_id("col/").is_err());
+    }
+
+    // -- DB command serde roundtrips ------------------------------------------
+
+    #[test]
+    fn test_command_roundtrip_db_get() {
+        let json = serde_json::json!({
+            "command": "db.get",
+            "params": { "collection": "arxiv_metadata", "key": "2409_04701" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGet(ref p)
+                if p.collection == "arxiv_metadata" && p.key == "2409_04701"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_aql() {
+        let json = serde_json::json!({
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1", "limit": 5 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbAql(ref p) if p.aql == "RETURN 1" && p.limit == Some(5)
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_collections() {
+        let json = serde_json::json!({
+            "command": "db.collections",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbCollections {}));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_count() {
+        let json = serde_json::json!({
+            "command": "db.count",
+            "params": { "collection": "chunks" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCount(ref p) if p.collection == "chunks"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_check() {
+        let json = serde_json::json!({
+            "command": "db.check",
+            "params": { "document_id": "arxiv_metadata/2409_04701" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCheck(ref p) if p.document_id == "arxiv_metadata/2409_04701"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_recent_defaults() {
+        let json = serde_json::json!({
+            "command": "db.recent",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbRecent(ref p) if p.limit.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_list() {
+        let json = serde_json::json!({
+            "command": "db.list",
+            "params": { "collection": "sync", "limit": 50 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbList(ref p)
+                if p.collection.as_deref() == Some("sync") && p.limit == Some(50)
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_health() {
+        let json = serde_json::json!({
+            "command": "db.health",
+            "params": { "verbose": true }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbHealth(ref p) if p.verbose
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_stats() {
+        let json = serde_json::json!({
+            "command": "db.stats",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbStats {}));
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_db_get() {
+        let json = serde_json::json!({
+            "command": "db.get",
+            "params": { "collection": "test", "key": "k", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_db_aql() {
+        let json = serde_json::json!({
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1", "bogus": 42 }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    // -- AQL read-only enforcement --------------------------------------------
+
+    #[test]
+    fn test_db_aql_rejects_insert() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "INSERT { foo: 1 } INTO test".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    #[test]
+    fn test_db_aql_rejects_remove() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "FOR d IN test REMOVE d IN test".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    #[test]
+    fn test_db_aql_rejects_update() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "FOR d IN test UPDATE d WITH { x: 1 } IN test".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_db_aql_allows_return() {
+        // "RETURN 1" should pass the read-only check (will fail at AQL execution
+        // if ArangoDB is unreachable, but should not fail at validation).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "RETURN 1".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        // This will fail with a connection error (ArangoDB not running in test),
+        // NOT with InvalidParameter — that's the important assertion.
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("RETURN 1 should not be rejected as mutating AQL");
+            }
+            _ => {} // Connection error or success — both acceptable.
+        }
+    }
+
+    // -- AQL string stripping -------------------------------------------------
+
+    #[test]
+    fn test_db_aql_allows_insert_in_string() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        // The word INSERT appears inside a string literal — should NOT be rejected.
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: r#"FOR d IN test FILTER d.title == "INSERT TITLE HERE" RETURN d"#.to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("INSERT inside a string literal should not be rejected");
+            }
+            _ => {} // Connection error or success — both acceptable.
+        }
+    }
+
+    #[test]
+    fn test_db_aql_allows_update_in_comment() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        // The word UPDATE appears inside a comment — should NOT be rejected.
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "FOR d IN test /* UPDATE note */ RETURN d".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("UPDATE inside a comment should not be rejected");
+            }
+            _ => {}
+        }
+    }
+
+    // -- db_list profile validation -------------------------------------------
+
+    #[test]
+    fn test_db_list_invalid_profile() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbList(DbListParams {
+                collection: Some("nonexistent_profile".into()),
+                limit: Some(10),
+                paper: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    // -- db_aql bind validation ------------------------------------------------
+
+    #[test]
+    fn test_db_aql_rejects_non_object_bind() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "RETURN 1".to_string(),
+                bind: Some(serde_json::json!([1, 2, 3])),
+                limit: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { ref name, .. }) if name == "bind"));
     }
 }

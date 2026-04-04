@@ -37,6 +37,9 @@ static SYNC: CollectionProfile = CollectionProfile {
     foreign_key: "paper_key",
 };
 
+/// Generic profile — still uses `paper_key` because the standard ingestion
+/// pipeline (`ingest_document` in the Python backend) writes `paper_key` into
+/// chunks/embeddings for all non-codebase profiles.
 static DEFAULT: CollectionProfile = CollectionProfile {
     metadata: "documents",
     chunks: "chunks",
@@ -232,12 +235,14 @@ mod tests {
         let p = CollectionProfile::find_by_metadata("arxiv_metadata").unwrap();
         assert_eq!(p.chunks, "arxiv_abstract_chunks");
         assert_eq!(p.embeddings, "arxiv_abstract_embeddings");
+        assert_eq!(p.foreign_key, "paper_key");
     }
 
     #[test]
     fn test_find_by_metadata_codebase() {
         let p = CollectionProfile::find_by_metadata("codebase_files").unwrap();
         assert_eq!(p.chunks, "codebase_chunks");
+        assert_eq!(p.foreign_key, "file_key");
     }
 
     #[test]

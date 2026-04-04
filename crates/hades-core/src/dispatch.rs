@@ -333,6 +333,78 @@ pub struct OrientParams {
     pub collection: Option<String>,
 }
 
+/// Params for `task.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskListParams {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(rename = "type")]
+    pub task_type: Option<String>,
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Params for `task.show`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskShowParams {
+    pub key: String,
+}
+
+/// Params for `task.create`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCreateParams {
+    pub title: String,
+    pub description: Option<String>,
+    #[serde(rename = "type", default = "default_task_type")]
+    pub task_type: String,
+    pub parent: Option<String>,
+    #[serde(default = "default_priority")]
+    pub priority: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Params for `task.update`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskUpdateParams {
+    pub key: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub priority: Option<String>,
+    pub status: Option<String>,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+}
+
+/// Params for `task.close`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCloseParams {
+    pub key: String,
+    pub message: Option<String>,
+}
+
+/// Params for `task.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskStartParams {
+    pub key: String,
+}
+
+/// Params for `task.context`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskContextParams {
+    pub key: String,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -445,56 +517,25 @@ pub enum DaemonCommand {
 
     // ── Tasks ───────────────────────────────────────────────────────
     #[serde(rename = "task.list")]
-    TaskList {
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(rename = "type")]
-        task_type: Option<String>,
-        parent: Option<String>,
-        #[serde(default)]
-        limit: Option<u32>,
-    },
+    TaskList(TaskListParams),
 
     #[serde(rename = "task.show")]
-    TaskShow {
-        key: String,
-    },
+    TaskShow(TaskShowParams),
 
     #[serde(rename = "task.create")]
-    TaskCreate {
-        title: String,
-        description: Option<String>,
-        #[serde(rename = "type", default = "default_task_type")]
-        task_type: String,
-        parent: Option<String>,
-        #[serde(default = "default_priority")]
-        priority: String,
-        #[serde(default)]
-        tags: Vec<String>,
-    },
+    TaskCreate(TaskCreateParams),
 
     #[serde(rename = "task.update")]
-    TaskUpdate {
-        key: String,
-        title: Option<String>,
-        description: Option<String>,
-        priority: Option<String>,
-        #[serde(default)]
-        add_tags: Vec<String>,
-        #[serde(default)]
-        remove_tags: Vec<String>,
-    },
+    TaskUpdate(TaskUpdateParams),
 
     #[serde(rename = "task.close")]
-    TaskClose {
-        key: String,
-        message: Option<String>,
-    },
+    TaskClose(TaskCloseParams),
+
+    #[serde(rename = "task.start")]
+    TaskStart(TaskStartParams),
 
     #[serde(rename = "task.context")]
-    TaskContext {
-        key: String,
-    },
+    TaskContext(TaskContextParams),
 
     // ── Smell ───────────────────────────────────────────────────────
     #[serde(rename = "smell.check")]
@@ -724,6 +765,43 @@ pub async fn dispatch(
         }
         DaemonCommand::Orient(params) => {
             handlers::orient(pool, params.collection.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
+        // ── Task commands ───────────────────────────────────────────
+        DaemonCommand::TaskList(params) => {
+            let limit = params.limit.unwrap_or(50).min(MAX_LIMIT);
+            handlers::task_list(pool, params.status.as_deref(), params.task_type.as_deref(), params.parent.as_deref(), limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskShow(params) => {
+            handlers::task_show(pool, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskCreate(params) => {
+            require_writable(config)?;
+            handlers::task_create(pool, &params)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskUpdate(params) => {
+            require_writable(config)?;
+            handlers::task_update(pool, &params)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskClose(params) => {
+            require_writable(config)?;
+            handlers::task_close(pool, &params.key, params.message.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskStart(params) => {
+            require_writable(config)?;
+            handlers::task_start(pool, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -2271,6 +2349,340 @@ mod handlers {
             .map(|r| r.results)
             .unwrap_or_default()
     }
+
+    // ── Task handlers ──────────────────────────────────────────────
+
+    const TASK_COLLECTION: &str = "persephone_tasks";
+    const VALID_STATUSES: &[&str] = &["open", "in_progress", "in_review", "closed", "blocked"];
+    const VALID_PRIORITIES: &[&str] = &["critical", "high", "medium", "low"];
+    const VALID_TYPES: &[&str] = &["task", "bug", "epic"];
+
+    /// Validate a value against an allowed set, returning InvalidParameter on failure.
+    fn validate_enum(name: &str, value: &str, allowed: &[&str]) -> Result<(), HandlerError> {
+        if allowed.contains(&value) {
+            Ok(())
+        } else {
+            Err(HandlerError::InvalidParameter {
+                name: name.to_string(),
+                reason: format!("must be one of {:?}, got '{value}'", allowed),
+            })
+        }
+    }
+
+    /// List tasks with optional filters.
+    pub async fn task_list(
+        pool: &ArangoPool,
+        status: Option<&str>,
+        task_type: Option<&str>,
+        parent: Option<&str>,
+        limit: u32,
+    ) -> Result<Value, HandlerError> {
+        let mut aql = String::from("FOR doc IN @@col");
+        let mut bind = json!({ "@col": TASK_COLLECTION });
+
+        if let Some(s) = status {
+            aql.push_str(" FILTER doc.status == @status");
+            bind["status"] = json!(s);
+        }
+        if let Some(t) = task_type {
+            aql.push_str(" FILTER doc.type == @task_type");
+            bind["task_type"] = json!(t);
+        }
+        if let Some(p) = parent {
+            aql.push_str(" FILTER doc.parent_key == @parent");
+            bind["parent"] = json!(p);
+        }
+        aql.push_str(" SORT doc.created_at DESC LIMIT @limit RETURN doc");
+        bind["limit"] = json!(limit);
+
+        let result = query::query(
+            pool,
+            &aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: "task list query failed".into(),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "tasks": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// Get a single task by key.
+    pub async fn task_show(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: TASK_COLLECTION.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get task '{key}'"),
+                        source: e,
+                    }
+                }
+            })
+    }
+
+    /// Create a new task.
+    pub async fn task_create(
+        pool: &ArangoPool,
+        params: &super::TaskCreateParams,
+    ) -> Result<Value, HandlerError> {
+        use rand::Rng;
+
+        validate_enum("priority", &params.priority, VALID_PRIORITIES)?;
+        validate_enum("type", &params.task_type, VALID_TYPES)?;
+
+        if params.title.trim().is_empty() {
+            return Err(HandlerError::InvalidParameter {
+                name: "title".into(),
+                reason: "must not be empty".into(),
+            });
+        }
+
+        let key = format!("task_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let doc = json!({
+            "_key": key,
+            "title": params.title.trim(),
+            "description": params.description,
+            "status": "open",
+            "priority": params.priority,
+            "type": params.task_type,
+            "labels": params.tags,
+            "parent_key": params.parent,
+            "acceptance": null,
+            "minor": false,
+            "block_reason": null,
+            "created_at": now,
+            "updated_at": now,
+        });
+
+        crud::insert_document(pool, TASK_COLLECTION, &doc)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to create task".into(),
+                source: e,
+            })?;
+
+        Ok(json!({ "task": doc }))
+    }
+
+    /// Update a task's fields.
+    pub async fn task_update(
+        pool: &ArangoPool,
+        params: &super::TaskUpdateParams,
+    ) -> Result<Value, HandlerError> {
+        // Verify task exists and get current state.
+        let existing = crud::get_document(pool, TASK_COLLECTION, &params.key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: TASK_COLLECTION.to_string(),
+                        key: params.key.clone(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get task '{}'", params.key),
+                        source: e,
+                    }
+                }
+            })?;
+
+        let mut patch = serde_json::Map::new();
+
+        if let Some(ref title) = params.title {
+            if title.trim().is_empty() {
+                return Err(HandlerError::InvalidParameter {
+                    name: "title".into(),
+                    reason: "must not be empty".into(),
+                });
+            }
+            patch.insert("title".into(), json!(title.trim()));
+        }
+        if let Some(ref desc) = params.description {
+            patch.insert("description".into(), json!(desc));
+        }
+        if let Some(ref pri) = params.priority {
+            validate_enum("priority", pri, VALID_PRIORITIES)?;
+            patch.insert("priority".into(), json!(pri));
+        }
+        if let Some(ref status) = params.status {
+            validate_enum("status", status, VALID_STATUSES)?;
+            patch.insert("status".into(), json!(status));
+        }
+
+        // Tag handling: merge existing + add, then subtract remove.
+        if !params.add_tags.is_empty() || !params.remove_tags.is_empty() {
+            let existing_tags: Vec<String> = existing
+                .get("labels")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            let mut tags: Vec<String> = existing_tags;
+            for tag in &params.add_tags {
+                if !tags.contains(tag) {
+                    tags.push(tag.clone());
+                }
+            }
+            tags.retain(|t| !params.remove_tags.contains(t));
+            patch.insert("labels".into(), json!(tags));
+        }
+
+        if patch.is_empty() {
+            // Nothing to update — just return existing.
+            return Ok(json!({ "task": existing }));
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        patch.insert("updated_at".into(), json!(now));
+
+        let patch_value = Value::Object(patch);
+        crud::update_document(pool, TASK_COLLECTION, &params.key, &patch_value)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to update task '{}'", params.key),
+                source: e,
+            })?;
+
+        // Re-fetch to return the merged document.
+        let updated = crud::get_document(pool, TASK_COLLECTION, &params.key)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to re-fetch task '{}'", params.key),
+                source: e,
+            })?;
+
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Close a task (set status to closed).
+    pub async fn task_close(
+        pool: &ArangoPool,
+        key: &str,
+        message: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let existing = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: TASK_COLLECTION.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get task '{key}'"),
+                        source: e,
+                    }
+                }
+            })?;
+
+        let current_status = existing.get("status").and_then(Value::as_str).unwrap_or("");
+        if current_status == "closed" {
+            return Err(HandlerError::InvalidParameter {
+                name: "status".into(),
+                reason: format!("task '{key}' is already closed"),
+            });
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut patch = json!({
+            "status": "closed",
+            "updated_at": now,
+        });
+        if let Some(msg) = message {
+            patch["close_message"] = json!(msg);
+        }
+
+        crud::update_document(pool, TASK_COLLECTION, key, &patch)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to close task '{key}'"),
+                source: e,
+            })?;
+
+        let updated = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to re-fetch task '{key}'"),
+                source: e,
+            })?;
+
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Start a task (transition to in_progress).
+    pub async fn task_start(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        let existing = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: TASK_COLLECTION.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to get task '{key}'"),
+                        source: e,
+                    }
+                }
+            })?;
+
+        let current_status = existing.get("status").and_then(Value::as_str).unwrap_or("");
+        if current_status != "open" && current_status != "blocked" {
+            return Err(HandlerError::InvalidParameter {
+                name: "status".into(),
+                reason: format!(
+                    "cannot start task '{key}': current status is '{current_status}', \
+                     expected 'open' or 'blocked'"
+                ),
+            });
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let patch = json!({
+            "status": "in_progress",
+            "updated_at": now,
+            "block_reason": null,
+        });
+
+        crud::update_document(pool, TASK_COLLECTION, key, &patch)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to start task '{key}'"),
+                source: e,
+            })?;
+
+        let updated = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to re-fetch task '{key}'"),
+                source: e,
+            })?;
+
+        Ok(json!({ "task": updated }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3252,5 +3664,153 @@ mod tests {
             result.unwrap_err(),
             DispatchError::Handler(HandlerError::WriteDenied(_))
         ));
+    }
+
+    // ── Task command tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_command_roundtrip_task_list_defaults() {
+        let json = serde_json::json!({
+            "command": "task.list",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskList(ref p) if p.status.is_none() && p.limit.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_list_filtered() {
+        let json = serde_json::json!({
+            "command": "task.list",
+            "params": { "status": "open", "type": "bug", "limit": 20 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskList(ref p)
+                if p.status.as_deref() == Some("open")
+                && p.task_type.as_deref() == Some("bug")
+                && p.limit == Some(20)
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_show() {
+        let json = serde_json::json!({
+            "command": "task.show",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskShow(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_create_defaults() {
+        let json = serde_json::json!({
+            "command": "task.create",
+            "params": { "title": "Test task" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskCreate(ref p)
+                if p.title == "Test task"
+                && p.task_type == "task"
+                && p.priority == "medium"
+                && p.tags.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_update_tags() {
+        let json = serde_json::json!({
+            "command": "task.update",
+            "params": {
+                "key": "task_abc123",
+                "add_tags": ["phase-7"],
+                "remove_tags": ["draft"]
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskUpdate(ref p)
+                if p.key == "task_abc123"
+                && p.add_tags == vec!["phase-7"]
+                && p.remove_tags == vec!["draft"]
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_close() {
+        let json = serde_json::json!({
+            "command": "task.close",
+            "params": { "key": "task_abc123", "message": "Done" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskClose(ref p)
+                if p.key == "task_abc123" && p.message.as_deref() == Some("Done")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_start() {
+        let json = serde_json::json!({
+            "command": "task.start",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskStart(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_context() {
+        let json = serde_json::json!({
+            "command": "task.context",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskContext(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_deny_unknown_task_create() {
+        let json = serde_json::json!({
+            "command": "task.create",
+            "params": { "title": "Test", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_task_start() {
+        let json = serde_json::json!({
+            "command": "task.start",
+            "params": { "key": "task_abc123", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_task_list() {
+        let json = serde_json::json!({
+            "command": "task.list",
+            "params": { "status": "open", "extra_field": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
     }
 }

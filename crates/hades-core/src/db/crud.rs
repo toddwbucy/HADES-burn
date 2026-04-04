@@ -30,6 +30,21 @@ pub async fn get_document(
     pool.reader().get(&path).await
 }
 
+/// Insert a single document (or array of documents) into a collection.
+///
+/// Uses `POST /_api/document/{collection}`.  For a single object the
+/// response contains `_key`, `_id`, and `_rev`.  For an array the
+/// response is an array of such objects.
+#[instrument(skip(pool, data), fields(db = %pool.database()))]
+pub async fn insert_document(
+    pool: &ArangoPool,
+    collection: &str,
+    data: &Value,
+) -> Result<Value, ArangoError> {
+    let path = format!("document/{collection}");
+    pool.writer().post(&path, data).await
+}
+
 /// Delete a single document by collection and key.
 #[instrument(skip(pool), fields(db = %pool.database()))]
 pub async fn delete_document(

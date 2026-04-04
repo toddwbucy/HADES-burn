@@ -62,6 +62,10 @@ pub enum HandlerError {
     #[error("invalid parameter '{name}': {reason}")]
     InvalidParameter { name: String, reason: String },
 
+    /// A write operation was rejected because the target database is read-only.
+    #[error("write denied: {0}")]
+    WriteDenied(String),
+
     /// A database query failed.
     #[error("{context}")]
     Query {
@@ -211,6 +215,33 @@ pub struct DbRecentParams {
     pub limit: Option<u32>,
 }
 
+/// Params for `db.purge`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbPurgeParams {
+    pub document_id: String,
+}
+
+/// Params for `db.create_collection`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCreateCollectionParams {
+    pub name: String,
+    /// "document" or "edge" (defaults to "document").
+    #[serde(default)]
+    pub collection_type: Option<String>,
+}
+
+/// Params for `db.create_index`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCreateIndexParams {
+    pub collection: String,
+    pub dimension: u32,
+    #[serde(default = "default_metric")]
+    pub metric: String,
+}
+
 /// Params for `graph_embed.embed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -283,6 +314,15 @@ pub enum DaemonCommand {
 
     #[serde(rename = "db.delete")]
     DbDelete(DbDeleteParams),
+
+    #[serde(rename = "db.purge")]
+    DbPurge(DbPurgeParams),
+
+    #[serde(rename = "db.create_collection")]
+    DbCreateCollection(DbCreateCollectionParams),
+
+    #[serde(rename = "db.create_index")]
+    DbCreateIndex(DbCreateIndexParams),
 
     #[serde(rename = "db.count")]
     DbCount(DbCountParams),
@@ -414,10 +454,19 @@ fn default_direction_any() -> String { "any".to_string() }
 fn default_one() -> u32 { 1 }
 fn default_task_type() -> String { "task".to_string() }
 fn default_priority() -> String { "medium".to_string() }
+fn default_metric() -> String { "cosine".to_string() }
 
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
+
+/// Check that the target database is writable, converting the anyhow error
+/// into a typed `DispatchError` for the wire protocol.
+fn require_writable(config: &HadesConfig) -> Result<(), DispatchError> {
+    config
+        .require_writable_database()
+        .map_err(|e| DispatchError::Handler(HandlerError::WriteDenied(e.to_string())))
+}
 
 /// Route a [`DaemonCommand`] to its native handler.
 ///
@@ -426,7 +475,7 @@ fn default_priority() -> String { "medium".to_string() }
 /// so the daemon can fall back to subprocess invocation.
 pub async fn dispatch(
     pool: &ArangoPool,
-    _config: &HadesConfig,
+    config: &HadesConfig,
     cmd: DaemonCommand,
 ) -> Result<Value, DispatchError> {
     match cmd {
@@ -497,6 +546,53 @@ pub async fn dispatch(
             handlers::db_stats(pool)
                 .await
                 .map_err(DispatchError::Handler)
+        }
+
+        // ── Database write commands ───────────��───────────────────────
+        DaemonCommand::DbInsert(params) => {
+            require_writable(config)?;
+            handlers::db_insert(pool, &params.collection, &params.data)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbUpdate(params) => {
+            require_writable(config)?;
+            handlers::db_update(pool, &params.collection, &params.key, &params.data)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbDelete(params) => {
+            require_writable(config)?;
+            handlers::db_delete(pool, &params.collection, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbPurge(params) => {
+            require_writable(config)?;
+            handlers::db_purge(pool, &params.document_id)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCreateCollection(params) => {
+            require_writable(config)?;
+            handlers::db_create_collection(
+                pool,
+                &params.name,
+                params.collection_type.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbCreateIndex(params) => {
+            require_writable(config)?;
+            handlers::db_create_index(
+                pool,
+                &params.collection,
+                params.dimension,
+                &params.metric,
+            )
+            .await
+            .map_err(DispatchError::Handler)
         }
 
         // All other commands are not yet implemented natively.
@@ -954,6 +1050,203 @@ mod handlers {
                 "chunks": total_chunks,
                 "embeddings": total_embeddings,
             },
+        }))
+    }
+
+    // ── Database write handlers ──────────────────────────────────────
+
+    /// Insert a single document (or array) into a collection.
+    pub async fn db_insert(
+        pool: &ArangoPool,
+        collection: &str,
+        data: &Value,
+    ) -> Result<Value, HandlerError> {
+        let resp = crud::insert_document(pool, collection, data)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to insert into '{collection}'"),
+                source: e,
+            })?;
+        Ok(resp)
+    }
+
+    /// Update (merge-patch) a document's fields.
+    pub async fn db_update(
+        pool: &ArangoPool,
+        collection: &str,
+        key: &str,
+        data: &Value,
+    ) -> Result<Value, HandlerError> {
+        crud::update_document(pool, collection, key, data)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: collection.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to update {collection}/{key}"),
+                        source: e,
+                    }
+                }
+            })
+    }
+
+    /// Delete a single document by collection and key.
+    pub async fn db_delete(
+        pool: &ArangoPool,
+        collection: &str,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        crud::delete_document(pool, collection, key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: collection.to_string(),
+                        key: key.to_string(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: format!("failed to delete {collection}/{key}"),
+                        source: e,
+                    }
+                }
+            })
+    }
+
+    /// Cascade-delete a document and its related chunks/embeddings.
+    pub async fn db_purge(
+        pool: &ArangoPool,
+        document_id: &str,
+    ) -> Result<Value, HandlerError> {
+        let (col, key) = parse_node_id(document_id)?;
+
+        let profile = CollectionProfile::find_by_metadata(col).ok_or_else(|| {
+            HandlerError::InvalidParameter {
+                name: "document_id".into(),
+                reason: format!(
+                    "collection '{col}' is not a known metadata collection — \
+                     valid metadata collections: {}",
+                    CollectionProfile::all()
+                        .iter()
+                        .map(|(_, p)| p.metadata)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        })?;
+
+        let fk = profile.foreign_key;
+        let aql = format!(
+            "LET meta = (FOR d IN @@meta FILTER d._key == @key REMOVE d IN @@meta RETURN 1) \
+             LET chunks = (FOR d IN @@chunks FILTER d.{fk} == @key REMOVE d IN @@chunks RETURN 1) \
+             LET embs = (FOR d IN @@embs FILTER d.{fk} == @key REMOVE d IN @@embs RETURN 1) \
+             RETURN {{ metadata: LENGTH(meta), chunks: LENGTH(chunks), embeddings: LENGTH(embs) }}"
+        );
+
+        let bind = json!({
+            "@meta": profile.metadata,
+            "@chunks": profile.chunks,
+            "@embs": profile.embeddings,
+            "key": key,
+        });
+
+        let result = query::query_single(
+            pool,
+            &aql,
+            Some(&bind),
+            ExecutionTarget::Writer,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("purge AQL failed for '{document_id}'"),
+            source: e,
+        })?;
+
+        let counts = result.unwrap_or(json!({"metadata": 0, "chunks": 0, "embeddings": 0}));
+        let total = counts["metadata"].as_u64().unwrap_or(0)
+            + counts["chunks"].as_u64().unwrap_or(0)
+            + counts["embeddings"].as_u64().unwrap_or(0);
+
+        Ok(json!({
+            "document_id": document_id,
+            "deleted": counts,
+            "total_deleted": total,
+        }))
+    }
+
+    /// Create a new collection.
+    pub async fn db_create_collection(
+        pool: &ArangoPool,
+        name: &str,
+        collection_type: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let type_code = match collection_type {
+            None | Some("document") => None, // ArangoDB defaults to document (2)
+            Some("edge") => Some(3u32),
+            Some(other) => {
+                return Err(HandlerError::InvalidParameter {
+                    name: "collection_type".into(),
+                    reason: format!(
+                        "unknown collection type '{other}' — expected 'document' or 'edge'"
+                    ),
+                });
+            }
+        };
+
+        crud::create_collection(pool, name, type_code)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to create collection '{name}'"),
+                source: e,
+            })
+    }
+
+    /// Create a vector index on a collection.
+    pub async fn db_create_index(
+        pool: &ArangoPool,
+        collection: &str,
+        dimension: u32,
+        metric: &str,
+    ) -> Result<Value, HandlerError> {
+        let vm = match metric {
+            "cosine" => index::VectorMetric::Cosine,
+            "l2" | "euclidean" => index::VectorMetric::L2,
+            "dotproduct" | "innerProduct" => index::VectorMetric::InnerProduct,
+            other => {
+                return Err(HandlerError::InvalidParameter {
+                    name: "metric".into(),
+                    reason: format!(
+                        "unknown metric '{other}' — expected 'cosine', 'l2', or 'dotproduct'"
+                    ),
+                });
+            }
+        };
+
+        let info = index::create_vector_index(
+            pool,
+            collection,
+            "embedding", // standard field name across all collection profiles
+            dimension,
+            None, // auto-calculate nLists
+            10,   // default nProbe
+            vm,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to create vector index on '{collection}'"),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "id": info.id,
+            "collection": collection,
+            "type": info.index_type,
+            "fields": info.fields,
+            "params": info.params,
         }))
     }
 
@@ -1705,5 +1998,238 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { ref name, .. }) if name == "bind"));
+    }
+
+    // -- Write command serde roundtrips ----------------------------------------
+
+    #[test]
+    fn test_command_roundtrip_db_insert() {
+        let json = serde_json::json!({
+            "command": "db.insert",
+            "params": { "collection": "test", "data": {"title": "Hello"} }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbInsert(ref p) if p.collection == "test"));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_update() {
+        let json = serde_json::json!({
+            "command": "db.update",
+            "params": { "collection": "test", "key": "k1", "data": {"x": 1} }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbUpdate(ref p) if p.collection == "test" && p.key == "k1"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_delete() {
+        let json = serde_json::json!({
+            "command": "db.delete",
+            "params": { "collection": "test", "key": "k1" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbDelete(ref p) if p.collection == "test" && p.key == "k1"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_purge() {
+        let json = serde_json::json!({
+            "command": "db.purge",
+            "params": { "document_id": "arxiv_metadata/2409_04701" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbPurge(ref p) if p.document_id == "arxiv_metadata/2409_04701"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_create_collection() {
+        let json = serde_json::json!({
+            "command": "db.create_collection",
+            "params": { "name": "my_col", "collection_type": "edge" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCreateCollection(ref p)
+                if p.name == "my_col" && p.collection_type.as_deref() == Some("edge")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_db_create_index() {
+        let json = serde_json::json!({
+            "command": "db.create_index",
+            "params": { "collection": "embeddings", "dimension": 2048 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbCreateIndex(ref p)
+                if p.collection == "embeddings" && p.dimension == 2048 && p.metric == "cosine"
+        ));
+    }
+
+    // -- deny_unknown_fields for write commands --------------------------------
+
+    #[test]
+    fn test_deny_unknown_fields_db_insert() {
+        let json = serde_json::json!({
+            "command": "db.insert",
+            "params": { "collection": "test", "data": {}, "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_db_purge() {
+        let json = serde_json::json!({
+            "command": "db.purge",
+            "params": { "document_id": "test/1", "cascade": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    // -- Write safety guard ---------------------------------------------------
+
+    #[test]
+    fn test_write_denied_on_production_db() {
+        // Default config targets NestedLearning — writes must be rejected.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbInsert(DbInsertParams {
+                collection: "test".into(),
+                data: serde_json::json!({"x": 1}),
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DispatchError::Handler(HandlerError::WriteDenied(_))),
+            "expected WriteDenied, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_update() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbUpdate(DbUpdateParams {
+                collection: "test".into(),
+                key: "k1".into(),
+                data: serde_json::json!({"x": 1}),
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_delete() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbDelete(DbDeleteParams {
+                collection: "test".into(),
+                key: "k1".into(),
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_purge() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbPurge(DbPurgeParams {
+                document_id: "test/k1".into(),
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_create_collection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbCreateCollection(DbCreateCollectionParams {
+                name: "test".into(),
+                collection_type: None,
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
+    // -- Collection type parsing ----------------------------------------------
+
+    #[test]
+    fn test_create_collection_invalid_type() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut config = HadesConfig::default();
+        config.apply_cli_overrides(Some("bident_burn"), None);
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbCreateCollection(DbCreateCollectionParams {
+                name: "test".into(),
+                collection_type: Some("invalid_type".into()),
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::InvalidParameter { .. })
+        ));
     }
 }

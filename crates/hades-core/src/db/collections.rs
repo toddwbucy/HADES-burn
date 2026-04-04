@@ -14,6 +14,9 @@ pub struct CollectionProfile {
     pub chunks: &'static str,
     /// Embedding vector collection (e.g. `arxiv_abstract_embeddings`).
     pub embeddings: &'static str,
+    /// Field name in chunks/embeddings that references the parent metadata
+    /// document key (e.g. `"paper_key"` for arxiv, `"file_key"` for codebase).
+    pub foreign_key: &'static str,
 }
 
 // ---------------------------------------------------------------------------
@@ -24,18 +27,24 @@ static ARXIV: CollectionProfile = CollectionProfile {
     metadata: "arxiv_metadata",
     chunks: "arxiv_abstract_chunks",
     embeddings: "arxiv_abstract_embeddings",
+    foreign_key: "paper_key",
 };
 
 static SYNC: CollectionProfile = CollectionProfile {
     metadata: "arxiv_papers",
     chunks: "arxiv_abstracts",
     embeddings: "arxiv_embeddings",
+    foreign_key: "paper_key",
 };
 
+/// Generic profile — still uses `paper_key` because the standard ingestion
+/// pipeline (`ingest_document` in the Python backend) writes `paper_key` into
+/// chunks/embeddings for all non-codebase profiles.
 static DEFAULT: CollectionProfile = CollectionProfile {
     metadata: "documents",
     chunks: "chunks",
     embeddings: "embeddings",
+    foreign_key: "paper_key",
 };
 
 static ALL_PROFILES: [(&str, &CollectionProfile); 4] = [
@@ -54,6 +63,7 @@ static CODEBASE_PROFILE: CollectionProfile = CollectionProfile {
     metadata: "codebase_files",
     chunks: "codebase_chunks",
     embeddings: "codebase_embeddings",
+    foreign_key: "file_key",
 };
 
 /// Extended collection set for codebase ingestion.
@@ -116,6 +126,17 @@ impl CollectionProfile {
     pub fn default_profile() -> &'static CollectionProfile {
         let name = env::var("HADES_DEFAULT_COLLECTION").unwrap_or_else(|_| "arxiv".to_string());
         Self::get(&name).unwrap_or(&ARXIV)
+    }
+
+    /// Look up a profile by its metadata collection name.
+    ///
+    /// Used by purge to find related chunks/embeddings collections
+    /// given a document's metadata collection.
+    pub fn find_by_metadata(metadata_col: &str) -> Option<&'static CollectionProfile> {
+        ALL_PROFILES
+            .iter()
+            .find(|(_, p)| p.metadata == metadata_col)
+            .map(|(_, p)| *p)
     }
 
     /// All registered profiles as `(name, profile)` pairs.
@@ -207,5 +228,25 @@ mod tests {
         assert!(cols[..4].iter().all(|(_, t)| *t == 2));
         // Last one (edges) is an edge collection (type 3).
         assert_eq!(cols[4], ("codebase_edges", 3));
+    }
+
+    #[test]
+    fn test_find_by_metadata_arxiv() {
+        let p = CollectionProfile::find_by_metadata("arxiv_metadata").unwrap();
+        assert_eq!(p.chunks, "arxiv_abstract_chunks");
+        assert_eq!(p.embeddings, "arxiv_abstract_embeddings");
+        assert_eq!(p.foreign_key, "paper_key");
+    }
+
+    #[test]
+    fn test_find_by_metadata_codebase() {
+        let p = CollectionProfile::find_by_metadata("codebase_files").unwrap();
+        assert_eq!(p.chunks, "codebase_chunks");
+        assert_eq!(p.foreign_key, "file_key");
+    }
+
+    #[test]
+    fn test_find_by_metadata_unknown() {
+        assert!(CollectionProfile::find_by_metadata("nonexistent").is_none());
     }
 }

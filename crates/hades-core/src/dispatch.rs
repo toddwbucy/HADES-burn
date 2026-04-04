@@ -453,6 +453,43 @@ pub struct TaskHandoffShowParams {
     pub key: String,
 }
 
+/// Params for `task.log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskLogParams {
+    pub key: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Params for `task.sessions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskSessionsParams {
+    pub key: String,
+}
+
+/// Params for `task.dep`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDepParams {
+    pub key: String,
+    pub add: Option<String>,
+    pub remove: Option<String>,
+    #[serde(default)]
+    pub graph: bool,
+}
+
+/// Params for `task.usage`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskUsageParams {}
+
+/// Params for `task.graph_integration`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskGraphIntegrationParams {}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -602,6 +639,21 @@ pub enum DaemonCommand {
 
     #[serde(rename = "task.handoff_show")]
     TaskHandoffShow(TaskHandoffShowParams),
+
+    #[serde(rename = "task.log")]
+    TaskLog(TaskLogParams),
+
+    #[serde(rename = "task.sessions")]
+    TaskSessions(TaskSessionsParams),
+
+    #[serde(rename = "task.dep")]
+    TaskDep(TaskDepParams),
+
+    #[serde(rename = "task.usage")]
+    TaskUsage(TaskUsageParams),
+
+    #[serde(rename = "task.graph_integration")]
+    TaskGraphIntegration(TaskGraphIntegrationParams),
 
     // ── Smell ───────────────────────────────────────────────────────
     #[serde(rename = "smell.check")]
@@ -905,6 +957,44 @@ pub async fn dispatch(
             handlers::task_handoff_show(pool, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskContext(params) => {
+            handlers::task_context(pool, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskLog(params) => {
+            let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
+            handlers::task_log(pool, &params.key, limit)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskSessions(params) => {
+            handlers::task_sessions(pool, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskDep(params) => {
+            if params.add.is_some() || params.remove.is_some() {
+                require_writable(config)?;
+            }
+            handlers::task_dep(
+                pool,
+                &params.key,
+                params.add.as_deref(),
+                params.remove.as_deref(),
+                params.graph,
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskUsage(_) => {
+            handlers::task_usage(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskGraphIntegration(_) => {
+            Ok(handlers::task_graph_integration())
         }
 
         // All other commands are not yet implemented natively.
@@ -3181,6 +3271,403 @@ mod handlers {
         let handoff = result.results.into_iter().next().unwrap_or(Value::Null);
         Ok(json!({ "handoff": handoff }))
     }
+
+    // ── Query/meta handlers ────────────────────────────────────────
+
+    /// Rich context dump for a task: task + handoff + sessions + deps + logs.
+    pub async fn task_context(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        let aql = "\
+            LET task = DOCUMENT(@@tasks, @key) \
+            LET latest_handoff = FIRST( \
+                FOR e IN @@edges \
+                    FILTER e._to == task._id \
+                    FILTER e.type == \"handoff_for\" \
+                    LET h = DOCUMENT(e._from) \
+                    SORT h.created_at DESC \
+                    LIMIT 1 \
+                    RETURN h \
+            ) \
+            LET sessions = ( \
+                FOR e IN @@edges \
+                    FILTER e._to == task._id \
+                    FILTER e.type IN [\"implements\", \"submitted_review\", \"approved\"] \
+                    LET s = DOCUMENT(e._from) \
+                    FILTER s != null \
+                    SORT s.started_at DESC \
+                    RETURN MERGE(s, {edge_type: e.type}) \
+            ) \
+            LET blockers = ( \
+                FOR e IN @@edges \
+                    FILTER e._from == task._id \
+                    FILTER e.type == \"blocked_by\" \
+                    LET blocker = DOCUMENT(e._to) \
+                    FILTER blocker != null \
+                    FILTER blocker.status != \"closed\" \
+                    RETURN blocker \
+            ) \
+            LET recent_logs = ( \
+                FOR log IN @@logs \
+                    FILTER log.task_key == @key \
+                    SORT log.created_at DESC \
+                    LIMIT 5 \
+                    RETURN log \
+            ) \
+            RETURN { \
+                task: task, \
+                latest_handoff: latest_handoff, \
+                sessions: sessions, \
+                blockers: blockers, \
+                recent_logs: recent_logs \
+            }";
+
+        let bind = json!({
+            "@tasks": TASK_COLLECTION,
+            "@edges": EDGE_COLLECTION,
+            "@logs": LOG_COLLECTION,
+            "key": key,
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to query context for task '{key}'"),
+            source: e,
+        })?;
+
+        let ctx = result.results.into_iter().next().unwrap_or(Value::Null);
+
+        // Check if task was found.
+        if ctx.get("task").is_none_or(Value::is_null) {
+            return Err(HandlerError::DocumentNotFound {
+                collection: TASK_COLLECTION.to_string(),
+                key: key.to_string(),
+            });
+        }
+
+        Ok(ctx)
+    }
+
+    /// Activity log entries for a task.
+    pub async fn task_log(
+        pool: &ArangoPool,
+        key: &str,
+        limit: u32,
+    ) -> Result<Value, HandlerError> {
+        let aql = "\
+            FOR doc IN @@col \
+                FILTER doc.task_key == @key \
+                SORT doc.created_at DESC \
+                LIMIT @limit \
+                RETURN doc";
+
+        let bind = json!({
+            "@col": LOG_COLLECTION,
+            "key": key,
+            "limit": limit,
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to query logs for task '{key}'"),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "logs": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// Sessions linked to a task via edge traversal.
+    pub async fn task_sessions(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        let aql = "\
+            FOR e IN @@edges \
+                FILTER e._to == @task_id \
+                FILTER e.type IN [\"implements\", \"submitted_review\", \"approved\"] \
+                LET s = DOCUMENT(e._from) \
+                FILTER s != null \
+                SORT s.started_at DESC \
+                RETURN MERGE(s, {edge_type: e.type})";
+
+        let bind = json!({
+            "@edges": EDGE_COLLECTION,
+            "task_id": format!("{TASK_COLLECTION}/{key}"),
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to query sessions for task '{key}'"),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "task_key": key,
+            "sessions": result.results,
+            "count": result.results.len(),
+        }))
+    }
+
+    /// Manage task dependencies: show blockers, add, or remove.
+    pub async fn task_dep(
+        pool: &ArangoPool,
+        key: &str,
+        add: Option<&str>,
+        remove: Option<&str>,
+        graph: bool,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::ArangoErrorKind;
+
+        // Verify the primary task exists.
+        crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(get_task_error(key))?;
+
+        if let Some(dep_key) = add {
+            // Add dependency.
+            if dep_key == key {
+                return Err(HandlerError::InvalidParameter {
+                    name: "add".into(),
+                    reason: "a task cannot depend on itself".into(),
+                });
+            }
+
+            crud::get_document(pool, TASK_COLLECTION, dep_key)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        HandlerError::DocumentNotFound {
+                            collection: TASK_COLLECTION.to_string(),
+                            key: dep_key.to_string(),
+                        }
+                    } else {
+                        HandlerError::Query {
+                            context: format!("failed to verify dependency task '{dep_key}'"),
+                            source: e,
+                        }
+                    }
+                })?;
+
+            let edge_key = format!("{key}__blocked_by__{dep_key}");
+            let now = chrono::Utc::now().to_rfc3339();
+            let edge = json!({
+                "_key": edge_key,
+                "_from": format!("{TASK_COLLECTION}/{key}"),
+                "_to": format!("{TASK_COLLECTION}/{dep_key}"),
+                "type": "blocked_by",
+                "created_at": now,
+            });
+
+            if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await
+                && !matches!(e.kind(), ArangoErrorKind::Conflict)
+            {
+                return Err(HandlerError::Query {
+                    context: format!("failed to create dependency edge from '{key}' to '{dep_key}'"),
+                    source: e,
+                });
+            }
+
+            log_activity(
+                pool,
+                "task.dependency_added",
+                key,
+                Some(&json!({ "depends_on": dep_key })),
+            )
+            .await;
+
+            return Ok(json!({
+                "edge": edge_key,
+                "message": format!("{key} is now blocked by {dep_key}"),
+            }));
+        }
+
+        if let Some(dep_key) = remove {
+            // Remove dependency.
+            let edge_key = format!("{key}__blocked_by__{dep_key}");
+            let removed = match crud::delete_document(pool, EDGE_COLLECTION, &edge_key).await {
+                Ok(_) => true,
+                Err(e) if e.is_not_found() => false,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to remove dependency edge '{edge_key}'"),
+                        source: e,
+                    });
+                }
+            };
+
+            if removed {
+                log_activity(
+                    pool,
+                    "task.dependency_removed",
+                    key,
+                    Some(&json!({ "depends_on": dep_key })),
+                )
+                .await;
+            }
+
+            return Ok(json!({
+                "removed": removed,
+                "message": if removed {
+                    format!("{key} no longer blocked by {dep_key}")
+                } else {
+                    format!("no dependency from {key} to {dep_key}")
+                },
+            }));
+        }
+
+        // Default: show blockers.
+        let aql = "\
+            FOR e IN @@edges \
+                FILTER e._from == @task_id \
+                FILTER e.type == \"blocked_by\" \
+                LET blocker = DOCUMENT(e._to) \
+                FILTER blocker != null \
+                RETURN blocker";
+
+        let bind = json!({
+            "@edges": EDGE_COLLECTION,
+            "task_id": format!("{TASK_COLLECTION}/{key}"),
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to query dependencies for task '{key}'"),
+            source: e,
+        })?;
+
+        let mut response = json!({
+            "task_key": key,
+            "blocked": !result.results.is_empty(),
+            "blockers": result.results,
+        });
+
+        // If --graph, add the dependency adjacency list.
+        if graph {
+            let graph_aql = "\
+                FOR e IN @@edges \
+                    FILTER e.type == \"blocked_by\" \
+                    RETURN { from: e._from, to: e._to }";
+
+            let graph_bind = json!({ "@edges": EDGE_COLLECTION });
+
+            let graph_result = query::query(
+                pool,
+                graph_aql,
+                Some(&graph_bind),
+                None,
+                false,
+                ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to query dependency graph".into(),
+                source: e,
+            })?;
+
+            response["dependency_graph"] = json!(graph_result.results);
+        }
+
+        Ok(response)
+    }
+
+    /// Aggregation statistics for the task system.
+    pub async fn task_usage(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let aql = "\
+            LET by_status = ( \
+                FOR doc IN @@tasks \
+                    COLLECT status = doc.status WITH COUNT INTO c \
+                    RETURN { status: status, count: c } \
+            ) \
+            LET by_priority = ( \
+                FOR doc IN @@tasks \
+                    COLLECT priority = doc.priority WITH COUNT INTO c \
+                    RETURN { priority: priority, count: c } \
+            ) \
+            LET by_type = ( \
+                FOR doc IN @@tasks \
+                    COLLECT type = doc.type WITH COUNT INTO c \
+                    RETURN { type: type, count: c } \
+            ) \
+            LET total = LENGTH(@@tasks) \
+            RETURN { total: total, by_status: by_status, by_priority: by_priority, by_type: by_type }";
+
+        let bind = json!({ "@tasks": TASK_COLLECTION });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: "failed to query task usage statistics".into(),
+            source: e,
+        })?;
+
+        let stats = result.results.into_iter().next().unwrap_or(json!({
+            "total": 0,
+            "by_status": [],
+            "by_priority": [],
+            "by_type": [],
+        }));
+
+        Ok(stats)
+    }
+
+    /// Knowledge graph integration protocol template.
+    pub fn task_graph_integration() -> Value {
+        json!({
+            "protocol": "graph_integration",
+            "description": "Knowledge graph integration protocol for NL compliance review",
+            "steps": [
+                "1. Run 'hades smell check <path>' to audit code compliance",
+                "2. Run 'hades smell verify' to check CS-XX references",
+                "3. Run 'hades smell report' for full compliance report",
+                "4. Review findings and return PASS/REJECT decision"
+            ]
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4473,5 +4960,124 @@ mod tests {
     fn test_valid_transitions_rejects_closed_to_blocked() {
         use super::handlers::VALID_TRANSITIONS;
         assert!(!VALID_TRANSITIONS.contains(&("closed", "blocked")));
+    }
+
+    // ── P7.5c: Query/meta command roundtrip tests ───────────────────
+
+    #[test]
+    fn test_command_roundtrip_task_log() {
+        let json = serde_json::json!({
+            "command": "task.log",
+            "params": { "key": "task_abc123", "limit": 10 }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskLog(ref p) if p.key == "task_abc123" && p.limit == Some(10)
+        ));
+
+        // Without limit (defaults to None).
+        let json2 = serde_json::json!({
+            "command": "task.log",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd2: DaemonCommand = serde_json::from_value(json2).unwrap();
+        assert!(matches!(
+            cmd2,
+            DaemonCommand::TaskLog(ref p) if p.limit.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_sessions() {
+        let json = serde_json::json!({
+            "command": "task.sessions",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskSessions(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_dep_add() {
+        let json = serde_json::json!({
+            "command": "task.dep",
+            "params": { "key": "task_abc123", "add": "task_def456" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskDep(ref p) if p.key == "task_abc123"
+                && p.add.as_deref() == Some("task_def456")
+                && p.remove.is_none()
+                && !p.graph
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_dep_remove() {
+        let json = serde_json::json!({
+            "command": "task.dep",
+            "params": { "key": "task_abc123", "remove": "task_def456" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskDep(ref p) if p.remove.as_deref() == Some("task_def456")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_dep_show_graph() {
+        let json = serde_json::json!({
+            "command": "task.dep",
+            "params": { "key": "task_abc123", "graph": true }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskDep(ref p) if p.add.is_none() && p.remove.is_none() && p.graph
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_usage() {
+        let json = serde_json::json!({
+            "command": "task.usage",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::TaskUsage(_)));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_graph_integration() {
+        let json = serde_json::json!({
+            "command": "task.graph_integration",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::TaskGraphIntegration(_)));
+    }
+
+    #[test]
+    fn test_deny_unknown_task_log() {
+        let json = serde_json::json!({
+            "command": "task.log",
+            "params": { "key": "task_abc123", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_task_dep() {
+        let json = serde_json::json!({
+            "command": "task.dep",
+            "params": { "key": "task_abc123", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
     }
 }

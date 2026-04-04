@@ -9,9 +9,10 @@ use serde_json::Value;
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{
-    self, DaemonCommand, TaskApproveParams, TaskBlockParams, TaskCloseParams, TaskCreateParams,
-    TaskHandoffParams, TaskHandoffShowParams, TaskListParams, TaskReviewParams, TaskShowParams,
-    TaskStartParams, TaskUnblockParams, TaskUpdateParams,
+    self, DaemonCommand, TaskApproveParams, TaskBlockParams, TaskCloseParams, TaskContextParams,
+    TaskCreateParams, TaskDepParams, TaskGraphIntegrationParams, TaskHandoffParams,
+    TaskHandoffShowParams, TaskListParams, TaskLogParams, TaskReviewParams, TaskSessionsParams,
+    TaskShowParams, TaskStartParams, TaskUnblockParams, TaskUpdateParams, TaskUsageParams,
 };
 
 /// Connect, dispatch a command, and print the result in the requested format.
@@ -209,6 +210,84 @@ pub async fn run_handoff_show(config: &HadesConfig, key: &str, format: &str) -> 
         DaemonCommand::TaskHandoffShow(TaskHandoffShowParams {
             key: key.to_string(),
         }),
+        format,
+    )
+    .await
+}
+
+/// `hades task context KEY`
+pub async fn run_context(config: &HadesConfig, key: &str) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskContext(TaskContextParams {
+            key: key.to_string(),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task log KEY [--limit N]`
+pub async fn run_log(config: &HadesConfig, key: &str, limit: u32) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskLog(TaskLogParams {
+            key: key.to_string(),
+            limit: Some(limit),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task sessions KEY`
+pub async fn run_sessions(config: &HadesConfig, key: &str) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskSessions(TaskSessionsParams {
+            key: key.to_string(),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task dep KEY [--add K] [--remove K] [--graph]`
+pub async fn run_dep(
+    config: &HadesConfig,
+    key: &str,
+    add: Option<&str>,
+    remove: Option<&str>,
+    graph: bool,
+) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskDep(TaskDepParams {
+            key: key.to_string(),
+            add: add.map(String::from),
+            remove: remove.map(String::from),
+            graph,
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task usage`
+pub async fn run_usage(config: &HadesConfig) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskUsage(TaskUsageParams {}),
+        "json",
+    )
+    .await
+}
+
+/// `hades task graph-integration [--format F]`
+pub async fn run_graph_integration(config: &HadesConfig, format: &str) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskGraphIntegration(TaskGraphIntegrationParams {}),
         format,
     )
     .await

@@ -14,6 +14,9 @@ pub struct CollectionProfile {
     pub chunks: &'static str,
     /// Embedding vector collection (e.g. `arxiv_abstract_embeddings`).
     pub embeddings: &'static str,
+    /// Field name in chunks/embeddings that references the parent metadata
+    /// document key (e.g. `"paper_key"` for arxiv, `"file_key"` for codebase).
+    pub foreign_key: &'static str,
 }
 
 // ---------------------------------------------------------------------------
@@ -24,18 +27,21 @@ static ARXIV: CollectionProfile = CollectionProfile {
     metadata: "arxiv_metadata",
     chunks: "arxiv_abstract_chunks",
     embeddings: "arxiv_abstract_embeddings",
+    foreign_key: "paper_key",
 };
 
 static SYNC: CollectionProfile = CollectionProfile {
     metadata: "arxiv_papers",
     chunks: "arxiv_abstracts",
     embeddings: "arxiv_embeddings",
+    foreign_key: "paper_key",
 };
 
 static DEFAULT: CollectionProfile = CollectionProfile {
     metadata: "documents",
     chunks: "chunks",
     embeddings: "embeddings",
+    foreign_key: "paper_key",
 };
 
 static ALL_PROFILES: [(&str, &CollectionProfile); 4] = [
@@ -54,6 +60,7 @@ static CODEBASE_PROFILE: CollectionProfile = CollectionProfile {
     metadata: "codebase_files",
     chunks: "codebase_chunks",
     embeddings: "codebase_embeddings",
+    foreign_key: "file_key",
 };
 
 /// Extended collection set for codebase ingestion.

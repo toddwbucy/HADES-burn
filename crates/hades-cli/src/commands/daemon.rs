@@ -218,7 +218,7 @@ fn handler_error_code(e: &HandlerError) -> &'static str {
         | HandlerError::InvalidParameter { .. } => "INVALID_PARAMS",
         HandlerError::NodeNotFound(_) | HandlerError::DocumentNotFound { .. } => "NOT_FOUND",
         HandlerError::NoEmbedding { .. } | HandlerError::InvalidEmbedding { .. } => "QUERY_FAILED",
-        HandlerError::WriteDenied(_) => "WRITE_DENIED",
+        HandlerError::WriteDenied(_) => "READ_ONLY",
         HandlerError::Query { .. } => "QUERY_FAILED",
     }
 }

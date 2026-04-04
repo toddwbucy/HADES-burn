@@ -1139,11 +1139,13 @@ mod handlers {
             }
         })?;
 
-        let aql = "\
-            LET meta = (FOR d IN @@meta FILTER d._key == @key REMOVE d IN @@meta RETURN 1) \
-            LET chunks = (FOR d IN @@chunks FILTER d.paper_key == @key REMOVE d IN @@chunks RETURN 1) \
-            LET embs = (FOR d IN @@embs FILTER d.paper_key == @key REMOVE d IN @@embs RETURN 1) \
-            RETURN { metadata: LENGTH(meta), chunks: LENGTH(chunks), embeddings: LENGTH(embs) }";
+        let fk = profile.foreign_key;
+        let aql = format!(
+            "LET meta = (FOR d IN @@meta FILTER d._key == @key REMOVE d IN @@meta RETURN 1) \
+             LET chunks = (FOR d IN @@chunks FILTER d.{fk} == @key REMOVE d IN @@chunks RETURN 1) \
+             LET embs = (FOR d IN @@embs FILTER d.{fk} == @key REMOVE d IN @@embs RETURN 1) \
+             RETURN {{ metadata: LENGTH(meta), chunks: LENGTH(chunks), embeddings: LENGTH(embs) }}"
+        );
 
         let bind = json!({
             "@meta": profile.metadata,
@@ -1154,7 +1156,7 @@ mod handlers {
 
         let result = query::query_single(
             pool,
-            aql,
+            &aql,
             Some(&bind),
             ExecutionTarget::Writer,
         )

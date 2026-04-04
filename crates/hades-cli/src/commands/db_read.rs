@@ -12,13 +12,16 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
-/// Validate the `--format` flag.  Currently only `"json"` is supported
-/// (per CLAUDE.md: "All CLI output is JSON to stdout").
+/// Validate the `--format` flag.
+///
+/// Most commands emit pretty-printed JSON (`"json"`).  The `export`
+/// command emits newline-delimited JSON and also accepts `"jsonl"`.
 fn validate_format(format: &str) -> Result<()> {
-    if format == "json" {
-        Ok(())
-    } else {
-        anyhow::bail!("unsupported format '{format}' — only 'json' is currently supported")
+    match format {
+        "json" | "jsonl" => Ok(()),
+        other => anyhow::bail!(
+            "unsupported format '{other}' — supported values: json, jsonl"
+        ),
     }
 }
 
@@ -204,6 +207,16 @@ pub async fn run_export(
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
+    // Open writer BEFORE creating the cursor — if file creation fails,
+    // no server-side cursor needs cleanup.
+    let mut writer: Box<dyn Write> = match output {
+        Some(path) => Box::new(
+            std::fs::File::create(path)
+                .with_context(|| format!("failed to create {}", path.display()))?,
+        ),
+        None => Box::new(std::io::stdout().lock()),
+    };
+
     let aql = if let Some(lim) = limit {
         format!("FOR d IN @@col LIMIT {lim} RETURN d")
     } else {
@@ -225,55 +238,56 @@ pub async fn run_export(
         .await
         .with_context(|| format!("export cursor failed for '{collection}'"))?;
 
-    let mut writer: Box<dyn Write> = match output {
-        Some(path) => Box::new(
-            std::fs::File::create(path)
-                .with_context(|| format!("failed to create {}", path.display()))?,
-        ),
-        None => Box::new(std::io::stdout().lock()),
-    };
-
-    // Write first page.
-    let mut total: u64 = 0;
-    if let Some(results) = resp.get("result").and_then(|v| v.as_array()) {
-        for doc in results {
-            writeln!(writer, "{}", serde_json::to_string(doc)?)?;
-            total += 1;
-        }
-    }
-
-    // Paginate remaining pages, writing each batch immediately.
-    let mut has_more = resp["hasMore"].as_bool().unwrap_or(false);
     let cursor_id = resp["id"].as_str().map(String::from);
 
-    if has_more {
-        let id = cursor_id
-            .as_deref()
-            .context("hasMore=true but no cursor ID in export response")?;
+    // Stream pages; capture result so we can clean up the cursor on error.
+    let stream_result: Result<u64> = async {
+        let mut total: u64 = 0;
 
-        while has_more {
-            let path = format!("cursor/{id}");
-            let page = pool
-                .writer()
-                .post(&path, &json!({}))
-                .await
-                .context("export cursor pagination failed")?;
-
-            if let Some(results) = page.get("result").and_then(|v| v.as_array()) {
-                for doc in results {
-                    writeln!(writer, "{}", serde_json::to_string(doc)?)?;
-                    total += 1;
-                }
+        // Write first page.
+        if let Some(results) = resp.get("result").and_then(|v| v.as_array()) {
+            for doc in results {
+                writeln!(writer, "{}", serde_json::to_string(doc)?)?;
+                total += 1;
             }
-
-            has_more = page["hasMore"].as_bool().unwrap_or(false);
         }
 
-        // Clean up cursor.
-        let delete_path = format!("cursor/{id}");
-        let _ = pool.writer().delete(&delete_path).await;
+        // Paginate remaining pages, writing each batch immediately.
+        let mut has_more = resp["hasMore"].as_bool().unwrap_or(false);
+        if has_more {
+            let id = cursor_id
+                .as_deref()
+                .context("hasMore=true but no cursor ID in export response")?;
+
+            while has_more {
+                let path = format!("cursor/{id}");
+                let page = pool
+                    .writer()
+                    .post(&path, &json!({}))
+                    .await
+                    .context("export cursor pagination failed")?;
+
+                if let Some(results) = page.get("result").and_then(|v| v.as_array()) {
+                    for doc in results {
+                        writeln!(writer, "{}", serde_json::to_string(doc)?)?;
+                        total += 1;
+                    }
+                }
+
+                has_more = page["hasMore"].as_bool().unwrap_or(false);
+            }
+        }
+
+        Ok(total)
+    }
+    .await;
+
+    // Best-effort cursor cleanup — always attempt if we got an ID.
+    if let Some(ref id) = cursor_id {
+        let _ = pool.writer().delete(&format!("cursor/{id}")).await;
     }
 
+    let total = stream_result?;
     eprintln!("exported {total} documents from '{collection}'");
     Ok(())
 }

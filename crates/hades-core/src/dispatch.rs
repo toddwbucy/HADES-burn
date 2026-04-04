@@ -765,6 +765,24 @@ mod handlers {
         bind: Option<&Value>,
         limit: Option<u32>,
     ) -> Result<Value, HandlerError> {
+        // Reject non-object bind values — AQL bind vars must be a map.
+        if let Some(v) = bind.filter(|v| !v.is_object()) {
+            return Err(HandlerError::InvalidParameter {
+                name: "bind".into(),
+                reason: format!(
+                    "bind must be an object/map of bind variables, got {}",
+                    match v {
+                        Value::Array(_) => "array",
+                        Value::String(_) => "string",
+                        Value::Number(_) => "number",
+                        Value::Bool(_) => "bool",
+                        Value::Null => "null",
+                        _ => "non-object",
+                    }
+                ),
+            });
+        }
+
         // Reject mutating AQL — this handler is read-only.
         // Strip string literals and comments first so keywords inside
         // strings like "INSERT TITLE" don't trigger false positives.
@@ -1664,5 +1682,28 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+    }
+
+    // -- db_aql bind validation ------------------------------------------------
+
+    #[test]
+    fn test_db_aql_rejects_non_object_bind() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "RETURN 1".to_string(),
+                bind: Some(serde_json::json!([1, 2, 3])),
+                limit: None,
+            }),
+        ));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { ref name, .. }) if name == "bind"));
     }
 }

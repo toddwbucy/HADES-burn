@@ -2438,11 +2438,17 @@ mod handlers {
     }
 
     /// Create a new task.
+    ///
+    /// Key generation retries up to 3 times on duplicate-key conflict
+    /// (24-bit key space can collide under load).
     pub async fn task_create(
         pool: &ArangoPool,
         params: &super::TaskCreateParams,
     ) -> Result<Value, HandlerError> {
+        use crate::db::ArangoErrorKind;
         use rand::Rng;
+
+        const MAX_KEY_ATTEMPTS: u32 = 3;
 
         validate_enum("priority", &params.priority, VALID_PRIORITIES)?;
         validate_enum("type", &params.task_type, VALID_TYPES)?;
@@ -2454,33 +2460,50 @@ mod handlers {
             });
         }
 
-        let key = format!("task_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let doc = json!({
-            "_key": key,
-            "title": params.title.trim(),
-            "description": params.description,
-            "status": "open",
-            "priority": params.priority,
-            "type": params.task_type,
-            "labels": params.tags,
-            "parent_key": params.parent,
-            "acceptance": null,
-            "minor": false,
-            "block_reason": null,
-            "created_at": now,
-            "updated_at": now,
-        });
+        for attempt in 0..MAX_KEY_ATTEMPTS {
+            let key = format!("task_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
 
-        crud::insert_document(pool, TASK_COLLECTION, &doc)
-            .await
-            .map_err(|e| HandlerError::Query {
-                context: "failed to create task".into(),
-                source: e,
-            })?;
+            let doc = json!({
+                "_key": key,
+                "title": params.title.trim(),
+                "description": params.description,
+                "status": "open",
+                "priority": params.priority,
+                "type": params.task_type,
+                "labels": params.tags,
+                "parent_key": params.parent,
+                "acceptance": null,
+                "minor": false,
+                "block_reason": null,
+                "created_at": now,
+                "updated_at": now,
+            });
 
-        Ok(json!({ "task": doc }))
+            match crud::insert_document(pool, TASK_COLLECTION, &doc).await {
+                Ok(_) => return Ok(json!({ "task": doc })),
+                Err(e) if matches!(e.kind(), ArangoErrorKind::Conflict) => {
+                    if attempt == MAX_KEY_ATTEMPTS - 1 {
+                        return Err(HandlerError::Query {
+                            context: format!(
+                                "failed to create task after {MAX_KEY_ATTEMPTS} key-collision retries"
+                            ),
+                            source: e,
+                        });
+                    }
+                    // Retry with a new key.
+                }
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: "failed to create task".into(),
+                        source: e,
+                    });
+                }
+            }
+        }
+
+        unreachable!("loop always returns")
     }
 
     /// Update a task's fields.

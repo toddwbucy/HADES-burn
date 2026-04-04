@@ -646,8 +646,8 @@ fn main() -> anyhow::Result<()> {
                 &config, &format,
             ));
         }
-        // Materialize falls through to Python passthrough.
-        _ => {} // Fall through to Python passthrough.
+        // All TaskCmd variants are handled natively above.
+        _ => {} // Remaining non-Task commands fall through to Python passthrough.
     }
 
     // ── Python passthrough (strangler-fig) ───────────────────────────────

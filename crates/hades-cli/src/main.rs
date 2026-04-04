@@ -612,7 +612,41 @@ fn main() -> anyhow::Result<()> {
                 &config, &key, &format,
             ));
         }
-        // Remaining task commands + materialize fall through to Python passthrough.
+        Commands::Task(commands::task::TaskCmd::Context { key }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_context(&config, &key));
+        }
+        Commands::Task(commands::task::TaskCmd::Log { key, limit }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_log(&config, &key, limit));
+        }
+        Commands::Task(commands::task::TaskCmd::Sessions { key }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_sessions(&config, &key));
+        }
+        Commands::Task(commands::task::TaskCmd::Dep { key, add, remove, graph }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_dep(
+                &config, &key, add.as_deref(), remove.as_deref(), graph,
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Usage) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_usage(&config));
+        }
+        Commands::Task(commands::task::TaskCmd::GraphIntegration { format }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_graph_integration(
+                &config, &format,
+            ));
+        }
+        // Materialize falls through to Python passthrough.
         _ => {} // Fall through to Python passthrough.
     }
 

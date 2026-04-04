@@ -506,6 +506,19 @@ fn main() -> anyhow::Result<()> {
                 &config, &name, drop_collections, force,
             ));
         }
+        // ── Native system commands ────────────────────────────────────
+        Commands::Status { format, verbose } => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::system::run_status(&config, verbose, &format));
+        }
+        Commands::Orient { collection, format } => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::system::run_orient(
+                &config, collection.as_deref(), &format,
+            ));
+        }
         // Materialize falls through to Python passthrough.
         _ => {} // Fall through to Python passthrough.
     }

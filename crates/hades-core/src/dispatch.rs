@@ -318,6 +318,21 @@ pub struct DbGraphDropParams {
     pub force: bool,
 }
 
+/// Params for `status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusParams {
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+/// Params for `orient`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrientParams {
+    pub collection: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -332,15 +347,10 @@ pub struct DbGraphDropParams {
 pub enum DaemonCommand {
     // ── System ──────────────────────────────────────────────────────
     #[serde(rename = "orient")]
-    Orient {
-        collection: Option<String>,
-    },
+    Orient(OrientParams),
 
     #[serde(rename = "status")]
-    Status {
-        #[serde(default)]
-        verbose: bool,
-    },
+    Status(StatusParams),
 
     // ── Database ────────────────────────────────────────────────────
     #[serde(rename = "db.query")]
@@ -702,6 +712,18 @@ pub async fn dispatch(
                 }));
             }
             handlers::db_graph_drop(pool, &params.name, params.drop_collections)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
+        // ── System commands ─────────────────────────────────────────
+        DaemonCommand::Status(params) => {
+            handlers::status(pool, config, params.verbose)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::Orient(params) => {
+            handlers::orient(pool, params.collection.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -1953,6 +1975,302 @@ mod handlers {
             "collections_dropped": drop_collections,
         }))
     }
+
+    // ── System handlers ────────────────────────────────────────────
+
+    /// Unified system status — ArangoDB, embedder, sync, config.
+    pub async fn status(
+        pool: &ArangoPool,
+        config: &crate::config::HadesConfig,
+        verbose: bool,
+    ) -> Result<Value, HandlerError> {
+        use std::path::PathBuf;
+        use crate::persephone::embedding::{EmbeddingClient, EmbeddingClientConfig, EmbeddingEndpoint};
+
+        // 1. ArangoDB health
+        let health = pool.health_check().await;
+        let arango_status = if health.reader_ok && health.writer_ok {
+            "healthy"
+        } else {
+            "degraded"
+        };
+
+        // 2. Embedder probe — connect + info(), with 5-second timeout
+        let socket_path = &config.embedding.service.socket;
+        let embedder_info = {
+            let emb_config = EmbeddingClientConfig {
+                endpoint: EmbeddingEndpoint::Unix(PathBuf::from(socket_path)),
+                ..Default::default()
+            };
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                async {
+                    let client = EmbeddingClient::connect(emb_config).await?;
+                    client.info().await
+                },
+            )
+            .await
+            {
+                Ok(Ok(info)) => json!({
+                    "status": "running",
+                    "socket": socket_path,
+                    "model_name": info.model_name,
+                    "dimension": info.dimension,
+                    "device": info.device,
+                    "model_loaded": info.model_loaded,
+                }),
+                Ok(Err(e)) => json!({
+                    "status": "unavailable",
+                    "socket": socket_path,
+                    "error": e.to_string(),
+                }),
+                Err(_) => json!({
+                    "status": "unavailable",
+                    "socket": socket_path,
+                    "error": "connection timed out (5s)",
+                }),
+            }
+        };
+
+        // 3. Sync watermark
+        let sync_info = match crate::arxiv::sync_metadata::get_sync_status(pool).await {
+            Ok(Some(wm)) => json!({
+                "last_sync": wm.last_sync,
+                "total_synced": wm.total_synced,
+            }),
+            Ok(None) => json!({ "last_sync": null, "total_synced": 0 }),
+            Err(_) => json!({ "last_sync": null, "total_synced": 0, "error": "failed to read sync metadata" }),
+        };
+
+        // 4. Config summary
+        let writable = config.require_writable_database().is_ok();
+        let config_info = json!({
+            "database": config.effective_database(),
+            "writable": writable,
+            "arango_socket_ro": config.effective_socket(true),
+            "arango_socket_rw": config.effective_socket(false),
+            "embedder_socket": socket_path,
+        });
+
+        let mut result = json!({
+            "database": pool.database(),
+            "arangodb": {
+                "version": health.version,
+                "reader_ok": health.reader_ok,
+                "writer_ok": health.writer_ok,
+                "shared_connection": health.shared,
+                "status": arango_status,
+            },
+            "embedder": embedder_info,
+            "sync": sync_info,
+            "config": config_info,
+        });
+
+        // 5. Verbose: per-profile stats (reuses db_stats pattern)
+        if verbose {
+            let mut profiles_data = Vec::new();
+            for (name, profile) in CollectionProfile::all() {
+                let meta_count = match count_collection(pool, profile.metadata).await {
+                    Ok(n) => n,
+                    Err(e) if e.is_not_found() => 0,
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to count '{}'", profile.metadata),
+                            source: e,
+                        });
+                    }
+                };
+                let chunk_count = match count_collection(pool, profile.chunks).await {
+                    Ok(n) => n,
+                    Err(e) if e.is_not_found() => 0,
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to count '{}'", profile.chunks),
+                            source: e,
+                        });
+                    }
+                };
+                let emb_count = match count_collection(pool, profile.embeddings).await {
+                    Ok(n) => n,
+                    Err(e) if e.is_not_found() => 0,
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to count '{}'", profile.embeddings),
+                            source: e,
+                        });
+                    }
+                };
+                profiles_data.push(json!({
+                    "name": name,
+                    "metadata_collection": profile.metadata,
+                    "documents": meta_count,
+                    "chunks": chunk_count,
+                    "embeddings": emb_count,
+                }));
+            }
+            result["profiles"] = json!(profiles_data);
+        }
+
+        Ok(result)
+    }
+
+    /// Metadata-first context orientation for AI agent workspace discovery.
+    pub async fn orient(
+        pool: &ArangoPool,
+        collection: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        if let Some(col) = collection {
+            // Single-collection detail mode
+            return orient_collection(pool, col).await;
+        }
+
+        // Overview mode: all profiles with counts + recent papers
+        let mut profiles_data = Vec::new();
+        let mut total_docs: u64 = 0;
+        let mut total_chunks: u64 = 0;
+        let mut total_embeddings: u64 = 0;
+
+        for (name, profile) in CollectionProfile::all() {
+            let meta_count = match count_collection(pool, profile.metadata).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.metadata),
+                        source: e,
+                    });
+                }
+            };
+            let chunk_count = match count_collection(pool, profile.chunks).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.chunks),
+                        source: e,
+                    });
+                }
+            };
+            let emb_count = match count_collection(pool, profile.embeddings).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.embeddings),
+                        source: e,
+                    });
+                }
+            };
+
+            // Recent papers for this profile
+            let recent = recent_docs(pool, profile.metadata, 5).await;
+
+            total_docs += meta_count;
+            total_chunks += chunk_count;
+            total_embeddings += emb_count;
+
+            profiles_data.push(json!({
+                "name": name,
+                "metadata_collection": profile.metadata,
+                "chunks_collection": profile.chunks,
+                "embeddings_collection": profile.embeddings,
+                "documents": meta_count,
+                "chunks": chunk_count,
+                "embeddings": emb_count,
+                "recent": recent,
+            }));
+        }
+
+        Ok(json!({
+            "database": pool.database(),
+            "profiles": profiles_data,
+            "totals": {
+                "documents": total_docs,
+                "chunks": total_chunks,
+                "embeddings": total_embeddings,
+            },
+        }))
+    }
+
+    /// Single-collection detail: count, schema sample, recent docs, indexes.
+    async fn orient_collection(
+        pool: &ArangoPool,
+        collection: &str,
+    ) -> Result<Value, HandlerError> {
+        let count = match count_collection(pool, collection).await {
+            Ok(n) => n,
+            Err(e) if e.is_not_found() => 0,
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to count '{collection}'"),
+                    source: e,
+                });
+            }
+        };
+
+        // Schema sample: first document
+        let sample_aql = "FOR d IN @@col LIMIT 1 RETURN d";
+        let sample_bind = json!({ "@col": collection });
+        let sample = query::query(
+            pool,
+            sample_aql,
+            Some(&sample_bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .ok()
+        .and_then(|r| r.results.into_iter().next());
+
+        // Extract field names from sample for schema overview
+        let schema_fields: Vec<String> = sample
+            .as_ref()
+            .and_then(|doc| doc.as_object())
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default();
+
+        // Recent docs
+        let recent = recent_docs(pool, collection, 10).await;
+
+        // Indexes
+        let indexes = index::list_indexes(pool, collection)
+            .await
+            .unwrap_or_default();
+        let index_info: Vec<Value> = indexes
+            .into_iter()
+            .map(|idx| json!({
+                "type": idx.index_type,
+                "fields": idx.fields,
+            }))
+            .collect();
+
+        Ok(json!({
+            "database": pool.database(),
+            "collection": collection,
+            "count": count,
+            "schema_fields": schema_fields,
+            "recent": recent,
+            "indexes": index_info,
+        }))
+    }
+
+    /// Fetch recent documents from a collection, sorted by processing_timestamp.
+    /// Silently returns empty vec if the collection doesn't exist.
+    async fn recent_docs(pool: &ArangoPool, collection: &str, limit: u32) -> Vec<Value> {
+        let aql = "FOR d IN @@col \
+                    SORT d.processing_timestamp DESC, d._rev DESC \
+                    LIMIT @limit \
+                    RETURN { _key: d._key, title: d.title, processing_timestamp: d.processing_timestamp }";
+        let bind = json!({
+            "@col": collection,
+            "limit": limit,
+        });
+        query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map(|r| r.results)
+            .unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,14 +2282,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_command_roundtrip_orient() {
-        let cmd = DaemonCommand::Orient { collection: Some("test".into()) };
+    fn test_command_roundtrip_orient_with_collection() {
+        let cmd = DaemonCommand::Orient(OrientParams { collection: Some("test".into()) });
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["command"], "orient");
         assert_eq!(json["params"]["collection"], "test");
 
         let back: DaemonCommand = serde_json::from_value(json).unwrap();
-        assert!(matches!(back, DaemonCommand::Orient { collection: Some(c) } if c == "test"));
+        assert!(matches!(back, DaemonCommand::Orient(ref p) if p.collection.as_deref() == Some("test")));
+    }
+
+    #[test]
+    fn test_command_roundtrip_orient_no_collection() {
+        let json = serde_json::json!({
+            "command": "orient",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::Orient(ref p) if p.collection.is_none()));
+    }
+
+    #[test]
+    fn test_command_roundtrip_status_defaults() {
+        let json = serde_json::json!({
+            "command": "status",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::Status(ref p) if !p.verbose));
+    }
+
+    #[test]
+    fn test_command_roundtrip_status_verbose() {
+        let cmd = DaemonCommand::Status(StatusParams { verbose: true });
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(json["command"], "status");
+        assert_eq!(json["params"]["verbose"], true);
+
+        let back: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, DaemonCommand::Status(ref p) if p.verbose));
+    }
+
+    #[test]
+    fn test_deny_unknown_status() {
+        let json = serde_json::json!({
+            "command": "status",
+            "params": { "verbose": false, "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_orient() {
+        let json = serde_json::json!({
+            "command": "orient",
+            "params": { "collection": "test", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
     }
 
     #[test]

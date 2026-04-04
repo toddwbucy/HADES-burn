@@ -14,6 +14,8 @@ use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 use crate::dispatch::{DaemonCommand, DaemonResponse};
+#[cfg(test)]
+use crate::dispatch::{OrientParams, StatusParams};
 
 /// Default socket path per the daemon protocol spec.
 pub const DEFAULT_SOCKET: &str = "/run/hades/hades.sock";
@@ -246,9 +248,9 @@ mod tests {
 
         let mut client = DaemonClient::connect(&sock).await.unwrap();
         let resp = client
-            .request(DaemonCommand::Orient {
+            .request(DaemonCommand::Orient(OrientParams {
                 collection: None,
-            })
+            }))
             .await
             .unwrap();
 
@@ -292,7 +294,7 @@ mod tests {
 
         let mut client = DaemonClient::connect(&sock).await.unwrap();
         let resp = client
-            .request_with_id("my-req-1", DaemonCommand::Status { verbose: false })
+            .request_with_id("my-req-1", DaemonCommand::Status(StatusParams { verbose: false }))
             .await
             .unwrap();
 

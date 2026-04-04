@@ -2377,6 +2377,13 @@ mod handlers {
         parent: Option<&str>,
         limit: u32,
     ) -> Result<Value, HandlerError> {
+        if let Some(s) = status {
+            validate_enum("status", s, VALID_STATUSES)?;
+        }
+        if let Some(t) = task_type {
+            validate_enum("type", t, VALID_TYPES)?;
+        }
+
         let mut aql = String::from("FOR doc IN @@col");
         let mut bind = json!({ "@col": TASK_COLLECTION });
 

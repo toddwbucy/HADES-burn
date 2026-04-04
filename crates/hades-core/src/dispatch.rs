@@ -526,7 +526,16 @@ mod handlers {
 
         let mut entries = Vec::with_capacity(collections.len());
         for col in &collections {
-            let count = count_collection(pool, &col.name).await.unwrap_or(0);
+            let count = match count_collection(pool, &col.name).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count collection '{}'", col.name),
+                        source: e,
+                    });
+                }
+            };
             let type_name = if col.collection_type == 3 { "edge" } else { "document" };
             entries.push(json!({
                 "name": col.name,
@@ -722,7 +731,9 @@ mod handlers {
         }
 
         let full_aql = if let Some(lim) = limit {
-            format!("{aql} LIMIT {lim}")
+            // Wrap in a subquery so LIMIT applies correctly regardless
+            // of whether the user's AQL already contains RETURN.
+            format!("FOR __r IN ({aql}) LIMIT {lim} RETURN __r")
         } else {
             aql.to_string()
         };
@@ -767,11 +778,34 @@ mod handlers {
 
         if verbose {
             // Add per-collection info for verbose mode.
-            let collections = list_collections(pool, true).await.unwrap_or_default();
+            let collections = list_collections(pool, true)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "failed to list collections for health check".into(),
+                    source: e,
+                })?;
             let mut col_details = Vec::new();
             for col in &collections {
-                let count = count_collection(pool, &col.name).await.unwrap_or(0);
-                let indexes = index::list_indexes(pool, &col.name).await.unwrap_or_default();
+                let count = match count_collection(pool, &col.name).await {
+                    Ok(n) => n,
+                    Err(e) if e.is_not_found() => 0,
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to count '{}' during health check", col.name),
+                            source: e,
+                        });
+                    }
+                };
+                let indexes = match index::list_indexes(pool, &col.name).await {
+                    Ok(idx) => idx,
+                    Err(e) if e.is_not_found() => Vec::new(),
+                    Err(e) => {
+                        return Err(HandlerError::Query {
+                            context: format!("failed to list indexes for '{}'", col.name),
+                            source: e,
+                        });
+                    }
+                };
                 let type_name = if col.collection_type == 3 { "edge" } else { "document" };
                 col_details.push(json!({
                     "name": col.name,
@@ -797,9 +831,36 @@ mod handlers {
         let mut total_embeddings: u64 = 0;
 
         for (name, profile) in CollectionProfile::all() {
-            let meta_count = count_collection(pool, profile.metadata).await.unwrap_or(0);
-            let chunk_count = count_collection(pool, profile.chunks).await.unwrap_or(0);
-            let emb_count = count_collection(pool, profile.embeddings).await.unwrap_or(0);
+            let meta_count = match count_collection(pool, profile.metadata).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.metadata),
+                        source: e,
+                    });
+                }
+            };
+            let chunk_count = match count_collection(pool, profile.chunks).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.chunks),
+                        source: e,
+                    });
+                }
+            };
+            let emb_count = match count_collection(pool, profile.embeddings).await {
+                Ok(n) => n,
+                Err(e) if e.is_not_found() => 0,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count '{}'", profile.embeddings),
+                        source: e,
+                    });
+                }
+            };
 
             total_docs += meta_count;
             total_chunks += chunk_count;

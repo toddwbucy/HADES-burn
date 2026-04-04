@@ -1615,6 +1615,30 @@ mod handlers {
 
     // ── Graph handlers ─────────────────────────────────────────────
 
+    /// Validate a graph name — must be non-empty and contain only
+    /// alphanumeric, underscore, or hyphen characters (ArangoDB identifier rules).
+    fn validate_graph_name(name: &str) -> Result<(), HandlerError> {
+        if name.is_empty() {
+            return Err(HandlerError::InvalidParameter {
+                name: "name".into(),
+                reason: "graph name must not be empty".into(),
+            });
+        }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(HandlerError::InvalidParameter {
+                name: "name".into(),
+                reason: format!(
+                    "graph name '{name}' contains invalid characters — \
+                     only alphanumeric, underscore, and hyphen are allowed"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Map lowercase direction to AQL keyword.
     pub(crate) fn validate_direction(direction: &str) -> Result<&'static str, HandlerError> {
         match direction {
@@ -1806,6 +1830,8 @@ mod handlers {
         name: &str,
         edge_definitions: Option<&Value>,
     ) -> Result<Value, HandlerError> {
+        validate_graph_name(name)?;
+
         let body = if let Some(defs) = edge_definitions {
             if !defs.is_array() {
                 return Err(HandlerError::InvalidParameter {
@@ -1855,6 +1881,7 @@ mod handlers {
         name: &str,
         drop_collections: bool,
     ) -> Result<Value, HandlerError> {
+        validate_graph_name(name)?;
         let path = format!("gharial/{name}?dropCollections={drop_collections}");
 
         pool.writer()

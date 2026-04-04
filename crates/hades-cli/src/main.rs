@@ -574,6 +574,44 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::task_mgmt::run_start(&config, &key));
         }
+        Commands::Task(commands::task::TaskCmd::Review { key, message }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_review(
+                &config, &key, message.as_deref(),
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Approve { key, human }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_approve(&config, &key, human));
+        }
+        Commands::Task(commands::task::TaskCmd::Block { key, message, blocker }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_block(
+                &config, &key, message.as_deref(), blocker.as_deref(),
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Unblock { key }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_unblock(&config, &key));
+        }
+        Commands::Task(commands::task::TaskCmd::Handoff { key, message }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_handoff(
+                &config, &key, message.as_deref(),
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::HandoffShow { key, format }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_handoff_show(
+                &config, &key, &format,
+            ));
+        }
         // Remaining task commands + materialize fall through to Python passthrough.
         _ => {} // Fall through to Python passthrough.
     }

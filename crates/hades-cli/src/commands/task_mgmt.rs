@@ -9,8 +9,9 @@ use serde_json::Value;
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{
-    self, DaemonCommand, TaskCloseParams, TaskCreateParams, TaskListParams, TaskShowParams,
-    TaskStartParams, TaskUpdateParams,
+    self, DaemonCommand, TaskApproveParams, TaskBlockParams, TaskCloseParams, TaskCreateParams,
+    TaskHandoffParams, TaskHandoffShowParams, TaskListParams, TaskReviewParams, TaskShowParams,
+    TaskStartParams, TaskUnblockParams, TaskUpdateParams,
 };
 
 /// Connect, dispatch a command, and print the result in the requested format.
@@ -127,6 +128,88 @@ pub async fn run_start(config: &HadesConfig, key: &str) -> Result<()> {
             key: key.to_string(),
         }),
         "json",
+    )
+    .await
+}
+
+/// `hades task review KEY [--message M]`
+pub async fn run_review(config: &HadesConfig, key: &str, message: Option<&str>) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskReview(TaskReviewParams {
+            key: key.to_string(),
+            message: message.map(String::from),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task approve KEY [--human]`
+pub async fn run_approve(config: &HadesConfig, key: &str, human: bool) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskApprove(TaskApproveParams {
+            key: key.to_string(),
+            human,
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task block KEY [--message M] [--blocker K]`
+pub async fn run_block(
+    config: &HadesConfig,
+    key: &str,
+    message: Option<&str>,
+    blocker: Option<&str>,
+) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskBlock(TaskBlockParams {
+            key: key.to_string(),
+            message: message.map(String::from),
+            blocker: blocker.map(String::from),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task unblock KEY`
+pub async fn run_unblock(config: &HadesConfig, key: &str) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskUnblock(TaskUnblockParams {
+            key: key.to_string(),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task handoff KEY [--message M]`
+pub async fn run_handoff(config: &HadesConfig, key: &str, message: Option<&str>) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskHandoff(TaskHandoffParams {
+            key: key.to_string(),
+            message: message.map(String::from),
+        }),
+        "json",
+    )
+    .await
+}
+
+/// `hades task handoff-show KEY [--format F]`
+pub async fn run_handoff_show(config: &HadesConfig, key: &str, format: &str) -> Result<()> {
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskHandoffShow(TaskHandoffShowParams {
+            key: key.to_string(),
+        }),
+        format,
     )
     .await
 }

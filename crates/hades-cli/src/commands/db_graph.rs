@@ -23,14 +23,14 @@ pub async fn run_traverse(
     let result = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGraphTraverse {
+        DaemonCommand::DbGraphTraverse(dispatch::DbGraphTraverseParams {
             start: start.to_string(),
             direction: direction.to_string(),
             min_depth,
             max_depth,
             limit: None,
             graph: graph.map(String::from),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -48,12 +48,12 @@ pub async fn run_shortest_path(
     let result = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGraphShortestPath {
+        DaemonCommand::DbGraphShortestPath(dispatch::DbGraphShortestPathParams {
             source: source.to_string(),
             target: target.to_string(),
             direction: "any".to_string(),
             graph: graph.map(String::from),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -72,12 +72,12 @@ pub async fn run_neighbors(
     let result = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGraphNeighbors {
+        DaemonCommand::DbGraphNeighbors(dispatch::DbGraphNeighborsParams {
             vertex: vertex.to_string(),
             direction: direction.to_string(),
             limit: Some(limit),
             graph: graph.map(String::from),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -107,10 +107,10 @@ pub async fn run_create(
     let result = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGraphCreate {
+        DaemonCommand::DbGraphCreate(dispatch::DbGraphCreateParams {
             name: name.to_string(),
             edge_definitions: edge_defs,
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -136,10 +136,11 @@ pub async fn run_drop(
     let result = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGraphDrop {
+        DaemonCommand::DbGraphDrop(dispatch::DbGraphDropParams {
             name: name.to_string(),
             drop_collections,
-        },
+            force,
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);

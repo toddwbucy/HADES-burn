@@ -258,6 +258,66 @@ pub struct GraphEmbedNeighborsParams {
     pub limit: Option<u32>,
 }
 
+/// Params for `db.graph.traverse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphTraverseParams {
+    pub start: String,
+    #[serde(default = "default_direction")]
+    pub direction: String,
+    #[serde(default = "default_one")]
+    pub min_depth: u32,
+    #[serde(default = "default_one")]
+    pub max_depth: u32,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.shortest_path`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphShortestPathParams {
+    pub source: String,
+    pub target: String,
+    #[serde(default = "default_direction_any")]
+    pub direction: String,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.neighbors`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphNeighborsParams {
+    pub vertex: String,
+    #[serde(default = "default_direction_any")]
+    pub direction: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.create`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphCreateParams {
+    pub name: String,
+    #[serde(default)]
+    pub edge_definitions: Option<Value>,
+}
+
+/// Params for `db.graph.drop`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphDropParams {
+    pub name: String,
+    #[serde(default)]
+    pub drop_collections: bool,
+    /// Confirmation flag — daemon callers must set this to `true`.
+    #[serde(default)]
+    pub force: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -344,54 +404,22 @@ pub enum DaemonCommand {
 
     // ── Graph traversal ─────────────────────────────────────────────
     #[serde(rename = "db.graph.traverse")]
-    DbGraphTraverse {
-        start: String,
-        #[serde(default = "default_direction")]
-        direction: String,
-        #[serde(default = "default_one")]
-        min_depth: u32,
-        #[serde(default = "default_one")]
-        max_depth: u32,
-        #[serde(default)]
-        limit: Option<u32>,
-        graph: Option<String>,
-    },
+    DbGraphTraverse(DbGraphTraverseParams),
 
     #[serde(rename = "db.graph.shortest_path")]
-    DbGraphShortestPath {
-        source: String,
-        target: String,
-        #[serde(default = "default_direction_any")]
-        direction: String,
-        graph: Option<String>,
-    },
+    DbGraphShortestPath(DbGraphShortestPathParams),
 
     #[serde(rename = "db.graph.neighbors")]
-    DbGraphNeighbors {
-        vertex: String,
-        #[serde(default = "default_direction_any")]
-        direction: String,
-        #[serde(default)]
-        limit: Option<u32>,
-        graph: Option<String>,
-    },
+    DbGraphNeighbors(DbGraphNeighborsParams),
 
     #[serde(rename = "db.graph.list")]
     DbGraphList {},
 
     #[serde(rename = "db.graph.create")]
-    DbGraphCreate {
-        name: String,
-        #[serde(default)]
-        edge_definitions: Option<Value>,
-    },
+    DbGraphCreate(DbGraphCreateParams),
 
     #[serde(rename = "db.graph.drop")]
-    DbGraphDrop {
-        name: String,
-        #[serde(default)]
-        drop_collections: bool,
-    },
+    DbGraphDrop(DbGraphDropParams),
 
     // ── Embeddings ──────────────────────────────────────────────────
     #[serde(rename = "embed.text")]
@@ -615,31 +643,39 @@ pub async fn dispatch(
         }
 
         // ── Graph read commands ────────────────────────────────────────
-        DaemonCommand::DbGraphTraverse {
-            start, direction, min_depth, max_depth, limit, graph,
-        } => {
-            let limit = limit.unwrap_or(100).min(MAX_LIMIT);
+        DaemonCommand::DbGraphTraverse(params) => {
+            let limit = params.limit.unwrap_or(100).min(MAX_LIMIT);
             handlers::db_graph_traverse(
-                pool, &start, &direction, min_depth, max_depth, limit, graph.as_deref(),
+                pool,
+                &params.start,
+                &params.direction,
+                params.min_depth,
+                params.max_depth,
+                limit,
+                params.graph.as_deref(),
             )
             .await
             .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbGraphShortestPath {
-            source, target, direction, graph,
-        } => {
+        DaemonCommand::DbGraphShortestPath(params) => {
             handlers::db_graph_shortest_path(
-                pool, &source, &target, &direction, graph.as_deref(),
+                pool,
+                &params.source,
+                &params.target,
+                &params.direction,
+                params.graph.as_deref(),
             )
             .await
             .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbGraphNeighbors {
-            vertex, direction, limit, graph,
-        } => {
-            let limit = limit.unwrap_or(20).min(MAX_LIMIT);
+        DaemonCommand::DbGraphNeighbors(params) => {
+            let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
             handlers::db_graph_neighbors(
-                pool, &vertex, &direction, limit, graph.as_deref(),
+                pool,
+                &params.vertex,
+                &params.direction,
+                limit,
+                params.graph.as_deref(),
             )
             .await
             .map_err(DispatchError::Handler)
@@ -651,15 +687,21 @@ pub async fn dispatch(
         }
 
         // ── Graph write commands ──────────────────────────────────────
-        DaemonCommand::DbGraphCreate { name, edge_definitions } => {
+        DaemonCommand::DbGraphCreate(params) => {
             require_writable(config)?;
-            handlers::db_graph_create(pool, &name, edge_definitions.as_ref())
+            handlers::db_graph_create(pool, &params.name, params.edge_definitions.as_ref())
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbGraphDrop { name, drop_collections } => {
+        DaemonCommand::DbGraphDrop(params) => {
             require_writable(config)?;
-            handlers::db_graph_drop(pool, &name, drop_collections)
+            if !params.force {
+                return Err(DispatchError::Handler(HandlerError::InvalidParameter {
+                    name: "force".into(),
+                    reason: "graph drop requires force=true confirmation".into(),
+                }));
+            }
+            handlers::db_graph_drop(pool, &params.name, params.drop_collections)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -1657,6 +1699,9 @@ mod handlers {
     /// Default graph name used when the caller doesn't specify one.
     const DEFAULT_GRAPH: &str = "nl_concept_map";
 
+    /// Maximum traversal depth to prevent runaway queries.
+    const MAX_TRAVERSAL_DEPTH: u32 = 20;
+
     /// Graph traversal from a starting vertex.
     pub async fn db_graph_traverse(
         pool: &ArangoPool,
@@ -1670,6 +1715,16 @@ mod handlers {
         // Validate start vertex format.
         parse_node_id(start)?;
         let dir_kw = validate_direction(direction)?;
+
+        if min_depth > MAX_TRAVERSAL_DEPTH {
+            return Err(HandlerError::InvalidParameter {
+                name: "min_depth".into(),
+                reason: format!(
+                    "min_depth ({min_depth}) exceeds maximum ({MAX_TRAVERSAL_DEPTH})"
+                ),
+            });
+        }
+        let max_depth = max_depth.min(MAX_TRAVERSAL_DEPTH);
 
         if max_depth < min_depth {
             return Err(HandlerError::InvalidParameter {
@@ -2607,11 +2662,13 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphTraverse {
-                ref start, ref direction, min_depth: 1, max_depth: 3, limit: Some(50), ref graph,
-            } if start == "hope_axioms/ax_001"
-                && direction == "outbound"
-                && graph.as_deref() == Some("nl_core")
+            DaemonCommand::DbGraphTraverse(ref p)
+            if p.start == "hope_axioms/ax_001"
+                && p.direction == "outbound"
+                && p.min_depth == 1
+                && p.max_depth == 3
+                && p.limit == Some(50)
+                && p.graph.as_deref() == Some("nl_core")
         ));
     }
 
@@ -2624,11 +2681,13 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphTraverse {
-                ref start, ref direction, min_depth: 1, max_depth: 1, limit: None, ref graph,
-            } if start == "hope_axioms/ax_001"
-                && direction == "outbound"
-                && graph.is_none()
+            DaemonCommand::DbGraphTraverse(ref p)
+            if p.start == "hope_axioms/ax_001"
+                && p.direction == "outbound"
+                && p.min_depth == 1
+                && p.max_depth == 1
+                && p.limit.is_none()
+                && p.graph.is_none()
         ));
     }
 
@@ -2646,12 +2705,11 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphShortestPath {
-                ref source, ref target, ref direction, ref graph,
-            } if source == "hope_axioms/ax_001"
-                && target == "hope_axioms/ax_002"
-                && direction == "outbound"
-                && graph.as_deref() == Some("nl_core")
+            DaemonCommand::DbGraphShortestPath(ref p)
+            if p.source == "hope_axioms/ax_001"
+                && p.target == "hope_axioms/ax_002"
+                && p.direction == "outbound"
+                && p.graph.as_deref() == Some("nl_core")
         ));
     }
 
@@ -2667,12 +2725,11 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphShortestPath {
-                ref source, ref target, ref direction, ref graph,
-            } if source == "hope_axioms/ax_001"
-                && target == "hope_axioms/ax_002"
-                && direction == "any"
-                && graph.is_none()
+            DaemonCommand::DbGraphShortestPath(ref p)
+            if p.source == "hope_axioms/ax_001"
+                && p.target == "hope_axioms/ax_002"
+                && p.direction == "any"
+                && p.graph.is_none()
         ));
     }
 
@@ -2690,11 +2747,11 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphNeighbors {
-                ref vertex, ref direction, limit: Some(10), ref graph,
-            } if vertex == "hope_axioms/ax_001"
-                && direction == "inbound"
-                && graph.as_deref() == Some("nl_core")
+            DaemonCommand::DbGraphNeighbors(ref p)
+            if p.vertex == "hope_axioms/ax_001"
+                && p.direction == "inbound"
+                && p.limit == Some(10)
+                && p.graph.as_deref() == Some("nl_core")
         ));
     }
 
@@ -2722,8 +2779,8 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphCreate { ref name, ref edge_definitions }
-            if name == "test_graph" && edge_definitions.is_some()
+            DaemonCommand::DbGraphCreate(ref p)
+            if p.name == "test_graph" && p.edge_definitions.is_some()
         ));
     }
 
@@ -2731,19 +2788,42 @@ mod tests {
     fn test_command_roundtrip_graph_drop() {
         let json = serde_json::json!({
             "command": "db.graph.drop",
-            "params": { "name": "test_graph", "drop_collections": true }
+            "params": { "name": "test_graph", "drop_collections": true, "force": true }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGraphDrop { ref name, drop_collections: true }
-            if name == "test_graph"
+            DaemonCommand::DbGraphDrop(ref p)
+            if p.name == "test_graph" && p.drop_collections && p.force
         ));
     }
 
-    // Note: deny_unknown_fields tests are not applicable to the graph
-    // variants because they use inline enum fields (matching the existing
-    // DbGraphTraverse/DbGraphList pattern), not separate param structs.
+    #[test]
+    fn test_deny_unknown_fields_graph_traverse() {
+        let json = serde_json::json!({
+            "command": "db.graph.traverse",
+            "params": { "start": "col/key", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_create() {
+        let json = serde_json::json!({
+            "command": "db.graph.create",
+            "params": { "name": "test", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_drop() {
+        let json = serde_json::json!({
+            "command": "db.graph.drop",
+            "params": { "name": "test", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
 
     #[test]
     fn test_validate_direction() {
@@ -2773,10 +2853,10 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbGraphCreate {
+            DaemonCommand::DbGraphCreate(DbGraphCreateParams {
                 name: "test".into(),
                 edge_definitions: None,
-            },
+            }),
         ));
 
         assert!(matches!(
@@ -2794,10 +2874,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbGraphDrop {
+            DaemonCommand::DbGraphDrop(DbGraphDropParams {
                 name: "test".into(),
                 drop_collections: false,
-            },
+                force: true,
+            }),
         ));
 
         assert!(matches!(

@@ -405,6 +405,54 @@ pub struct TaskContextParams {
     pub key: String,
 }
 
+/// Params for `task.review`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskReviewParams {
+    pub key: String,
+    pub message: Option<String>,
+}
+
+/// Params for `task.approve`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskApproveParams {
+    pub key: String,
+    #[serde(default)]
+    pub human: bool,
+}
+
+/// Params for `task.block`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskBlockParams {
+    pub key: String,
+    pub message: Option<String>,
+    pub blocker: Option<String>,
+}
+
+/// Params for `task.unblock`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskUnblockParams {
+    pub key: String,
+}
+
+/// Params for `task.handoff`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHandoffParams {
+    pub key: String,
+    pub message: Option<String>,
+}
+
+/// Params for `task.handoff_show`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHandoffShowParams {
+    pub key: String,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -536,6 +584,24 @@ pub enum DaemonCommand {
 
     #[serde(rename = "task.context")]
     TaskContext(TaskContextParams),
+
+    #[serde(rename = "task.review")]
+    TaskReview(TaskReviewParams),
+
+    #[serde(rename = "task.approve")]
+    TaskApprove(TaskApproveParams),
+
+    #[serde(rename = "task.block")]
+    TaskBlock(TaskBlockParams),
+
+    #[serde(rename = "task.unblock")]
+    TaskUnblock(TaskUnblockParams),
+
+    #[serde(rename = "task.handoff")]
+    TaskHandoff(TaskHandoffParams),
+
+    #[serde(rename = "task.handoff_show")]
+    TaskHandoffShow(TaskHandoffShowParams),
 
     // ── Smell ───────────────────────────────────────────────────────
     #[serde(rename = "smell.check")]
@@ -802,6 +868,41 @@ pub async fn dispatch(
         DaemonCommand::TaskStart(params) => {
             require_writable(config)?;
             handlers::task_start(pool, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskReview(params) => {
+            require_writable(config)?;
+            handlers::task_review(pool, &params.key, params.message.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskApprove(params) => {
+            require_writable(config)?;
+            handlers::task_approve(pool, &params.key, params.human)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskBlock(params) => {
+            require_writable(config)?;
+            handlers::task_block(pool, &params.key, params.message.as_deref(), params.blocker.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskUnblock(params) => {
+            require_writable(config)?;
+            handlers::task_unblock(pool, &params.key)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskHandoff(params) => {
+            require_writable(config)?;
+            handlers::task_handoff(pool, &params.key, params.message.as_deref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::TaskHandoffShow(params) => {
+            handlers::task_handoff_show(pool, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -2713,6 +2814,373 @@ mod handlers {
 
         Ok(json!({ "task": updated }))
     }
+
+    // ── Workflow handlers ──────────────────────────────────────────
+
+    const EDGE_COLLECTION: &str = "persephone_edges";
+    const LOG_COLLECTION: &str = "persephone_logs";
+    const HANDOFF_COLLECTION: &str = "persephone_handoffs";
+
+    /// Valid state transitions: (from_status, to_status).
+    pub(crate) const VALID_TRANSITIONS: &[(&str, &str)] = &[
+        ("open", "in_progress"),
+        ("in_progress", "in_review"),
+        ("in_progress", "blocked"),
+        ("in_progress", "open"),
+        ("blocked", "in_progress"),
+        ("blocked", "open"),
+        ("in_review", "closed"),
+        ("in_review", "in_progress"),
+        ("closed", "open"),
+    ];
+
+    /// Get a task document or return a typed error.
+    fn get_task_error(key: &str) -> impl FnOnce(crate::db::ArangoError) -> HandlerError + '_ {
+        move |e| {
+            if e.is_not_found() {
+                HandlerError::DocumentNotFound {
+                    collection: TASK_COLLECTION.to_string(),
+                    key: key.to_string(),
+                }
+            } else {
+                HandlerError::Query {
+                    context: format!("failed to get task '{key}'"),
+                    source: e,
+                }
+            }
+        }
+    }
+
+    /// Best-effort activity log: insert into persephone_logs, ignoring errors.
+    async fn log_activity(pool: &ArangoPool, action: &str, task_key: &str, details: Option<&Value>) {
+        use rand::Rng;
+        let key = format!("log_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
+        let now = chrono::Utc::now().to_rfc3339();
+        let doc = json!({
+            "_key": key,
+            "action": action,
+            "task_key": task_key,
+            "session_key": null,
+            "details": details,
+            "created_at": now,
+        });
+        let _ = crud::insert_document(pool, LOG_COLLECTION, &doc).await;
+    }
+
+    /// Validate and apply a status transition, returning (updated_doc, from_status).
+    ///
+    /// `extra_patch` is merged into the update (e.g. `block_reason`).
+    async fn transition_task(
+        pool: &ArangoPool,
+        key: &str,
+        to_status: &str,
+        extra_patch: Option<&Value>,
+    ) -> Result<Value, HandlerError> {
+        let existing = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(get_task_error(key))?;
+
+        let from_status = existing.get("status").and_then(Value::as_str).unwrap_or("");
+
+        if !VALID_TRANSITIONS.contains(&(from_status, to_status)) {
+            return Err(HandlerError::InvalidParameter {
+                name: "status".into(),
+                reason: format!(
+                    "invalid transition for task '{key}': '{from_status}' → '{to_status}'"
+                ),
+            });
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut patch = json!({
+            "status": to_status,
+            "updated_at": now,
+        });
+
+        // Merge extra fields into the patch.
+        if let Some(extra) = extra_patch
+            && let Some(obj) = extra.as_object()
+        {
+            for (k, v) in obj {
+                patch[k] = v.clone();
+            }
+        }
+
+        crud::update_document(pool, TASK_COLLECTION, key, &patch)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to transition task '{key}'"),
+                source: e,
+            })?;
+
+        // Best-effort activity log.
+        let details = json!({
+            "from_status": from_status,
+            "to_status": to_status,
+        });
+        log_activity(pool, "task.transitioned", key, Some(&details)).await;
+
+        // Re-fetch to return the merged document.
+        let updated = crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to re-fetch task '{key}'"),
+                source: e,
+            })?;
+
+        Ok(updated)
+    }
+
+    /// Submit a task for review (in_progress → in_review).
+    pub async fn task_review(
+        pool: &ArangoPool,
+        key: &str,
+        message: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let updated = transition_task(pool, key, "in_review", None).await?;
+
+        // Log review message if provided.
+        if let Some(msg) = message {
+            let details = json!({ "message": msg });
+            log_activity(pool, "task.review_submitted", key, Some(&details)).await;
+        }
+
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Approve a reviewed task (in_review → closed).
+    ///
+    /// The `human` flag is accepted for forward-compatibility but the
+    /// different-reviewer guard is not enforced until session support
+    /// lands in PR C.
+    pub async fn task_approve(
+        pool: &ArangoPool,
+        key: &str,
+        _human: bool,
+    ) -> Result<Value, HandlerError> {
+        let updated = transition_task(pool, key, "closed", None).await?;
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Block a task with a reason and optional blocker dependency.
+    pub async fn task_block(
+        pool: &ArangoPool,
+        key: &str,
+        message: Option<&str>,
+        blocker: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::ArangoErrorKind;
+
+        // Guard: block_reason is required.
+        let reason = message.ok_or_else(|| HandlerError::InvalidParameter {
+            name: "message".into(),
+            reason: "a --message is required when blocking a task".into(),
+        })?;
+
+        // Validate blocker before any state mutation.
+        if let Some(blocker_key) = blocker {
+            if blocker_key == key {
+                return Err(HandlerError::InvalidParameter {
+                    name: "blocker".into(),
+                    reason: "a task cannot depend on itself".into(),
+                });
+            }
+
+            crud::get_document(pool, TASK_COLLECTION, blocker_key)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        HandlerError::DocumentNotFound {
+                            collection: TASK_COLLECTION.to_string(),
+                            key: blocker_key.to_string(),
+                        }
+                    } else {
+                        HandlerError::Query {
+                            context: format!("failed to verify blocker task '{blocker_key}'"),
+                            source: e,
+                        }
+                    }
+                })?;
+        }
+
+        // Transition task to blocked.
+        let extra = json!({ "block_reason": reason });
+        let updated = transition_task(pool, key, "blocked", Some(&extra)).await?;
+
+        // Create blocker dependency edge if specified.
+        if let Some(blocker_key) = blocker {
+            let edge_key = format!("{key}__blocked_by__{blocker_key}");
+            let now = chrono::Utc::now().to_rfc3339();
+            let edge = json!({
+                "_key": edge_key,
+                "_from": format!("{TASK_COLLECTION}/{key}"),
+                "_to": format!("{TASK_COLLECTION}/{blocker_key}"),
+                "type": "blocked_by",
+                "created_at": now,
+            });
+
+            // Propagate errors; duplicate-edge conflicts are idempotent success.
+            if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await
+                && !matches!(e.kind(), ArangoErrorKind::Conflict)
+            {
+                return Err(HandlerError::Query {
+                    context: format!(
+                        "failed to create blocked_by edge from '{key}' to '{blocker_key}'"
+                    ),
+                    source: e,
+                });
+            }
+        }
+
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Unblock a task (blocked → in_progress).
+    pub async fn task_unblock(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        let extra = json!({ "block_reason": null });
+        let updated = transition_task(pool, key, "in_progress", Some(&extra)).await?;
+        Ok(json!({ "task": updated }))
+    }
+
+    /// Create a handoff context snapshot for a task.
+    pub async fn task_handoff(
+        pool: &ArangoPool,
+        key: &str,
+        message: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::ArangoErrorKind;
+        use rand::Rng;
+
+        const MAX_KEY_ATTEMPTS: u32 = 3;
+
+        // Verify task exists.
+        crud::get_document(pool, TASK_COLLECTION, key)
+            .await
+            .map_err(get_task_error(key))?;
+
+        // Require at least one content field (note via --message).
+        let note = message.ok_or_else(|| HandlerError::InvalidParameter {
+            name: "message".into(),
+            reason: "a --message is required for handoff (at least one content field needed)".into(),
+        })?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for attempt in 0..MAX_KEY_ATTEMPTS {
+            let handoff_key = format!("handoff_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
+
+            let doc = json!({
+                "_key": handoff_key,
+                "task_key": key,
+                "session_key": null,
+                "done": [],
+                "remaining": [],
+                "decisions": [],
+                "uncertain": [],
+                "note": note,
+                "git_branch": null,
+                "git_sha": null,
+                "git_dirty_files": null,
+                "git_changed_files": [],
+                "created_at": now,
+            });
+
+            match crud::insert_document(pool, HANDOFF_COLLECTION, &doc).await {
+                Ok(_) => {
+                    // Create handoff_for edge: handoff → task.
+                    let edge_key = format!("{handoff_key}__handoff_for__{key}");
+                    let edge = json!({
+                        "_key": edge_key,
+                        "_from": format!("{HANDOFF_COLLECTION}/{handoff_key}"),
+                        "_to": format!("{TASK_COLLECTION}/{key}"),
+                        "type": "handoff_for",
+                        "created_at": now,
+                    });
+
+                    if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await {
+                        // Clean up the orphaned handoff document.
+                        if let Err(del_err) = crud::delete_document(pool, HANDOFF_COLLECTION, &handoff_key).await {
+                            tracing::warn!(
+                                handoff_key = %handoff_key,
+                                "failed to clean up orphaned handoff after edge insert failure: {del_err}"
+                            );
+                        }
+                        return Err(HandlerError::Query {
+                            context: format!(
+                                "failed to create handoff_for edge for handoff '{handoff_key}'"
+                            ),
+                            source: e,
+                        });
+                    }
+
+                    // Best-effort activity log (after both writes succeed).
+                    log_activity(pool, "handoff.created", key, None).await;
+
+                    return Ok(json!({ "handoff": doc }));
+                }
+                Err(e) if matches!(e.kind(), ArangoErrorKind::Conflict) => {
+                    if attempt == MAX_KEY_ATTEMPTS - 1 {
+                        return Err(HandlerError::Query {
+                            context: format!(
+                                "failed to create handoff after {MAX_KEY_ATTEMPTS} key-collision retries"
+                            ),
+                            source: e,
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: "failed to create handoff document".into(),
+                        source: e,
+                    });
+                }
+            }
+        }
+
+        unreachable!("loop always returns")
+    }
+
+    /// Show the latest handoff for a task.
+    pub async fn task_handoff_show(
+        pool: &ArangoPool,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        let aql = "\
+            FOR e IN @@edges \
+                FILTER e._to == @task_id \
+                FILTER e.type == \"handoff_for\" \
+                FOR h IN @@handoffs \
+                    FILTER h._id == e._from \
+                    SORT h.created_at DESC \
+                    LIMIT 1 \
+                    RETURN h";
+
+        let bind = json!({
+            "@edges": EDGE_COLLECTION,
+            "@handoffs": HANDOFF_COLLECTION,
+            "task_id": format!("{TASK_COLLECTION}/{key}"),
+        });
+
+        let result = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("failed to query handoffs for task '{key}'"),
+            source: e,
+        })?;
+
+        let handoff = result.results.into_iter().next().unwrap_or(Value::Null);
+        Ok(json!({ "handoff": handoff }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3842,5 +4310,168 @@ mod tests {
             "params": { "status": "open", "extra_field": true }
         });
         assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    // ── P7.5b: Workflow command roundtrip tests ─────────────────────
+
+    #[test]
+    fn test_command_roundtrip_task_review() {
+        let json = serde_json::json!({
+            "command": "task.review",
+            "params": { "key": "task_abc123", "message": "ready for review" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskReview(ref p) if p.key == "task_abc123"
+                && p.message.as_deref() == Some("ready for review")
+        ));
+
+        // Without message.
+        let json2 = serde_json::json!({
+            "command": "task.review",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd2: DaemonCommand = serde_json::from_value(json2).unwrap();
+        assert!(matches!(
+            cmd2,
+            DaemonCommand::TaskReview(ref p) if p.message.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_approve() {
+        let json = serde_json::json!({
+            "command": "task.approve",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskApprove(ref p) if p.key == "task_abc123" && !p.human
+        ));
+
+        // With human override.
+        let json2 = serde_json::json!({
+            "command": "task.approve",
+            "params": { "key": "task_abc123", "human": true }
+        });
+        let cmd2: DaemonCommand = serde_json::from_value(json2).unwrap();
+        assert!(matches!(
+            cmd2,
+            DaemonCommand::TaskApprove(ref p) if p.human
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_block() {
+        let json = serde_json::json!({
+            "command": "task.block",
+            "params": {
+                "key": "task_abc123",
+                "message": "blocked by infra",
+                "blocker": "task_def456"
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskBlock(ref p) if p.key == "task_abc123"
+                && p.message.as_deref() == Some("blocked by infra")
+                && p.blocker.as_deref() == Some("task_def456")
+        ));
+
+        // Without blocker.
+        let json2 = serde_json::json!({
+            "command": "task.block",
+            "params": { "key": "task_abc123", "message": "waiting" }
+        });
+        let cmd2: DaemonCommand = serde_json::from_value(json2).unwrap();
+        assert!(matches!(
+            cmd2,
+            DaemonCommand::TaskBlock(ref p) if p.blocker.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_unblock() {
+        let json = serde_json::json!({
+            "command": "task.unblock",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskUnblock(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_handoff() {
+        let json = serde_json::json!({
+            "command": "task.handoff",
+            "params": { "key": "task_abc123", "message": "context for next session" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskHandoff(ref p) if p.key == "task_abc123"
+                && p.message.as_deref() == Some("context for next session")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_task_handoff_show() {
+        let json = serde_json::json!({
+            "command": "task.handoff_show",
+            "params": { "key": "task_abc123" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::TaskHandoffShow(ref p) if p.key == "task_abc123"
+        ));
+    }
+
+    #[test]
+    fn test_deny_unknown_task_review() {
+        let json = serde_json::json!({
+            "command": "task.review",
+            "params": { "key": "task_abc123", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_task_handoff() {
+        let json = serde_json::json!({
+            "command": "task.handoff",
+            "params": { "key": "task_abc123", "message": "hi", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_valid_transitions_contains_review() {
+        use super::handlers::VALID_TRANSITIONS;
+        assert!(VALID_TRANSITIONS.contains(&("in_progress", "in_review")));
+    }
+
+    #[test]
+    fn test_valid_transitions_rejects_open_to_in_review() {
+        use super::handlers::VALID_TRANSITIONS;
+        assert!(!VALID_TRANSITIONS.contains(&("open", "in_review")));
+    }
+
+    #[test]
+    fn test_valid_transitions_contains_block() {
+        use super::handlers::VALID_TRANSITIONS;
+        assert!(VALID_TRANSITIONS.contains(&("in_progress", "blocked")));
+    }
+
+    #[test]
+    fn test_valid_transitions_rejects_closed_to_blocked() {
+        use super::handlers::VALID_TRANSITIONS;
+        assert!(!VALID_TRANSITIONS.contains(&("closed", "blocked")));
     }
 }

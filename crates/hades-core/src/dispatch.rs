@@ -2197,12 +2197,16 @@ mod handlers {
         pool: &ArangoPool,
         collection: &str,
     ) -> Result<Value, HandlerError> {
-        let count = count_collection(pool, collection)
-            .await
-            .map_err(|e| HandlerError::Query {
-                context: format!("failed to count '{collection}'"),
-                source: e,
-            })?;
+        let count = match count_collection(pool, collection).await {
+            Ok(n) => n,
+            Err(e) if e.is_not_found() => 0,
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: format!("failed to count '{collection}'"),
+                    source: e,
+                });
+            }
+        };
 
         // Schema sample: first document
         let sample_aql = "FOR d IN @@col LIMIT 1 RETURN d";

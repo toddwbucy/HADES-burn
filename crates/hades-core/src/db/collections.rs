@@ -118,6 +118,17 @@ impl CollectionProfile {
         Self::get(&name).unwrap_or(&ARXIV)
     }
 
+    /// Look up a profile by its metadata collection name.
+    ///
+    /// Used by purge to find related chunks/embeddings collections
+    /// given a document's metadata collection.
+    pub fn find_by_metadata(metadata_col: &str) -> Option<&'static CollectionProfile> {
+        ALL_PROFILES
+            .iter()
+            .find(|(_, p)| p.metadata == metadata_col)
+            .map(|(_, p)| *p)
+    }
+
     /// All registered profiles as `(name, profile)` pairs.
     pub fn all() -> &'static [(&'static str, &'static CollectionProfile)] {
         &ALL_PROFILES
@@ -207,5 +218,23 @@ mod tests {
         assert!(cols[..4].iter().all(|(_, t)| *t == 2));
         // Last one (edges) is an edge collection (type 3).
         assert_eq!(cols[4], ("codebase_edges", 3));
+    }
+
+    #[test]
+    fn test_find_by_metadata_arxiv() {
+        let p = CollectionProfile::find_by_metadata("arxiv_metadata").unwrap();
+        assert_eq!(p.chunks, "arxiv_abstract_chunks");
+        assert_eq!(p.embeddings, "arxiv_abstract_embeddings");
+    }
+
+    #[test]
+    fn test_find_by_metadata_codebase() {
+        let p = CollectionProfile::find_by_metadata("codebase_files").unwrap();
+        assert_eq!(p.chunks, "codebase_chunks");
+    }
+
+    #[test]
+    fn test_find_by_metadata_unknown() {
+        assert!(CollectionProfile::find_by_metadata("nonexistent").is_none());
     }
 }

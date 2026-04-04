@@ -400,6 +400,61 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::db_read::run_databases(&config, &format));
         }
+        // ── Native DB write commands ────────────────────────────────────
+        Commands::Db(commands::db::DbCmd::Insert { collection, data, input }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_insert(
+                &config, &collection, data.as_deref(), input.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Update { collection, key, data }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_update(
+                &config, &collection, &key, data.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Delete { collection, key, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_delete(
+                &config, &collection, &key, force,
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Purge { document_id, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_purge(
+                &config, &document_id, force,
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Create { name, r#type }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_create_collection(
+                &config, &name, &r#type,
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::CreateDatabase { name }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_create_database(&config, &name));
+        }
+        Commands::Db(commands::db::DbCmd::CreateIndex { collection, dimension, metric }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_create_index(
+                &config, collection.as_deref(), dimension, metric.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::BackfillText { collection, dry_run, batch_size }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_write::run_backfill_text(
+                &config, collection.as_deref(), dry_run, batch_size,
+            ));
+        }
         _ => {} // Fall through to Python passthrough.
     }
 

@@ -2969,16 +2969,15 @@ mod handlers {
         message: Option<&str>,
         blocker: Option<&str>,
     ) -> Result<Value, HandlerError> {
+        use crate::db::ArangoErrorKind;
+
         // Guard: block_reason is required.
         let reason = message.ok_or_else(|| HandlerError::InvalidParameter {
             name: "message".into(),
             reason: "a --message is required when blocking a task".into(),
         })?;
 
-        let extra = json!({ "block_reason": reason });
-        let updated = transition_task(pool, key, "blocked", Some(&extra)).await?;
-
-        // Create blocker dependency edge if specified.
+        // Validate blocker before any state mutation.
         if let Some(blocker_key) = blocker {
             if blocker_key == key {
                 return Err(HandlerError::InvalidParameter {
@@ -2987,7 +2986,6 @@ mod handlers {
                 });
             }
 
-            // Verify the blocker task exists.
             crud::get_document(pool, TASK_COLLECTION, blocker_key)
                 .await
                 .map_err(|e| {
@@ -3003,8 +3001,14 @@ mod handlers {
                         }
                     }
                 })?;
+        }
 
-            // Create blocked_by edge (idempotent — ignore conflict).
+        // Transition task to blocked.
+        let extra = json!({ "block_reason": reason });
+        let updated = transition_task(pool, key, "blocked", Some(&extra)).await?;
+
+        // Create blocker dependency edge if specified.
+        if let Some(blocker_key) = blocker {
             let edge_key = format!("{key}__blocked_by__{blocker_key}");
             let now = chrono::Utc::now().to_rfc3339();
             let edge = json!({
@@ -3014,8 +3018,18 @@ mod handlers {
                 "type": "blocked_by",
                 "created_at": now,
             });
-            // Best-effort: ignore conflict (edge already exists).
-            let _ = crud::insert_document(pool, EDGE_COLLECTION, &edge).await;
+
+            // Propagate errors; duplicate-edge conflicts are idempotent success.
+            if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await
+                && !matches!(e.kind(), ArangoErrorKind::Conflict)
+            {
+                return Err(HandlerError::Query {
+                    context: format!(
+                        "failed to create blocked_by edge from '{key}' to '{blocker_key}'"
+                    ),
+                    source: e,
+                });
+            }
         }
 
         Ok(json!({ "task": updated }))
@@ -3085,9 +3099,24 @@ mod handlers {
                         "type": "handoff_for",
                         "created_at": now,
                     });
-                    let _ = crud::insert_document(pool, EDGE_COLLECTION, &edge).await;
 
-                    // Best-effort activity log.
+                    if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await {
+                        // Clean up the orphaned handoff document.
+                        if let Err(del_err) = crud::delete_document(pool, HANDOFF_COLLECTION, &handoff_key).await {
+                            tracing::warn!(
+                                handoff_key = %handoff_key,
+                                "failed to clean up orphaned handoff after edge insert failure: {del_err}"
+                            );
+                        }
+                        return Err(HandlerError::Query {
+                            context: format!(
+                                "failed to create handoff_for edge for handoff '{handoff_key}'"
+                            ),
+                            source: e,
+                        });
+                    }
+
+                    // Best-effort activity log (after both writes succeed).
                     log_activity(pool, "handoff.created", key, None).await;
 
                     return Ok(json!({ "handoff": doc }));

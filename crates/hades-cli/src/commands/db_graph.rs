@@ -10,6 +10,14 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
+/// Connect, dispatch a command, and pretty-print the JSON result.
+async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand) -> Result<()> {
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
+    let result = dispatch::dispatch(&pool, config, cmd).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
 /// `hades db graph traverse START [--direction D] [--min-depth N] [--max-depth N] [--graph G]`
 pub async fn run_traverse(
     config: &HadesConfig,
@@ -19,9 +27,7 @@ pub async fn run_traverse(
     max_depth: u32,
     graph: Option<&str>,
 ) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(
-        &pool,
+    dispatch_and_print(
         config,
         DaemonCommand::DbGraphTraverse(dispatch::DbGraphTraverseParams {
             start: start.to_string(),
@@ -32,9 +38,7 @@ pub async fn run_traverse(
             graph: graph.map(String::from),
         }),
     )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    .await
 }
 
 /// `hades db graph shortest-path FROM TO [--graph G]`
@@ -44,9 +48,7 @@ pub async fn run_shortest_path(
     target: &str,
     graph: Option<&str>,
 ) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(
-        &pool,
+    dispatch_and_print(
         config,
         DaemonCommand::DbGraphShortestPath(dispatch::DbGraphShortestPathParams {
             source: source.to_string(),
@@ -55,9 +57,7 @@ pub async fn run_shortest_path(
             graph: graph.map(String::from),
         }),
     )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    .await
 }
 
 /// `hades db graph neighbors VERTEX [--direction D] [--limit N] [--graph G]`
@@ -68,9 +68,7 @@ pub async fn run_neighbors(
     limit: u32,
     graph: Option<&str>,
 ) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(
-        &pool,
+    dispatch_and_print(
         config,
         DaemonCommand::DbGraphNeighbors(dispatch::DbGraphNeighborsParams {
             vertex: vertex.to_string(),
@@ -79,17 +77,12 @@ pub async fn run_neighbors(
             graph: graph.map(String::from),
         }),
     )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    .await
 }
 
 /// `hades db graph list`
 pub async fn run_list(config: &HadesConfig) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(&pool, config, DaemonCommand::DbGraphList {}).await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    dispatch_and_print(config, DaemonCommand::DbGraphList {}).await
 }
 
 /// `hades db graph create NAME [--edge-definitions JSON]`
@@ -103,18 +96,14 @@ pub async fn run_create(
         .map(|s| serde_json::from_str(s).context("invalid --edge-definitions JSON"))
         .transpose()?;
 
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(
-        &pool,
+    dispatch_and_print(
         config,
         DaemonCommand::DbGraphCreate(dispatch::DbGraphCreateParams {
             name: name.to_string(),
             edge_definitions: edge_defs,
         }),
     )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    .await
 }
 
 /// `hades db graph drop NAME [--drop-collections] [--force]`
@@ -132,9 +121,7 @@ pub async fn run_drop(
     }
     config.require_writable_database()?;
 
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = dispatch::dispatch(
-        &pool,
+    dispatch_and_print(
         config,
         DaemonCommand::DbGraphDrop(dispatch::DbGraphDropParams {
             name: name.to_string(),
@@ -142,7 +129,5 @@ pub async fn run_drop(
             force,
         }),
     )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    .await
 }

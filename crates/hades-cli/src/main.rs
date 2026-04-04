@@ -455,6 +455,58 @@ fn main() -> anyhow::Result<()> {
                 &config, collection.as_deref(), dry_run, batch_size,
             ));
         }
+        // ── Native DB graph commands ──────────────────────────────────
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Traverse {
+            start, direction, min_depth, max_depth, graph, format: _,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_traverse(
+                &config, &start, &direction, min_depth, max_depth, graph.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::ShortestPath {
+            source, target, graph, format: _,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_shortest_path(
+                &config, &source, &target, graph.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Neighbors {
+            vertex, direction, limit, graph, format: _,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_neighbors(
+                &config, &vertex, &direction, limit, graph.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::List { format: _ })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_list(&config));
+        }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Create {
+            name, edge_definitions,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_create(
+                &config, &name, edge_definitions.as_deref(),
+            ));
+        }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Drop {
+            name, drop_collections, force,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_drop(
+                &config, &name, drop_collections, force,
+            ));
+        }
+        // Materialize falls through to Python passthrough.
         _ => {} // Fall through to Python passthrough.
     }
 

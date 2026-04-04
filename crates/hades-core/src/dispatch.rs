@@ -258,6 +258,66 @@ pub struct GraphEmbedNeighborsParams {
     pub limit: Option<u32>,
 }
 
+/// Params for `db.graph.traverse`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphTraverseParams {
+    pub start: String,
+    #[serde(default = "default_direction")]
+    pub direction: String,
+    #[serde(default = "default_one")]
+    pub min_depth: u32,
+    #[serde(default = "default_one")]
+    pub max_depth: u32,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.shortest_path`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphShortestPathParams {
+    pub source: String,
+    pub target: String,
+    #[serde(default = "default_direction_any")]
+    pub direction: String,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.neighbors`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphNeighborsParams {
+    pub vertex: String,
+    #[serde(default = "default_direction_any")]
+    pub direction: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub graph: Option<String>,
+}
+
+/// Params for `db.graph.create`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphCreateParams {
+    pub name: String,
+    #[serde(default)]
+    pub edge_definitions: Option<Value>,
+}
+
+/// Params for `db.graph.drop`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphDropParams {
+    pub name: String,
+    #[serde(default)]
+    pub drop_collections: bool,
+    /// Confirmation flag — daemon callers must set this to `true`.
+    #[serde(default)]
+    pub force: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -344,35 +404,22 @@ pub enum DaemonCommand {
 
     // ── Graph traversal ─────────────────────────────────────────────
     #[serde(rename = "db.graph.traverse")]
-    DbGraphTraverse {
-        start: String,
-        #[serde(default = "default_direction")]
-        direction: String,
-        #[serde(default = "default_one")]
-        min_depth: u32,
-        #[serde(default = "default_one")]
-        max_depth: u32,
-        graph: Option<String>,
-    },
+    DbGraphTraverse(DbGraphTraverseParams),
 
     #[serde(rename = "db.graph.shortest_path")]
-    DbGraphShortestPath {
-        source: String,
-        target: String,
-        graph: Option<String>,
-    },
+    DbGraphShortestPath(DbGraphShortestPathParams),
 
     #[serde(rename = "db.graph.neighbors")]
-    DbGraphNeighbors {
-        vertex: String,
-        #[serde(default = "default_direction_any")]
-        direction: String,
-        #[serde(default)]
-        limit: Option<u32>,
-    },
+    DbGraphNeighbors(DbGraphNeighborsParams),
 
     #[serde(rename = "db.graph.list")]
     DbGraphList {},
+
+    #[serde(rename = "db.graph.create")]
+    DbGraphCreate(DbGraphCreateParams),
+
+    #[serde(rename = "db.graph.drop")]
+    DbGraphDrop(DbGraphDropParams),
 
     // ── Embeddings ──────────────────────────────────────────────────
     #[serde(rename = "embed.text")]
@@ -595,6 +642,70 @@ pub async fn dispatch(
             .map_err(DispatchError::Handler)
         }
 
+        // ── Graph read commands ────────────────────────────────────────
+        DaemonCommand::DbGraphTraverse(params) => {
+            let limit = params.limit.unwrap_or(100).min(MAX_LIMIT);
+            handlers::db_graph_traverse(
+                pool,
+                &params.start,
+                &params.direction,
+                params.min_depth,
+                params.max_depth,
+                limit,
+                params.graph.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbGraphShortestPath(params) => {
+            handlers::db_graph_shortest_path(
+                pool,
+                &params.source,
+                &params.target,
+                &params.direction,
+                params.graph.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbGraphNeighbors(params) => {
+            let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
+            handlers::db_graph_neighbors(
+                pool,
+                &params.vertex,
+                &params.direction,
+                limit,
+                params.graph.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbGraphList {} => {
+            handlers::db_graph_list(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
+        // ── Graph write commands ──────────────────────────────────────
+        DaemonCommand::DbGraphCreate(params) => {
+            require_writable(config)?;
+            handlers::db_graph_create(pool, &params.name, params.edge_definitions.as_ref())
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbGraphDrop(params) => {
+            require_writable(config)?;
+            if !params.force {
+                return Err(DispatchError::Handler(HandlerError::InvalidParameter {
+                    name: "force".into(),
+                    reason: "graph drop requires force=true confirmation".into(),
+                }));
+            }
+            handlers::db_graph_drop(pool, &params.name, params.drop_collections)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
         // All other commands are not yet implemented natively.
         // The daemon (P6.3) will fall back to Python subprocess.
         other => Err(DispatchError::NotImplemented(
@@ -618,6 +729,7 @@ mod handlers {
     use crate::db::crud::{self, list_collections, count_collection, CollectionInfo};
     use crate::db::index;
     use crate::db::query::{self, ExecutionTarget};
+    use crate::graph::NL_GRAPH_SCHEMA;
     use crate::db::ArangoPool;
 
     // ── Database read handlers ──────────────────────────────────────
@@ -1542,6 +1654,305 @@ mod handlers {
 
         Ok((col, key))
     }
+
+    // ── Graph handlers ─────────────────────────────────────────────
+
+    /// Validate a graph name — must be non-empty and contain only
+    /// alphanumeric, underscore, or hyphen characters (ArangoDB identifier rules).
+    fn validate_graph_name(name: &str) -> Result<(), HandlerError> {
+        if name.is_empty() {
+            return Err(HandlerError::InvalidParameter {
+                name: "name".into(),
+                reason: "graph name must not be empty".into(),
+            });
+        }
+        if !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(HandlerError::InvalidParameter {
+                name: "name".into(),
+                reason: format!(
+                    "graph name '{name}' contains invalid characters — \
+                     only alphanumeric, underscore, and hyphen are allowed"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Map lowercase direction to AQL keyword.
+    pub(crate) fn validate_direction(direction: &str) -> Result<&'static str, HandlerError> {
+        match direction {
+            "outbound" => Ok("OUTBOUND"),
+            "inbound" => Ok("INBOUND"),
+            "any" => Ok("ANY"),
+            other => Err(HandlerError::InvalidParameter {
+                name: "direction".into(),
+                reason: format!(
+                    "must be 'outbound', 'inbound', or 'any', got '{other}'"
+                ),
+            }),
+        }
+    }
+
+    /// Default graph name used when the caller doesn't specify one.
+    const DEFAULT_GRAPH: &str = "nl_concept_map";
+
+    /// Maximum traversal depth to prevent runaway queries.
+    const MAX_TRAVERSAL_DEPTH: u32 = 20;
+
+    /// Graph traversal from a starting vertex.
+    pub async fn db_graph_traverse(
+        pool: &ArangoPool,
+        start: &str,
+        direction: &str,
+        min_depth: u32,
+        max_depth: u32,
+        limit: u32,
+        graph: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        // Validate start vertex format.
+        parse_node_id(start)?;
+        let dir_kw = validate_direction(direction)?;
+
+        if min_depth > MAX_TRAVERSAL_DEPTH {
+            return Err(HandlerError::InvalidParameter {
+                name: "min_depth".into(),
+                reason: format!(
+                    "min_depth ({min_depth}) exceeds maximum ({MAX_TRAVERSAL_DEPTH})"
+                ),
+            });
+        }
+        let max_depth = max_depth.min(MAX_TRAVERSAL_DEPTH);
+
+        if max_depth < min_depth {
+            return Err(HandlerError::InvalidParameter {
+                name: "max_depth".into(),
+                reason: format!(
+                    "max_depth ({max_depth}) must be >= min_depth ({min_depth})"
+                ),
+            });
+        }
+
+        let graph_name = graph.unwrap_or(DEFAULT_GRAPH);
+
+        // Direction is interpolated as a keyword — AQL doesn't support it as
+        // a bind variable.  Safe because validate_direction returns only one
+        // of three compile-time strings.
+        let aql = format!(
+            "FOR v, e IN @min_depth..@max_depth {dir_kw} @start GRAPH @graph \
+             LIMIT @limit \
+             RETURN {{vertex: v, edge: e}}"
+        );
+
+        let bind = json!({
+            "min_depth": min_depth,
+            "max_depth": max_depth,
+            "start": start,
+            "graph": graph_name,
+            "limit": limit,
+        });
+
+        let result = query::query(
+            pool,
+            &aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("graph traverse from '{start}'"),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "results": result.results,
+            "start": start,
+            "graph": graph_name,
+            "direction": direction,
+        }))
+    }
+
+    /// Find shortest path between two vertices.
+    pub async fn db_graph_shortest_path(
+        pool: &ArangoPool,
+        source: &str,
+        target: &str,
+        direction: &str,
+        graph: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        parse_node_id(source)?;
+        parse_node_id(target)?;
+        let dir_kw = validate_direction(direction)?;
+        let graph_name = graph.unwrap_or(DEFAULT_GRAPH);
+
+        let aql = format!(
+            "FOR v, e IN {dir_kw} SHORTEST_PATH @from_v TO @to_v GRAPH @graph \
+             RETURN {{vertex: v, edge: e}}"
+        );
+
+        let bind = json!({
+            "from_v": source,
+            "to_v": target,
+            "graph": graph_name,
+        });
+
+        let result = query::query(
+            pool,
+            &aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!("shortest path from '{source}' to '{target}'"),
+            source: e,
+        })?;
+
+        Ok(json!({
+            "results": result.results,
+            "from": source,
+            "to": target,
+            "graph": graph_name,
+            "direction": direction,
+        }))
+    }
+
+    /// Find neighbors of a vertex (depth-1 traversal).
+    pub async fn db_graph_neighbors(
+        pool: &ArangoPool,
+        vertex: &str,
+        direction: &str,
+        limit: u32,
+        graph: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        let traverse_result = db_graph_traverse(
+            pool, vertex, direction, 1, 1, limit, graph,
+        )
+        .await?;
+
+        Ok(json!({
+            "results": traverse_result["results"],
+            "vertex": vertex,
+            "direction": direction,
+        }))
+    }
+
+    /// List all named graphs via the Gharial API.
+    pub async fn db_graph_list(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        let resp = pool
+            .reader()
+            .get("gharial")
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "list graphs via Gharial API".into(),
+                source: e,
+            })?;
+
+        let graphs = resp
+            .get("graphs")
+            .and_then(|g| g.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mapped: Vec<Value> = graphs
+            .into_iter()
+            .map(|g| {
+                json!({
+                    "name": g.get("_key").or_else(|| g.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                    "edge_definitions": g.get("edgeDefinitions")
+                        .cloned()
+                        .unwrap_or(json!([])),
+                })
+            })
+            .collect();
+
+        Ok(json!({ "graphs": mapped }))
+    }
+
+    /// Create a named graph via the Gharial API.
+    pub async fn db_graph_create(
+        pool: &ArangoPool,
+        name: &str,
+        edge_definitions: Option<&Value>,
+    ) -> Result<Value, HandlerError> {
+        validate_graph_name(name)?;
+
+        let body = if let Some(defs) = edge_definitions {
+            if !defs.is_array() {
+                return Err(HandlerError::InvalidParameter {
+                    name: "edge_definitions".into(),
+                    reason: "must be a JSON array of edge definition objects".into(),
+                });
+            }
+            json!({
+                "name": name,
+                "edgeDefinitions": defs,
+            })
+        } else if let Some(graph_def) = NL_GRAPH_SCHEMA.get_named_graph(name) {
+            graph_def.to_gharial_payload()
+        } else {
+            return Err(HandlerError::InvalidParameter {
+                name: "name".into(),
+                reason: format!(
+                    "unknown graph '{name}' and no --edge-definitions provided — \
+                     known graphs: {}",
+                    NL_GRAPH_SCHEMA
+                        .all_named_graph_names()
+                        .join(", ")
+                ),
+            });
+        };
+
+        let edge_defs = body.get("edgeDefinitions").cloned().unwrap_or(json!([]));
+
+        pool.writer()
+            .post("gharial", &body)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("create graph '{name}'"),
+                source: e,
+            })?;
+
+        Ok(json!({
+            "graph": name,
+            "created": true,
+            "edge_definitions": edge_defs,
+        }))
+    }
+
+    /// Drop a named graph via the Gharial API.
+    pub async fn db_graph_drop(
+        pool: &ArangoPool,
+        name: &str,
+        drop_collections: bool,
+    ) -> Result<Value, HandlerError> {
+        validate_graph_name(name)?;
+        let path = format!("gharial/{name}?dropCollections={drop_collections}");
+
+        pool.writer()
+            .delete(&path)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("drop graph '{name}'"),
+                source: e,
+            })?;
+
+        Ok(json!({
+            "graph": name,
+            "dropped": true,
+            "collections_dropped": drop_collections,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2230,6 +2641,249 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             DispatchError::Handler(HandlerError::InvalidParameter { .. })
+        ));
+    }
+
+    // ── Graph command tests ────────────────────────────────────────
+
+    #[test]
+    fn test_command_roundtrip_graph_traverse() {
+        let json = serde_json::json!({
+            "command": "db.graph.traverse",
+            "params": {
+                "start": "hope_axioms/ax_001",
+                "direction": "outbound",
+                "min_depth": 1,
+                "max_depth": 3,
+                "limit": 50,
+                "graph": "nl_core"
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphTraverse(ref p)
+            if p.start == "hope_axioms/ax_001"
+                && p.direction == "outbound"
+                && p.min_depth == 1
+                && p.max_depth == 3
+                && p.limit == Some(50)
+                && p.graph.as_deref() == Some("nl_core")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_traverse_defaults() {
+        let json = serde_json::json!({
+            "command": "db.graph.traverse",
+            "params": { "start": "hope_axioms/ax_001" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphTraverse(ref p)
+            if p.start == "hope_axioms/ax_001"
+                && p.direction == "outbound"
+                && p.min_depth == 1
+                && p.max_depth == 1
+                && p.limit.is_none()
+                && p.graph.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_shortest_path() {
+        let json = serde_json::json!({
+            "command": "db.graph.shortest_path",
+            "params": {
+                "source": "hope_axioms/ax_001",
+                "target": "hope_axioms/ax_002",
+                "direction": "outbound",
+                "graph": "nl_core"
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphShortestPath(ref p)
+            if p.source == "hope_axioms/ax_001"
+                && p.target == "hope_axioms/ax_002"
+                && p.direction == "outbound"
+                && p.graph.as_deref() == Some("nl_core")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_shortest_path_defaults() {
+        let json = serde_json::json!({
+            "command": "db.graph.shortest_path",
+            "params": {
+                "source": "hope_axioms/ax_001",
+                "target": "hope_axioms/ax_002"
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphShortestPath(ref p)
+            if p.source == "hope_axioms/ax_001"
+                && p.target == "hope_axioms/ax_002"
+                && p.direction == "any"
+                && p.graph.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_neighbors() {
+        let json = serde_json::json!({
+            "command": "db.graph.neighbors",
+            "params": {
+                "vertex": "hope_axioms/ax_001",
+                "direction": "inbound",
+                "limit": 10,
+                "graph": "nl_core"
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphNeighbors(ref p)
+            if p.vertex == "hope_axioms/ax_001"
+                && p.direction == "inbound"
+                && p.limit == Some(10)
+                && p.graph.as_deref() == Some("nl_core")
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_list() {
+        let json = serde_json::json!({
+            "command": "db.graph.list",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::DbGraphList {}));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_create() {
+        let json = serde_json::json!({
+            "command": "db.graph.create",
+            "params": {
+                "name": "test_graph",
+                "edge_definitions": [
+                    {"collection": "edges", "from": ["v1"], "to": ["v2"]}
+                ]
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphCreate(ref p)
+            if p.name == "test_graph" && p.edge_definitions.is_some()
+        ));
+    }
+
+    #[test]
+    fn test_command_roundtrip_graph_drop() {
+        let json = serde_json::json!({
+            "command": "db.graph.drop",
+            "params": { "name": "test_graph", "drop_collections": true, "force": true }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            cmd,
+            DaemonCommand::DbGraphDrop(ref p)
+            if p.name == "test_graph" && p.drop_collections && p.force
+        ));
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_traverse() {
+        let json = serde_json::json!({
+            "command": "db.graph.traverse",
+            "params": { "start": "col/key", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_create() {
+        let json = serde_json::json!({
+            "command": "db.graph.create",
+            "params": { "name": "test", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_graph_drop() {
+        let json = serde_json::json!({
+            "command": "db.graph.drop",
+            "params": { "name": "test", "bogus": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_validate_direction() {
+        // Valid directions.
+        assert_eq!(
+            handlers::validate_direction("outbound").unwrap(),
+            "OUTBOUND"
+        );
+        assert_eq!(
+            handlers::validate_direction("inbound").unwrap(),
+            "INBOUND"
+        );
+        assert_eq!(handlers::validate_direction("any").unwrap(), "ANY");
+
+        // Invalid directions.
+        assert!(handlers::validate_direction("backwards").is_err());
+        assert!(handlers::validate_direction("OUTBOUND").is_err());
+        assert!(handlers::validate_direction("").is_err());
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_graph_create() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default(); // NestedLearning — production
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbGraphCreate(DbGraphCreateParams {
+                name: "test".into(),
+                edge_definitions: None,
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
+    #[test]
+    fn test_write_denied_on_production_db_graph_drop() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default(); // NestedLearning — production
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbGraphDrop(DbGraphDropParams {
+                name: "test".into(),
+                drop_collections: false,
+                force: true,
+            }),
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
         ));
     }
 }

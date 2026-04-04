@@ -362,6 +362,10 @@ pub enum DbGraphCmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: u32,
 
+        /// Graph name.
+        #[arg(short = 'g', long)]
+        graph: Option<String>,
+
         /// Output format.
         #[arg(short = 'f', long, default_value = "table")]
         format: String,

@@ -125,8 +125,91 @@ impl DaemonResponse {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Param structs (deny_unknown_fields for implemented commands)
+// Param structs (deny_unknown_fields for strict wire protocol validation)
 // ---------------------------------------------------------------------------
+
+/// Params for `db.aql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbAqlParams {
+    pub aql: String,
+    #[serde(default)]
+    pub bind: Option<Value>,
+    pub limit: Option<u32>,
+}
+
+/// Params for `db.get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGetParams {
+    pub collection: String,
+    pub key: String,
+}
+
+/// Params for `db.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbListParams {
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    pub paper: Option<String>,
+}
+
+/// Params for `db.insert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbInsertParams {
+    pub collection: String,
+    pub data: Value,
+}
+
+/// Params for `db.update`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbUpdateParams {
+    pub collection: String,
+    pub key: String,
+    pub data: Value,
+}
+
+/// Params for `db.delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbDeleteParams {
+    pub collection: String,
+    pub key: String,
+}
+
+/// Params for `db.count`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCountParams {
+    pub collection: String,
+}
+
+/// Params for `db.health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbHealthParams {
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+/// Params for `db.check`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbCheckParams {
+    pub document_id: String,
+}
+
+/// Params for `db.recent`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbRecentParams {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
 
 /// Params for `graph_embed.embed`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,50 +267,25 @@ pub enum DaemonCommand {
     },
 
     #[serde(rename = "db.aql")]
-    DbAql {
-        aql: String,
-        #[serde(default)]
-        bind: Option<Value>,
-        limit: Option<u32>,
-    },
+    DbAql(DbAqlParams),
 
     #[serde(rename = "db.get")]
-    DbGet {
-        collection: String,
-        key: String,
-    },
+    DbGet(DbGetParams),
 
     #[serde(rename = "db.list")]
-    DbList {
-        collection: Option<String>,
-        #[serde(default)]
-        limit: Option<u32>,
-        paper: Option<String>,
-    },
+    DbList(DbListParams),
 
     #[serde(rename = "db.insert")]
-    DbInsert {
-        collection: String,
-        data: Value,
-    },
+    DbInsert(DbInsertParams),
 
     #[serde(rename = "db.update")]
-    DbUpdate {
-        collection: String,
-        key: String,
-        data: Value,
-    },
+    DbUpdate(DbUpdateParams),
 
     #[serde(rename = "db.delete")]
-    DbDelete {
-        collection: String,
-        key: String,
-    },
+    DbDelete(DbDeleteParams),
 
     #[serde(rename = "db.count")]
-    DbCount {
-        collection: String,
-    },
+    DbCount(DbCountParams),
 
     #[serde(rename = "db.collections")]
     DbCollections {},
@@ -236,21 +294,13 @@ pub enum DaemonCommand {
     DbStats {},
 
     #[serde(rename = "db.health")]
-    DbHealth {
-        #[serde(default)]
-        verbose: bool,
-    },
+    DbHealth(DbHealthParams),
 
     #[serde(rename = "db.check")]
-    DbCheck {
-        document_id: String,
-    },
+    DbCheck(DbCheckParams),
 
     #[serde(rename = "db.recent")]
-    DbRecent {
-        #[serde(default)]
-        limit: Option<u32>,
-    },
+    DbRecent(DbRecentParams),
 
     // ── Graph traversal ─────────────────────────────────────────────
     #[serde(rename = "db.graph.traverse")]
@@ -400,13 +450,13 @@ pub async fn dispatch(
         }
 
         // ── Database read commands ─────────────────────────────────────
-        DaemonCommand::DbGet { collection, key } => {
-            handlers::db_get(pool, &collection, &key)
+        DaemonCommand::DbGet(params) => {
+            handlers::db_get(pool, &params.collection, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbCount { collection } => {
-            handlers::db_count(pool, &collection)
+        DaemonCommand::DbCount(params) => {
+            handlers::db_count(pool, &params.collection)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -415,31 +465,31 @@ pub async fn dispatch(
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbCheck { document_id } => {
-            handlers::db_check(pool, &document_id)
+        DaemonCommand::DbCheck(params) => {
+            handlers::db_check(pool, &params.document_id)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbRecent { limit } => {
-            let limit = limit.unwrap_or(10).min(MAX_LIMIT);
+        DaemonCommand::DbRecent(params) => {
+            let limit = params.limit.unwrap_or(10).min(MAX_LIMIT);
             handlers::db_recent(pool, limit)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbList { collection, limit, paper } => {
-            let limit = limit.unwrap_or(20).min(MAX_LIMIT);
-            handlers::db_list(pool, collection.as_deref(), limit, paper.as_deref())
+        DaemonCommand::DbList(params) => {
+            let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
+            handlers::db_list(pool, params.collection.as_deref(), limit, params.paper.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbAql { aql, bind, limit } => {
-            let limit = limit.map(|l| l.min(MAX_LIMIT));
-            handlers::db_aql(pool, &aql, bind.as_ref(), limit)
+        DaemonCommand::DbAql(params) => {
+            let limit = params.limit.map(|l| l.min(MAX_LIMIT));
+            handlers::db_aql(pool, &params.aql, params.bind.as_ref(), limit)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbHealth { verbose } => {
-            handlers::db_health(pool, verbose)
+        DaemonCommand::DbHealth(params) => {
+            handlers::db_health(pool, params.verbose)
                 .await
                 .map_err(DispatchError::Handler)
         }
@@ -716,10 +766,11 @@ mod handlers {
         limit: Option<u32>,
     ) -> Result<Value, HandlerError> {
         // Reject mutating AQL — this handler is read-only.
-        let upper = aql.to_uppercase();
+        // Strip string literals and comments first so keywords inside
+        // strings like "INSERT TITLE" don't trigger false positives.
+        let stripped = strip_aql_strings_and_comments(aql);
+        let upper = stripped.to_uppercase();
         for keyword in &["INSERT", "UPDATE", "REPLACE", "REMOVE", "UPSERT"] {
-            // Check for standalone keywords (not inside quoted strings).
-            // Simple heuristic: keyword preceded by whitespace or at start.
             if upper.split_whitespace().any(|w| w == *keyword) {
                 return Err(HandlerError::InvalidParameter {
                     name: "aql".into(),
@@ -1078,6 +1129,78 @@ mod handlers {
         }))
     }
 
+    /// Strip string literals and comments from AQL so keyword detection
+    /// doesn't trigger on values like `"INSERT TITLE HERE"`.
+    ///
+    /// Handles single-quoted, double-quoted, and backtick-quoted strings
+    /// (with backslash escapes), plus `//` line comments and `/* */` block
+    /// comments.  Replaced regions become spaces to preserve token boundaries.
+    fn strip_aql_strings_and_comments(aql: &str) -> String {
+        let mut out = String::with_capacity(aql.len());
+        let bytes = aql.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            let b = bytes[i];
+
+            // Line comment: // ... \n
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+                while i < len && bytes[i] != b'\n' {
+                    out.push(' ');
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Block comment: /* ... */
+            if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                while i < len {
+                    if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                        break;
+                    }
+                    out.push(' ');
+                    i += 1;
+                }
+                continue;
+            }
+
+            // String literal: '...', "...", `...` (with backslash escapes)
+            if b == b'\'' || b == b'"' || b == b'`' {
+                let quote = b;
+                out.push(' '); // replace opening quote
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        // Escaped character — skip both bytes.
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        out.push(' '); // replace closing quote
+                        i += 1;
+                        break;
+                    } else {
+                        out.push(' ');
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+
+            out.push(b as char);
+            i += 1;
+        }
+
+        out
+    }
+
     /// Parse and validate a `collection/key` node ID.
     pub(super) fn parse_node_id(node_id: &str) -> Result<(&str, &str), HandlerError> {
         let (col, key) = node_id
@@ -1255,8 +1378,8 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbGet { ref collection, ref key }
-                if collection == "arxiv_metadata" && key == "2409_04701"
+            DaemonCommand::DbGet(ref p)
+                if p.collection == "arxiv_metadata" && p.key == "2409_04701"
         ));
     }
 
@@ -1269,7 +1392,7 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbAql { ref aql, limit: Some(5), .. } if aql == "RETURN 1"
+            DaemonCommand::DbAql(ref p) if p.aql == "RETURN 1" && p.limit == Some(5)
         ));
     }
 
@@ -1292,7 +1415,7 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbCount { ref collection } if collection == "chunks"
+            DaemonCommand::DbCount(ref p) if p.collection == "chunks"
         ));
     }
 
@@ -1305,7 +1428,7 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbCheck { ref document_id } if document_id == "arxiv_metadata/2409_04701"
+            DaemonCommand::DbCheck(ref p) if p.document_id == "arxiv_metadata/2409_04701"
         ));
     }
 
@@ -1318,7 +1441,7 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbRecent { limit: None }
+            DaemonCommand::DbRecent(ref p) if p.limit.is_none()
         ));
     }
 
@@ -1331,8 +1454,8 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbList { ref collection, limit: Some(50), .. }
-                if collection.as_deref() == Some("sync")
+            DaemonCommand::DbList(ref p)
+                if p.collection.as_deref() == Some("sync") && p.limit == Some(50)
         ));
     }
 
@@ -1345,7 +1468,7 @@ mod tests {
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbHealth { verbose: true }
+            DaemonCommand::DbHealth(ref p) if p.verbose
         ));
     }
 
@@ -1359,6 +1482,24 @@ mod tests {
         assert!(matches!(cmd, DaemonCommand::DbStats {}));
     }
 
+    #[test]
+    fn test_deny_unknown_fields_db_get() {
+        let json = serde_json::json!({
+            "command": "db.get",
+            "params": { "collection": "test", "key": "k", "extra": true }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_db_aql() {
+        let json = serde_json::json!({
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1", "bogus": 42 }
+        });
+        assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
     // -- AQL read-only enforcement --------------------------------------------
 
     #[test]
@@ -1370,11 +1511,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbAql {
+            DaemonCommand::DbAql(DbAqlParams {
                 aql: "INSERT { foo: 1 } INTO test".to_string(),
                 bind: None,
                 limit: None,
-            },
+            }),
         ));
 
         assert!(result.is_err());
@@ -1391,11 +1532,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbAql {
+            DaemonCommand::DbAql(DbAqlParams {
                 aql: "FOR d IN test REMOVE d IN test".to_string(),
                 bind: None,
                 limit: None,
-            },
+            }),
         ));
 
         assert!(result.is_err());
@@ -1412,11 +1553,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbAql {
+            DaemonCommand::DbAql(DbAqlParams {
                 aql: "FOR d IN test UPDATE d WITH { x: 1 } IN test".to_string(),
                 bind: None,
                 limit: None,
-            },
+            }),
         ));
 
         assert!(result.is_err());
@@ -1433,11 +1574,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbAql {
+            DaemonCommand::DbAql(DbAqlParams {
                 aql: "RETURN 1".to_string(),
                 bind: None,
                 limit: None,
-            },
+            }),
         ));
 
         // This will fail with a connection error (ArangoDB not running in test),
@@ -1447,6 +1588,58 @@ mod tests {
                 panic!("RETURN 1 should not be rejected as mutating AQL");
             }
             _ => {} // Connection error or success — both acceptable.
+        }
+    }
+
+    // -- AQL string stripping -------------------------------------------------
+
+    #[test]
+    fn test_db_aql_allows_insert_in_string() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        // The word INSERT appears inside a string literal — should NOT be rejected.
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: r#"FOR d IN test FILTER d.title == "INSERT TITLE HERE" RETURN d"#.to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("INSERT inside a string literal should not be rejected");
+            }
+            _ => {} // Connection error or success — both acceptable.
+        }
+    }
+
+    #[test]
+    fn test_db_aql_allows_update_in_comment() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        // The word UPDATE appears inside a comment — should NOT be rejected.
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::DbAql(DbAqlParams {
+                aql: "FOR d IN test /* UPDATE note */ RETURN d".to_string(),
+                bind: None,
+                limit: None,
+            }),
+        ));
+
+        match result {
+            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
+                panic!("UPDATE inside a comment should not be rejected");
+            }
+            _ => {}
         }
     }
 
@@ -1461,11 +1654,11 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::DbList {
+            DaemonCommand::DbList(DbListParams {
                 collection: Some("nonexistent_profile".into()),
                 limit: Some(10),
                 paper: None,
-            },
+            }),
         ));
 
         assert!(result.is_err());

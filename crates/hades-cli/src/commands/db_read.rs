@@ -12,21 +12,32 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
+/// Validate the `--format` flag.  Currently only `"json"` is supported
+/// (per CLAUDE.md: "All CLI output is JSON to stdout").
+fn validate_format(format: &str) -> Result<()> {
+    if format == "json" {
+        Ok(())
+    } else {
+        anyhow::bail!("unsupported format '{format}' — only 'json' is currently supported")
+    }
+}
+
 /// `hades db get <collection> <key> [--format F]`
 pub async fn run_get(
     config: &HadesConfig,
     collection: &str,
     key: &str,
-    _format: &str,
+    format: &str,
 ) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbGet {
+        DaemonCommand::DbGet(dispatch::DbGetParams {
             collection: collection.to_string(),
             key: key.to_string(),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -39,9 +50,9 @@ pub async fn run_count(config: &HadesConfig, collection: &str) -> Result<()> {
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbCount {
+        DaemonCommand::DbCount(dispatch::DbCountParams {
             collection: collection.to_string(),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -49,7 +60,8 @@ pub async fn run_count(config: &HadesConfig, collection: &str) -> Result<()> {
 }
 
 /// `hades db collections [--format F]`
-pub async fn run_collections(config: &HadesConfig, _format: &str) -> Result<()> {
+pub async fn run_collections(config: &HadesConfig, format: &str) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(&pool, config, DaemonCommand::DbCollections {}).await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -62,9 +74,9 @@ pub async fn run_check(config: &HadesConfig, document_id: &str) -> Result<()> {
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbCheck {
+        DaemonCommand::DbCheck(dispatch::DbCheckParams {
             document_id: document_id.to_string(),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -72,12 +84,13 @@ pub async fn run_check(config: &HadesConfig, document_id: &str) -> Result<()> {
 }
 
 /// `hades db recent [--limit N] [--format F]`
-pub async fn run_recent(config: &HadesConfig, limit: u32, _format: &str) -> Result<()> {
+pub async fn run_recent(config: &HadesConfig, limit: u32, format: &str) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbRecent { limit: Some(limit) },
+        DaemonCommand::DbRecent(dispatch::DbRecentParams { limit: Some(limit) }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -90,17 +103,18 @@ pub async fn run_list(
     collection: Option<&str>,
     limit: u32,
     paper: Option<&str>,
-    _format: &str,
+    format: &str,
 ) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbList {
+        DaemonCommand::DbList(dispatch::DbListParams {
             collection: collection.map(String::from),
             limit: Some(limit),
             paper: paper.map(String::from),
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -113,21 +127,36 @@ pub async fn run_aql(
     aql: &str,
     bind: Option<&str>,
     limit: Option<u32>,
-    _format: &str,
+    format: &str,
 ) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let bind_value = match bind {
-        Some(s) => Some(serde_json::from_str(s).context("invalid --bind JSON")?),
+        Some(s) => {
+            let v: serde_json::Value =
+                serde_json::from_str(s).context("invalid --bind JSON")?;
+            if !v.is_object() {
+                anyhow::bail!("invalid --bind: must be a JSON object, got {}", match &v {
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Null => "null",
+                    _ => "non-object",
+                });
+            }
+            Some(v)
+        }
         None => None,
     };
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbAql {
+        DaemonCommand::DbAql(dispatch::DbAqlParams {
             aql: aql.to_string(),
             bind: bind_value,
             limit,
-        },
+        }),
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -140,7 +169,7 @@ pub async fn run_health(config: &HadesConfig, verbose: bool) -> Result<()> {
     let data = dispatch::dispatch(
         &pool,
         config,
-        DaemonCommand::DbHealth { verbose },
+        DaemonCommand::DbHealth(dispatch::DbHealthParams { verbose }),
     )
     .await?;
 
@@ -150,7 +179,8 @@ pub async fn run_health(config: &HadesConfig, verbose: bool) -> Result<()> {
 }
 
 /// `hades db stats [--format F]`
-pub async fn run_stats(config: &HadesConfig, _format: &str) -> Result<()> {
+pub async fn run_stats(config: &HadesConfig, format: &str) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(&pool, config, DaemonCommand::DbStats {}).await?;
     println!("{}", serde_json::to_string_pretty(&data)?);
@@ -166,9 +196,10 @@ pub async fn run_export(
     config: &HadesConfig,
     collection: &str,
     output: Option<&std::path::Path>,
-    _format: &str,
+    format: &str,
     limit: Option<u32>,
 ) -> Result<()> {
+    validate_format(format)?;
     use std::io::Write;
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
@@ -253,8 +284,9 @@ pub async fn run_export(
 pub async fn run_index_status(
     config: &HadesConfig,
     collection: Option<&str>,
-    _format: &str,
+    format: &str,
 ) -> Result<()> {
+    validate_format(format)?;
     use hades_core::db::collections::CollectionProfile;
     use hades_core::db::index;
 
@@ -298,7 +330,8 @@ pub async fn run_index_status(
 /// `hades db databases [--format F]`
 ///
 /// CLI-only — lists accessible databases.
-pub async fn run_databases(config: &HadesConfig, _format: &str) -> Result<()> {
+pub async fn run_databases(config: &HadesConfig, format: &str) -> Result<()> {
+    validate_format(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let resp = pool
         .reader()

@@ -519,7 +519,62 @@ fn main() -> anyhow::Result<()> {
                 &config, collection.as_deref(), &format,
             ));
         }
-        // Materialize falls through to Python passthrough.
+        // ── Native task commands ───────────────────────────────────────
+        Commands::Task(commands::task::TaskCmd::List {
+            status, r#type, parent, limit, format,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_list(
+                &config, status.as_deref(), r#type.as_deref(), parent.as_deref(), limit, &format,
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Show { key, format }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_show(&config, &key, &format));
+        }
+        Commands::Task(commands::task::TaskCmd::Create {
+            title, description, r#type, parent, priority, tags,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_create(
+                &config, &title, description.as_deref(), &r#type,
+                parent.as_deref(), priority.as_deref(), &tags,
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Update {
+            key, title, description, priority, add_tags, remove_tags,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_update(
+                &config,
+                hades_core::dispatch::TaskUpdateParams {
+                    key,
+                    title,
+                    description,
+                    priority,
+                    status: None,
+                    add_tags,
+                    remove_tags,
+                },
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Close { key, message }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_close(
+                &config, &key, message.as_deref(),
+            ));
+        }
+        Commands::Task(commands::task::TaskCmd::Start { key }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::task_mgmt::run_start(&config, &key));
+        }
+        // Remaining task commands + materialize fall through to Python passthrough.
         _ => {} // Fall through to Python passthrough.
     }
 

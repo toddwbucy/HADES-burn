@@ -31,6 +31,7 @@ roxmltree.workspace = true
 chrono.workspace = true
 urlencoding.workspace = true
 tokio-util.workspace = true
+rand.workspace = true
 
 # Code analysis
 rustpython-parser.workspace = true

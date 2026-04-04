@@ -13,7 +13,7 @@ pub enum TaskCmd {
         #[arg(short = 'd', long)]
         description: Option<String>,
 
-        /// Task type (epic, task, subtask).
+        /// Task type (task, bug, epic).
         #[arg(short = 't', long, default_value = "task")]
         r#type: String,
 
@@ -21,9 +21,9 @@ pub enum TaskCmd {
         #[arg(short = 'p', long)]
         parent: Option<String>,
 
-        /// Priority (1=highest, 5=lowest).
+        /// Priority (critical, high, medium, low).
         #[arg(long)]
-        priority: Option<u32>,
+        priority: Option<String>,
 
         /// Tags.
         #[arg(long)]
@@ -36,7 +36,7 @@ pub enum TaskCmd {
         #[arg(short = 's', long)]
         status: Option<String>,
 
-        /// Filter by type (epic, task, subtask).
+        /// Filter by type (task, bug, epic).
         #[arg(short = 't', long)]
         r#type: Option<String>,
 
@@ -76,9 +76,9 @@ pub enum TaskCmd {
         #[arg(short = 'd', long)]
         description: Option<String>,
 
-        /// New priority.
+        /// New priority (critical, high, medium, low).
         #[arg(long)]
-        priority: Option<u32>,
+        priority: Option<String>,
 
         /// Add tags.
         #[arg(long)]

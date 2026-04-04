@@ -20,3 +20,4 @@ pub mod ingest;
 pub mod smell;
 pub mod system;
 pub mod task;
+pub mod task_mgmt;

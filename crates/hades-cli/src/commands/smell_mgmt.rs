@@ -166,8 +166,12 @@ pub async fn run_link(
     config: &HadesConfig,
     source_id: &str,
     claims: &[String],
-    _force: bool,
+    force: bool,
 ) -> Result<()> {
+    if force {
+        anyhow::bail!("--force is not yet implemented for link");
+    }
+    config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     for claim in claims {

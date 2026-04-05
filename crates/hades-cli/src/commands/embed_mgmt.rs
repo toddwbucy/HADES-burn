@@ -340,16 +340,42 @@ fn extract_latex(file: &Path) -> Result<String> {
     }
 }
 
-/// Strip HTML tags with a simple regex-free approach.
+/// Strip HTML tags, suppressing content inside `<script>` and `<style>` blocks.
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut tag_buf = String::new();
+    let mut ignored: Option<&'static str> = None; // "script" or "style"
+
     for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
+        if in_tag {
+            if ch == '>' {
+                in_tag = false;
+                let tag = tag_buf.trim().to_ascii_lowercase();
+                // Check for opening ignored tags (handle attributes: "script type=...")
+                let tag_name = tag.split_whitespace().next().unwrap_or("");
+                if tag_name == "script" || tag_name == "style" {
+                    ignored = if tag_name == "script" {
+                        Some("script")
+                    } else {
+                        Some("style")
+                    };
+                }
+                // Check for closing ignored tags
+                if let Some(name) = ignored {
+                    let close = format!("/{name}");
+                    if tag_name == close {
+                        ignored = None;
+                    }
+                }
+                tag_buf.clear();
+            } else {
+                tag_buf.push(ch);
+            }
+        } else if ch == '<' {
+            in_tag = true;
+        } else if ignored.is_none() {
+            result.push(ch);
         }
     }
     result
@@ -397,6 +423,23 @@ mod tests {
         assert_eq!(
             strip_html_tags("<html><body><p>Hello <b>world</b></p></body></html>"),
             "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_strip_html_script_style() {
+        assert_eq!(
+            strip_html_tags("<p>before</p><script>var x=1;</script><p>after</p>"),
+            "beforeafter"
+        );
+        assert_eq!(
+            strip_html_tags("<style type=\"text/css\">.foo{color:red}</style><p>text</p>"),
+            "text"
+        );
+        // Case-insensitive and with attributes
+        assert_eq!(
+            strip_html_tags("<SCRIPT type=\"module\">import x;</SCRIPT>visible"),
+            "visible"
         );
     }
 

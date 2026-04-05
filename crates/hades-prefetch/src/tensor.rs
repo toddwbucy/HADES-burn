@@ -497,19 +497,21 @@ pub fn serialize_graph_for_inference(
 }
 
 /// Write inference-only safetensors to disk (atomic write).
+///
+/// Uses a unique temp file in the target directory to avoid collisions
+/// with concurrent writers, then atomically persists to the final path.
 pub fn serialize_graph_for_inference_to_file(
     path: &Path,
     graph: &GraphData,
 ) -> Result<(), TensorError> {
     let bytes = serialize_graph_for_inference(graph)?;
 
-    let tmp_path = path.with_extension("safetensors.tmp");
-    let mut file = fs::File::create(&tmp_path)?;
-    file.write_all(&bytes)?;
-    file.flush()?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp_path, path)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(&bytes)?;
+    tmp.flush()?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(std::io::Error::from)?;
 
     info!(
         path = %path.display(),

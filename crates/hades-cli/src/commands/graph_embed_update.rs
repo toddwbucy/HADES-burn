@@ -81,7 +81,7 @@ pub async fn run(
         hades_prefetch::serialize_graph_for_inference_to_file(&path, &graph_ref)
     })
     .await
-    .expect("serialization task panicked")
+    .map_err(|e| anyhow::anyhow!("serialization task panicked: {e}"))?
     .context("failed to serialize graph")?;
 
     // ── Load checkpoint + graph onto GPU ────────────────────────────

@@ -73,6 +73,10 @@ pub enum HandlerError {
         #[source]
         source: ArangoError,
     },
+
+    /// An external service call failed.
+    #[error("service error: {0}")]
+    ServiceError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -995,6 +999,13 @@ pub async fn dispatch(
         }
         DaemonCommand::TaskGraphIntegration(_) => {
             Ok(handlers::task_graph_integration())
+        }
+
+        // ── Embedding ─────────────────────────────────────────────────
+        DaemonCommand::EmbedText { text } => {
+            handlers::embed_text(config, &text)
+                .await
+                .map_err(DispatchError::Handler)
         }
 
         // All other commands are not yet implemented natively.
@@ -3668,6 +3679,38 @@ mod handlers {
             ]
         })
     }
+
+    // ── Embedding handlers ────────────────────────────────────────────
+
+    /// Embed a single text via the HTTP embedder service.
+    pub async fn embed_text(
+        config: &crate::config::HadesConfig,
+        text: &str,
+    ) -> Result<Value, HandlerError> {
+        use crate::persephone::embedder_http::EmbedderHttpClient;
+
+        let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+        let result = client
+            .embed_text(text, "retrieval.passage")
+            .await
+            .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
+
+        let preview_len = 10.min(result.embedding.len());
+        let text_preview = if text.len() > 100 {
+            format!("{}...", &text[..100])
+        } else {
+            text.to_string()
+        };
+
+        Ok(json!({
+            "text": text_preview,
+            "dimension": result.dimension,
+            "model": result.model,
+            "embedding_preview": &result.embedding[..preview_len],
+            "embedding_truncated": result.embedding.len() > preview_len,
+            "duration_ms": result.duration_ms,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5079,5 +5122,23 @@ mod tests {
             "params": { "key": "task_abc123", "extra": true }
         });
         assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
+    }
+
+    // ── Embedding command tests ───────────────────────────────────────
+
+    #[test]
+    fn test_command_roundtrip_embed_text() {
+        let json = serde_json::json!({
+            "command": "embed.text",
+            "params": { "text": "hello world" }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        match cmd {
+            DaemonCommand::EmbedText { ref text } => assert_eq!(text, "hello world"),
+            other => panic!("expected EmbedText, got {other:?}"),
+        }
+        // Round-trip
+        let serialized = serde_json::to_value(&cmd).unwrap();
+        let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
     }
 }

@@ -146,10 +146,9 @@ impl EmbedderHttpClient {
             .map_err(|e| EmbedderError::Connection(e.to_string()))?;
 
         let status = response.status();
-        let body_bytes = response
-            .into_body()
-            .collect()
+        let body_bytes = tokio::time::timeout(timeout, response.into_body().collect())
             .await
+            .map_err(|_| EmbedderError::Timeout(timeout.as_secs()))?
             .map_err(|e| EmbedderError::Connection(e.to_string()))?
             .to_bytes();
 

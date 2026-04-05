@@ -3696,8 +3696,10 @@ mod handlers {
             .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
 
         let preview_len = 10.min(result.embedding.len());
-        let text_preview = if text.len() > 100 {
-            format!("{}...", &text[..100])
+        let text_preview: String = if text.chars().count() > 100 {
+            let mut s: String = text.chars().take(100).collect();
+            s.push_str("...");
+            s
         } else {
             text.to_string()
         };
@@ -3706,6 +3708,7 @@ mod handlers {
             "text": text_preview,
             "dimension": result.dimension,
             "model": result.model,
+            "embedding": result.embedding,
             "embedding_preview": &result.embedding[..preview_len],
             "embedding_truncated": result.embedding.len() > preview_len,
             "duration_ms": result.duration_ms,

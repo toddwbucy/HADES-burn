@@ -1,36 +1,54 @@
 //! Native Rust handlers for `hades embed` and `hades extract` commands.
 //!
-//! `embed text` goes through dispatch; all other commands are CLI-only
-//! (service management, GPU info, file extraction).
+//! All commands are CLI-only — they call the embedder HTTP service, systemctl,
+//! nvidia-smi, or read files directly.  `embed text` also has a dispatch arm
+//! for daemon socket clients, but the CLI adapter calls the embedder directly
+//! to avoid requiring an ArangoDB connection.
 
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use hades_core::config::HadesConfig;
-use hades_core::db::ArangoPool;
-use hades_core::dispatch::{self, DaemonCommand};
 use hades_core::persephone::embedder_http::EmbedderHttpClient;
 
-// ── embed text (dispatch-routed) ─────────────────────────────────────────
+// ── embed text (direct HTTP, no ArangoDB needed) ─────────────────────────
 
 /// `hades embed text TEXT [--format F]`
 pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let cmd = DaemonCommand::EmbedText {
-        text: text.to_string(),
-    };
-    let result = dispatch::dispatch(&pool, config, cmd).await?;
+    let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+    let result = client
+        .embed_text(text, "retrieval.passage")
+        .await
+        .context("embedding service error")?;
+
     match format {
         "raw" => {
-            // Output just the embedding values for piping
-            if let Some(preview) = result.get("embedding_preview") {
-                println!("{preview}");
-            }
+            // Output just the embedding vector for piping
+            println!("{}", serde_json::to_string(&result.embedding)?);
         }
-        _ => println!("{}", serde_json::to_string_pretty(&result)?),
+        _ => {
+            let preview_len = 10.min(result.embedding.len());
+            let text_preview: String = if text.chars().count() > 100 {
+                let mut s: String = text.chars().take(100).collect();
+                s.push_str("...");
+                s
+            } else {
+                text.to_string()
+            };
+            let output = json!({
+                "text": text_preview,
+                "dimension": result.dimension,
+                "model": result.model,
+                "embedding": result.embedding,
+                "embedding_preview": &result.embedding[..preview_len],
+                "embedding_truncated": result.embedding.len() > preview_len,
+                "duration_ms": result.duration_ms,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
     }
     Ok(())
 }
@@ -72,7 +90,11 @@ pub async fn run_service_status(config: &HadesConfig) -> Result<()> {
 // ── embed service start (CLI-only) ───────────────────────────────────────
 
 /// `hades embed service start [--foreground]`
-pub async fn run_service_start(config: &HadesConfig, _foreground: bool) -> Result<()> {
+pub async fn run_service_start(config: &HadesConfig, foreground: bool) -> Result<()> {
+    if foreground {
+        bail!("--foreground is not yet supported; start the embedder via systemctl");
+    }
+
     let output = Command::new("systemctl")
         .args(["start", "hades-embedder"])
         .output()
@@ -80,12 +102,7 @@ pub async fn run_service_start(config: &HadesConfig, _foreground: bool) -> Resul
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let result = json!({
-            "success": false,
-            "error": format!("failed to start service: {}", stderr.trim()),
-        });
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
+        bail!("failed to start service: {}", stderr.trim());
     }
 
     // Wait briefly for the service to initialize, then probe health
@@ -114,12 +131,7 @@ pub async fn run_service_stop() -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let result = json!({
-            "success": false,
-            "error": format!("failed to stop service: {}", stderr.trim()),
-        });
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
+        bail!("failed to stop service: {}", stderr.trim());
     }
 
     let result = json!({
@@ -171,12 +183,7 @@ pub fn run_gpu_list() -> Result<()> {
 /// `hades extract FILE [--format F] [--output O]`
 pub fn run_extract(file: &Path, format: &str, output: Option<&Path>) -> Result<()> {
     if !file.exists() {
-        let result = json!({
-            "success": false,
-            "error": format!("file not found: {}", file.display()),
-        });
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
+        bail!("file not found: {}", file.display());
     }
 
     let ext = file

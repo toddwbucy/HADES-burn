@@ -90,6 +90,15 @@ pub enum GraphEmbedCmd {
         limit: u32,
     },
 
-    /// Update graph embeddings incrementally.
-    Update,
+    /// Update graph embeddings incrementally (forward pass only, no retraining).
+    Update {
+        /// Export embeddings to a different database after update.
+        /// If omitted, exports to the current database.
+        #[arg(long)]
+        export_to: Option<String>,
+
+        /// Checkpoint directory containing the trained model.
+        #[arg(long, default_value = "/tmp/hades-train")]
+        checkpoint_dir: String,
+    },
 }

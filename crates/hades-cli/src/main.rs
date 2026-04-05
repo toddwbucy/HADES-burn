@@ -324,6 +324,15 @@ fn main() -> anyhow::Result<()> {
                 no_export,
             ));
         }
+        Commands::GraphEmbed(GraphEmbedCmd::Update { export_to, checkpoint_dir }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::graph_embed_update::run(
+                &config,
+                export_to.as_deref(),
+                &checkpoint_dir,
+            ));
+        }
         Commands::Daemon { socket } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

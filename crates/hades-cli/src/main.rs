@@ -198,7 +198,7 @@ fn run_codebase_ingest(
             if e.downcast_ref::<commands::codebase_ingest::CodebaseIngestFailure>()
                 .is_some()
             {
-                eprintln!("Error: {e}");
+                tracing::error!(error = %e, "codebase ingest failed");
                 process::exit(1);
             }
             Err(e)

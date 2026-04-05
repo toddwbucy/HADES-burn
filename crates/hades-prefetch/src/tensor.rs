@@ -423,6 +423,105 @@ pub fn serialize_graph(
     Ok(bytes)
 }
 
+/// Serialize graph structure only (no edge splits or negative samples).
+///
+/// Produces a safetensors file suitable for inference / embedding update:
+/// the GPU service reads the core tensors (`node_features`, `edge_src`,
+/// `edge_dst`, `edge_type`, `has_embedding`, `node_collections`) and
+/// metadata, then runs a forward pass through a loaded checkpoint.
+pub fn serialize_graph_for_inference(
+    graph: &GraphData,
+) -> Result<Vec<u8>, TensorError> {
+    let has_emb_u8: Vec<u8> = graph.has_embedding.iter().map(|&b| b as u8).collect();
+
+    let tensors: Vec<(&str, TensorView<'_>)> = vec![
+        (
+            "node_features",
+            TensorView::new(
+                Dtype::F32,
+                vec![graph.num_nodes, graph.feature_dim],
+                as_bytes(&graph.node_features),
+            )?,
+        ),
+        (
+            "has_embedding",
+            TensorView::new(Dtype::BOOL, vec![graph.num_nodes], &has_emb_u8)?,
+        ),
+        (
+            "node_collections",
+            TensorView::new(
+                Dtype::U32,
+                vec![graph.num_nodes],
+                as_bytes(&graph.node_collections),
+            )?,
+        ),
+        (
+            "edge_src",
+            TensorView::new(
+                Dtype::U32,
+                vec![graph.num_edges],
+                as_bytes(&graph.edge_src),
+            )?,
+        ),
+        (
+            "edge_dst",
+            TensorView::new(
+                Dtype::U32,
+                vec![graph.num_edges],
+                as_bytes(&graph.edge_dst),
+            )?,
+        ),
+        (
+            "edge_type",
+            TensorView::new(
+                Dtype::U32,
+                vec![graph.num_edges],
+                as_bytes(&graph.edge_type),
+            )?,
+        ),
+    ];
+
+    let mut metadata = HashMap::new();
+    metadata.insert("num_nodes".into(), graph.num_nodes.to_string());
+    metadata.insert("num_edges".into(), graph.num_edges.to_string());
+    metadata.insert("num_relations".into(), graph.num_relations.to_string());
+    metadata.insert("feature_dim".into(), graph.feature_dim.to_string());
+    metadata.insert(
+        "collection_names".into(),
+        serde_json::to_string(&graph.collection_names)?,
+    );
+    metadata.insert("mode".into(), "inference".into());
+
+    let bytes = safetensors::tensor::serialize(tensors, Some(metadata))?;
+    Ok(bytes)
+}
+
+/// Write inference-only safetensors to disk (atomic write).
+///
+/// Uses a unique temp file in the target directory to avoid collisions
+/// with concurrent writers, then atomically persists to the final path.
+pub fn serialize_graph_for_inference_to_file(
+    path: &Path,
+    graph: &GraphData,
+) -> Result<(), TensorError> {
+    let bytes = serialize_graph_for_inference(graph)?;
+
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(&bytes)?;
+    tmp.flush()?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(std::io::Error::from)?;
+
+    info!(
+        path = %path.display(),
+        size_mb = bytes.len() as f64 / (1024.0 * 1024.0),
+        "wrote inference safetensors file"
+    );
+
+    Ok(())
+}
+
 /// Serialize a graph to a safetensors file on disk.
 ///
 /// Uses atomic write semantics: data is written to a temporary file in the
@@ -868,6 +967,53 @@ mod tests {
             prepare_and_serialize(&path, &graph, &neg_neg).unwrap_err(),
             TensorError::InvalidNegSamplingRatio { .. }
         ));
+    }
+
+    #[test]
+    fn test_serialize_inference_roundtrip() {
+        let graph = test_graph();
+        let bytes = serialize_graph_for_inference(&graph).unwrap();
+        assert!(!bytes.is_empty());
+
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+
+        // Core tensors present
+        let nf = st.tensor("node_features").unwrap();
+        assert_eq!(nf.shape(), &[graph.num_nodes, graph.feature_dim]);
+
+        let es = st.tensor("edge_src").unwrap();
+        assert_eq!(es.shape(), &[graph.num_edges]);
+
+        let et = st.tensor("edge_type").unwrap();
+        assert_eq!(et.shape(), &[graph.num_edges]);
+
+        // Training tensors absent
+        assert!(st.tensor("train_idx").is_err());
+        assert!(st.tensor("val_idx").is_err());
+        assert!(st.tensor("test_idx").is_err());
+        assert!(st.tensor("neg_src").is_err());
+        assert!(st.tensor("neg_dst").is_err());
+
+        // Metadata
+        let (_, meta) = SafeTensors::read_metadata(&bytes).unwrap();
+        let meta = meta.metadata().as_ref().unwrap();
+        assert_eq!(meta["num_nodes"], graph.num_nodes.to_string());
+        assert_eq!(meta["mode"], "inference");
+    }
+
+    #[test]
+    fn test_serialize_inference_file_roundtrip() {
+        let graph = test_graph();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inference.safetensors");
+
+        serialize_graph_for_inference_to_file(&path, &graph).unwrap();
+        assert!(path.exists());
+
+        // Can read back via MappedGraph (core tensors)
+        let mapped = MappedGraph::open(&path).unwrap();
+        assert_eq!(mapped.num_nodes().unwrap(), graph.num_nodes);
+        assert_eq!(mapped.num_edges().unwrap(), graph.num_edges);
     }
 
     #[test]

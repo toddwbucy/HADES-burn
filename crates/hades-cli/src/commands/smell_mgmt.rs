@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
-use hades_core::dispatch::{self, DaemonCommand};
+use hades_core::dispatch::{self, DaemonCommand, SmellCheckParams, SmellVerifyParams, SmellReportParams, LinkCodeSmellParams};
 
 // ── smell check ─────────────────────────────────────────────────────
 
@@ -24,10 +24,10 @@ pub async fn run_smell_check(
     verbose: bool,
 ) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let cmd = DaemonCommand::SmellCheck {
+    let cmd = DaemonCommand::SmellCheck(SmellCheckParams {
         path: path.display().to_string(),
         verbose,
-    };
+    });
     let result = dispatch::dispatch(&pool, config, cmd)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -79,10 +79,10 @@ pub async fn run_smell_verify(
     claims: &[String],
 ) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let cmd = DaemonCommand::SmellVerify {
+    let cmd = DaemonCommand::SmellVerify(SmellVerifyParams {
         path: path.display().to_string(),
         claims: claims.to_vec(),
-    };
+    });
     let result = dispatch::dispatch(&pool, config, cmd)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -101,9 +101,9 @@ pub async fn run_smell_report(
     format: &str,
 ) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let cmd = DaemonCommand::SmellReport {
+    let cmd = DaemonCommand::SmellReport(SmellReportParams {
         path: path.display().to_string(),
-    };
+    });
     let result = dispatch::dispatch(&pool, config, cmd)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -171,13 +171,13 @@ pub async fn run_link(
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     for claim in claims {
-        let cmd = DaemonCommand::LinkCodeSmell {
+        let cmd = DaemonCommand::LinkCodeSmell(LinkCodeSmellParams {
             source_id: source_id.to_string(),
             smell_id: claim.clone(),
             enforcement: "static".to_string(),
             methods: Vec::new(),
             summary: None,
-        };
+        });
         let result = dispatch::dispatch(&pool, config, cmd)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;

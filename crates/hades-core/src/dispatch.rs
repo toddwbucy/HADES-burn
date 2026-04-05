@@ -494,6 +494,43 @@ pub struct TaskUsageParams {}
 #[serde(deny_unknown_fields)]
 pub struct TaskGraphIntegrationParams {}
 
+/// Params for `smell.check`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmellCheckParams {
+    pub path: String,
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+/// Params for `smell.verify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmellVerifyParams {
+    pub path: String,
+    #[serde(default)]
+    pub claims: Vec<String>,
+}
+
+/// Params for `smell.report`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmellReportParams {
+    pub path: String,
+}
+
+/// Params for `link_code_smell`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkCodeSmellParams {
+    pub source_id: String,
+    pub smell_id: String,
+    pub enforcement: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    pub summary: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -661,33 +698,16 @@ pub enum DaemonCommand {
 
     // ── Smell ───────────────────────────────────────────────────────
     #[serde(rename = "smell.check")]
-    SmellCheck {
-        path: String,
-        #[serde(default)]
-        verbose: bool,
-    },
+    SmellCheck(SmellCheckParams),
 
     #[serde(rename = "smell.verify")]
-    SmellVerify {
-        path: String,
-        #[serde(default)]
-        claims: Vec<String>,
-    },
+    SmellVerify(SmellVerifyParams),
 
     #[serde(rename = "smell.report")]
-    SmellReport {
-        path: String,
-    },
+    SmellReport(SmellReportParams),
 
     #[serde(rename = "link_code_smell")]
-    LinkCodeSmell {
-        source_id: String,
-        smell_id: String,
-        enforcement: String,
-        #[serde(default)]
-        methods: Vec<String>,
-        summary: Option<String>,
-    },
+    LinkCodeSmell(LinkCodeSmellParams),
 }
 
 // Serde defaults
@@ -1031,27 +1051,30 @@ pub async fn dispatch(
         }
 
         // ── Smell & Compliance ────────────────────────────────────────
-        DaemonCommand::SmellCheck { path, verbose } => {
-            handlers::smell_check(pool, &path, verbose)
+        DaemonCommand::SmellCheck(params) => {
+            handlers::smell_check(pool, &params.path, params.verbose)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::SmellVerify { path, claims } => {
-            handlers::smell_verify(pool, &path, &claims)
+        DaemonCommand::SmellVerify(params) => {
+            handlers::smell_verify(pool, &params.path, &params.claims)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::SmellReport { path } => {
-            handlers::smell_report(pool, config, &path)
+        DaemonCommand::SmellReport(params) => {
+            handlers::smell_report(pool, config, &params.path)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::LinkCodeSmell {
-            source_id, smell_id, enforcement, methods, summary,
-        } => {
+        DaemonCommand::LinkCodeSmell(params) => {
             require_writable(config)?;
             handlers::link_code_smell(
-                pool, &source_id, &smell_id, &enforcement, &methods, summary.as_deref(),
+                pool,
+                &params.source_id,
+                &params.smell_id,
+                &params.enforcement,
+                &params.methods,
+                params.summary.as_deref(),
             )
             .await
             .map_err(DispatchError::Handler)
@@ -4280,8 +4303,10 @@ mod handlers {
             }
         }
 
-        let passed = check_result["passed"].as_bool().unwrap_or(true);
+        let static_passed = check_result["passed"].as_bool().unwrap_or(true);
         let has_unlinked = verify_result["unlinked"].as_u64().unwrap_or(0) > 0;
+        let any_probe_failed = probes.iter().any(|p| p["pass"] == json!(false));
+        let passed = static_passed && !has_unlinked && !any_probe_failed;
 
         Ok(json!({
             "path": path,
@@ -5424,13 +5449,13 @@ mod tests {
         let result = rt.block_on(dispatch(
             &pool,
             &config,
-            DaemonCommand::LinkCodeSmell {
+            DaemonCommand::LinkCodeSmell(LinkCodeSmellParams {
                 source_id: "test-doc".into(),
                 smell_id: "CS-32".into(),
                 enforcement: "static".into(),
                 methods: Vec::new(),
                 summary: None,
-            },
+            }),
         ));
 
         assert!(matches!(
@@ -5895,9 +5920,9 @@ mod tests {
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         match cmd {
-            DaemonCommand::SmellCheck { ref path, verbose } => {
-                assert_eq!(path, "/tmp/test");
-                assert!(verbose);
+            DaemonCommand::SmellCheck(ref params) => {
+                assert_eq!(params.path, "/tmp/test");
+                assert!(params.verbose);
             }
             other => panic!("expected SmellCheck, got {other:?}"),
         }
@@ -5913,9 +5938,9 @@ mod tests {
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         match cmd {
-            DaemonCommand::SmellVerify { ref path, ref claims } => {
-                assert_eq!(path, "/tmp/test");
-                assert_eq!(claims, &["CS-32", "CS-10"]);
+            DaemonCommand::SmellVerify(ref params) => {
+                assert_eq!(params.path, "/tmp/test");
+                assert_eq!(params.claims, &["CS-32", "CS-10"]);
             }
             other => panic!("expected SmellVerify, got {other:?}"),
         }
@@ -5937,14 +5962,12 @@ mod tests {
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         match cmd {
-            DaemonCommand::LinkCodeSmell {
-                ref source_id, ref smell_id, ref enforcement, ref methods, ref summary,
-            } => {
-                assert_eq!(source_id, "conductor-rs");
-                assert_eq!(smell_id, "CS-32");
-                assert_eq!(enforcement, "static");
-                assert_eq!(methods, &["method_a"]);
-                assert_eq!(summary.as_deref(), Some("test summary"));
+            DaemonCommand::LinkCodeSmell(ref params) => {
+                assert_eq!(params.source_id, "conductor-rs");
+                assert_eq!(params.smell_id, "CS-32");
+                assert_eq!(params.enforcement, "static");
+                assert_eq!(params.methods, &["method_a"]);
+                assert_eq!(params.summary.as_deref(), Some("test summary"));
             }
             other => panic!("expected LinkCodeSmell, got {other:?}"),
         }

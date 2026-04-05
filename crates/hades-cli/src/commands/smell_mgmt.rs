@@ -174,6 +174,7 @@ pub async fn run_link(
     config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
+    let mut results = Vec::with_capacity(claims.len());
     for claim in claims {
         let cmd = DaemonCommand::LinkCodeSmell(LinkCodeSmellParams {
             source_id: source_id.to_string(),
@@ -185,8 +186,9 @@ pub async fn run_link(
         let result = dispatch::dispatch(&pool, config, cmd)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        results.push(result);
     }
+
+    println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
 }

@@ -666,6 +666,28 @@ pub enum DaemonCommand {
         #[serde(default)]
         verbose: bool,
     },
+
+    #[serde(rename = "smell.verify")]
+    SmellVerify {
+        path: String,
+        #[serde(default)]
+        claims: Vec<String>,
+    },
+
+    #[serde(rename = "smell.report")]
+    SmellReport {
+        path: String,
+    },
+
+    #[serde(rename = "link_code_smell")]
+    LinkCodeSmell {
+        source_id: String,
+        smell_id: String,
+        enforcement: String,
+        #[serde(default)]
+        methods: Vec<String>,
+        summary: Option<String>,
+    },
 }
 
 // Serde defaults
@@ -1006,6 +1028,33 @@ pub async fn dispatch(
             handlers::embed_text(config, &text)
                 .await
                 .map_err(DispatchError::Handler)
+        }
+
+        // ── Smell & Compliance ────────────────────────────────────────
+        DaemonCommand::SmellCheck { path, verbose } => {
+            handlers::smell_check(pool, &path, verbose)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::SmellVerify { path, claims } => {
+            handlers::smell_verify(pool, &path, &claims)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::SmellReport { path } => {
+            handlers::smell_report(pool, config, &path)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::LinkCodeSmell {
+            source_id, smell_id, enforcement, methods, summary,
+        } => {
+            require_writable(config)?;
+            handlers::link_code_smell(
+                pool, &source_id, &smell_id, &enforcement, &methods, summary.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
         }
 
         // All other commands are not yet implemented natively.
@@ -3714,6 +3763,644 @@ mod handlers {
             "duration_ms": result.duration_ms,
         }))
     }
+
+    // ── Smell & compliance handlers ──────────────────────────────────
+
+    /// STATIC tier smell IDs — violations block ingest.
+    const STATIC_SMELL_IDS: &[i64] = &[10, 11, 13, 40];
+    /// BEHAVIORAL tier smell IDs — informational.
+    const BEHAVIORAL_SMELL_IDS: &[i64] = &[27, 28, 32];
+    /// ARCHITECTURAL tier smell IDs — informational.
+    const ARCHITECTURAL_SMELL_IDS: &[i64] = &[31];
+
+    /// Source file extensions to scan.
+    const SOURCE_EXTENSIONS: &[&str] = &[
+        ".py", ".rs", ".cu", ".cpp", ".c", ".ts", ".js",
+        ".toml", ".yaml", ".yml", ".sh", ".bash", ".md", ".txt", ".json",
+    ];
+
+    /// Allowed enforcement types for compliance edges.
+    const ALLOWED_ENFORCEMENT: &[&str] = &[
+        "static", "behavioral", "architectural", "review", "documentation",
+    ];
+
+    pub(crate) fn smell_tier(smell_id: Option<i64>) -> &'static str {
+        match smell_id {
+            Some(id) if STATIC_SMELL_IDS.contains(&id) => "static",
+            Some(id) if BEHAVIORAL_SMELL_IDS.contains(&id) => "behavioral",
+            Some(id) if ARCHITECTURAL_SMELL_IDS.contains(&id) => "architectural",
+            _ => "unknown",
+        }
+    }
+
+    pub(crate) fn comment_prefixes(ext: &str) -> &'static [&'static str] {
+        match ext {
+            ".py" | ".toml" | ".yaml" | ".yml" | ".sh" | ".bash" => &["#"],
+            ".rs" => &["//", "///", "//!"],
+            ".cu" | ".cpp" | ".c" | ".ts" | ".js" => &["//"],
+            _ => &["#", "//"],
+        }
+    }
+
+    pub(crate) fn is_comment_line(line: &str, ext: &str) -> bool {
+        let stripped = line.trim_start();
+        for prefix in comment_prefixes(ext) {
+            if stripped.starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Collect source files under a path, filtering hidden dirs and noise.
+    fn collect_source_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        if path.is_file() {
+            files.push(path.to_path_buf());
+            return files;
+        }
+
+        fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Skip hidden dirs, __pycache__, Acheron
+                if name_str.starts_with('.') || name_str == "__pycache__" || name_str == "Acheron" {
+                    continue;
+                }
+                if path.is_dir() {
+                    walk(&path, files);
+                } else if path.is_file()
+                    && let Some(ext) = path.extension().and_then(|e| e.to_str())
+                {
+                    let dot_ext = format!(".{ext}");
+                    if SOURCE_EXTENSIONS.contains(&dot_ext.as_str()) {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+
+        walk(path, &mut files);
+        files.sort();
+        files
+    }
+
+    /// Extract CS-NN references from comment lines in a source file.
+    fn extract_cs_refs(path: &std::path::Path) -> std::collections::HashMap<String, Vec<usize>> {
+        use regex::Regex;
+        use std::sync::LazyLock;
+
+        static CS_REF_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\bCS-(\d+)\b").unwrap());
+
+        let mut refs = std::collections::HashMap::new();
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return refs,
+        };
+
+        let ext = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+
+        for (line_no, line) in content.lines().enumerate() {
+            if !is_comment_line(line, &ext) {
+                continue;
+            }
+            for cap in CS_REF_RE.captures_iter(line) {
+                let cs_id = format!("CS-{}", &cap[1]);
+                refs.entry(cs_id).or_insert_with(Vec::new).push(line_no + 1);
+            }
+        }
+        refs
+    }
+
+    /// Convert "CS-32" → "smell-032-" prefix for AQL LEFT match.
+    pub(crate) fn smell_key_prefix(cs_number: &str) -> Option<String> {
+        use regex::Regex;
+        use std::sync::LazyLock;
+
+        static CS_NUM_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?i)^CS-(\d+)$").unwrap());
+
+        CS_NUM_RE.captures(cs_number).map(|cap| {
+            let num: u32 = cap[1].parse().unwrap_or(0);
+            format!("smell-{num:03}-")
+        })
+    }
+
+    pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if mag_a == 0.0 || mag_b == 0.0 {
+            return 0.0;
+        }
+        dot / (mag_a * mag_b)
+    }
+
+    /// Generate candidate document keys for a source file path.
+    ///
+    /// Given a file like `conductor.rs`, generates:
+    /// `["conductor", "conductor-rs", "conductor_rs"]`
+    pub(crate) fn candidate_doc_keys(path: &std::path::Path) -> Vec<String> {
+        let stem = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if stem.is_empty() {
+            return Vec::new();
+        }
+        let ext_label = path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        let mut keys = vec![stem.clone()];
+        if !ext_label.is_empty() {
+            keys.push(format!("{stem}-{ext_label}"));
+        }
+        // underscore → dash variant
+        let dashed = stem.replace('_', "-");
+        if dashed != stem {
+            keys.push(dashed.clone());
+            if !ext_label.is_empty() {
+                keys.push(format!("{dashed}-{ext_label}"));
+            }
+        }
+        keys
+    }
+
+    /// `hades smell check PATH` — scan source files for forbidden patterns.
+    pub async fn smell_check(
+        pool: &ArangoPool,
+        path: &str,
+        verbose: bool,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::query::{self, ExecutionTarget};
+
+        // Load smells with forbidden patterns from the graph.
+        let aql = r#"
+            FOR doc IN nl_code_smells
+                FILTER doc.forbidden_patterns != null AND LENGTH(doc.forbidden_patterns) > 0
+                RETURN {
+                    _key: doc._key,
+                    smell_id: doc.smell_id,
+                    name: doc.name,
+                    forbidden_patterns: doc.forbidden_patterns,
+                    scope: doc.scope
+                }
+        "#;
+        let result = query::query(pool, aql, None, None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to load smell definitions".into(),
+                source: e,
+            })?;
+
+        let smells = result.results;
+        let smells_loaded = smells.len();
+
+        // Collect source files.
+        let scan_path = std::path::Path::new(path);
+        let files = collect_source_files(scan_path);
+        let files_checked = files.len();
+
+        // Scan for forbidden patterns.
+        let mut violations = Vec::new();
+        let mut has_static_violation = false;
+
+        for file in &files {
+            let content = match std::fs::read_to_string(file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let ext = file.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!(".{e}"))
+                .unwrap_or_default();
+
+            for smell in &smells {
+                let patterns = match smell["forbidden_patterns"].as_array() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let smell_id = smell["smell_id"].as_i64();
+
+                for (line_no, line) in content.lines().enumerate() {
+                    // CS-13 violations are skipped in comment context
+                    if smell_id == Some(13) && is_comment_line(line, &ext) {
+                        continue;
+                    }
+
+                    for pattern in patterns {
+                        let pat = match pattern.as_str() {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        if line.contains(pat) {
+                            let tier = smell_tier(smell_id);
+                            if tier == "static" {
+                                has_static_violation = true;
+                            }
+
+                            violations.push(json!({
+                                "smell_key": smell["_key"],
+                                "smell_id": smell_id,
+                                "smell_name": smell["name"],
+                                "tier": tier,
+                                "file": file.display().to_string(),
+                                "line": line_no + 1,
+                                "pattern": pat,
+                                "content": line.trim_end(),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        let violation_count = violations.len();
+        let passed = !has_static_violation;
+
+        let mut result = json!({
+            "passed": passed,
+            "violation_count": violation_count,
+            "files_checked": files_checked,
+            "smells_loaded": smells_loaded,
+        });
+        if verbose || !violations.is_empty() {
+            result["violations"] = json!(violations);
+        }
+        Ok(result)
+    }
+
+    /// `hades smell verify PATH` — verify CS-NN references against graph.
+    pub async fn smell_verify(
+        pool: &ArangoPool,
+        path: &str,
+        _claims: &[String],
+    ) -> Result<Value, HandlerError> {
+        use crate::db::query::{self, ExecutionTarget};
+
+        let scan_path = std::path::Path::new(path);
+        let files = collect_source_files(scan_path);
+
+        // Extract all CS-NN refs from comment lines.
+        let mut all_refs: Vec<(std::path::PathBuf, String, Vec<usize>)> = Vec::new();
+        let mut unique_cs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for file in &files {
+            let refs = extract_cs_refs(file);
+            for (cs_id, lines) in refs {
+                unique_cs.insert(cs_id.clone());
+                all_refs.push((file.clone(), cs_id, lines));
+            }
+        }
+
+        // Batch-lookup smell nodes by CS number.
+        let mut smell_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        for cs_id in &unique_cs {
+            // Extract numeric part: "CS-32" → "32"
+            let num_str = cs_id.strip_prefix("CS-").unwrap_or(cs_id);
+
+            let aql = r#"
+                FOR doc IN nl_code_smells
+                    FILTER doc.smell_id == TO_NUMBER(@num) OR STARTS_WITH(doc.name, @prefix)
+                    LIMIT 1
+                    RETURN {_key: doc._key, _id: doc._id, smell_id: doc.smell_id, name: doc.name}
+            "#;
+            let bind_vars = json!({ "num": num_str, "prefix": format!("{cs_id}:") });
+            let result = query::query(
+                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to look up smell for {cs_id}"),
+                source: e,
+            })?;
+
+            if let Some(smell) = result.results.into_iter().next() {
+                smell_map.insert(cs_id.clone(), smell);
+            }
+        }
+
+        // Verify compliance edges.
+        let mut verified_refs = Vec::new();
+        let mut missing_from_graph = Vec::new();
+        let mut unlinked_claims = Vec::new();
+
+        for (file, cs_id, lines) in &all_refs {
+            let smell = match smell_map.get(cs_id) {
+                Some(s) => s,
+                None => {
+                    missing_from_graph.push(json!({
+                        "cs_id": cs_id,
+                        "file": file.display().to_string(),
+                        "lines": lines,
+                        "reason": "smell node not found in graph",
+                    }));
+                    continue;
+                }
+            };
+
+            let smell_id = smell["_id"].as_str().unwrap_or("");
+            let candidate_keys = candidate_doc_keys(file);
+
+            // Try each candidate key to find a compliance edge.
+            let mut found_edge = None;
+            for key in &candidate_keys {
+                let from_id = format!("arxiv_metadata/{key}");
+                let aql = r#"
+                    FOR e IN nl_smell_compliance_edges
+                        FILTER e._from == @from AND e._to == @to
+                        LIMIT 1
+                        RETURN e
+                "#;
+                let bind_vars = json!({ "from": from_id, "to": smell_id });
+                let result = query::query(
+                    pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+                )
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "failed to check compliance edge".into(),
+                    source: e,
+                })?;
+
+                if let Some(edge) = result.results.into_iter().next() {
+                    found_edge = Some(edge);
+                    break;
+                }
+            }
+
+            match found_edge {
+                Some(edge) => {
+                    verified_refs.push(json!({
+                        "cs_id": cs_id,
+                        "file": file.display().to_string(),
+                        "lines": lines,
+                        "smell_key": smell["_key"],
+                        "smell_name": smell["name"],
+                        "edge": {
+                            "enforcement_type": edge["enforcement_type"],
+                            "claim_summary": edge.get("summary").or(edge.get("claim_summary")),
+                            "claiming_methods": edge.get("methods").or(edge.get("claiming_methods")),
+                        },
+                    }));
+                }
+                None => {
+                    unlinked_claims.push(json!({
+                        "cs_id": cs_id,
+                        "file": file.display().to_string(),
+                        "lines": lines,
+                        "smell_key": smell["_key"],
+                        "smell_name": smell["name"],
+                        "reason": "no compliance edge",
+                    }));
+                }
+            }
+        }
+
+        Ok(json!({
+            "refs_found": all_refs.len(),
+            "verified": verified_refs.len(),
+            "missing": missing_from_graph.len(),
+            "unlinked": unlinked_claims.len(),
+            "verified_refs": verified_refs,
+            "missing_from_graph": missing_from_graph,
+            "unlinked_claims": unlinked_claims,
+        }))
+    }
+
+    /// `hades smell report PATH` — combined check + verify + embedding probe.
+    pub async fn smell_report(
+        pool: &ArangoPool,
+        config: &crate::config::HadesConfig,
+        path: &str,
+    ) -> Result<Value, HandlerError> {
+        use crate::persephone::embedder_http::EmbedderHttpClient;
+
+        // Run check and verify.
+        let check_result = smell_check(pool, path, true).await?;
+        let verify_result = smell_verify(pool, path, &[]).await?;
+
+        // Embedding probe for each verified ref.
+        let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+        let mut probes = Vec::new();
+
+        if let Some(verified) = verify_result["verified_refs"].as_array() {
+            for vref in verified {
+                let cs_id = vref["cs_id"].as_str().unwrap_or("");
+                let smell_name = vref["smell_name"].as_str().unwrap_or("");
+                let file_path = vref["file"].as_str().unwrap_or("");
+
+                // Read file text, truncated to 8000 chars.
+                let file_text = match std::fs::read_to_string(file_path) {
+                    Ok(text) => {
+                        if text.chars().count() > 8000 {
+                            text.chars().take(8000).collect::<String>()
+                        } else {
+                            text
+                        }
+                    }
+                    Err(_) => {
+                        probes.push(json!({
+                            "cs_id": cs_id,
+                            "smell_name": smell_name,
+                            "file": file_path,
+                            "error": "failed to read file",
+                            "pass": null,
+                        }));
+                        continue;
+                    }
+                };
+
+                // Embed both file text and smell name.
+                match (
+                    client.embed_text(&file_text, "retrieval.passage").await,
+                    client.embed_text(smell_name, "retrieval.query").await,
+                ) {
+                    (Ok(file_emb), Ok(smell_emb)) => {
+                        let sim = cosine_similarity(&file_emb.embedding, &smell_emb.embedding);
+                        probes.push(json!({
+                            "cs_id": cs_id,
+                            "smell_name": smell_name,
+                            "file": file_path,
+                            "cosine_similarity": (sim * 10000.0).round() / 10000.0,
+                            "pass": sim >= 0.5,
+                        }));
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        probes.push(json!({
+                            "cs_id": cs_id,
+                            "smell_name": smell_name,
+                            "file": file_path,
+                            "error": e.to_string(),
+                            "pass": null,
+                        }));
+                    }
+                }
+            }
+        }
+
+        let passed = check_result["passed"].as_bool().unwrap_or(true);
+        let has_unlinked = verify_result["unlinked"].as_u64().unwrap_or(0) > 0;
+
+        Ok(json!({
+            "path": path,
+            "passed": passed,
+            "has_unlinked_claims": has_unlinked,
+            "static_check": {
+                "passed": check_result["passed"],
+                "violations": check_result["violations"],
+                "violation_count": check_result["violation_count"],
+                "files_checked": check_result["files_checked"],
+            },
+            "ref_verification": {
+                "refs_found": verify_result["refs_found"],
+                "verified_refs": verify_result["verified_refs"],
+                "missing_from_graph": verify_result["missing_from_graph"],
+                "unlinked_claims": verify_result["unlinked_claims"],
+            },
+            "embedding_probe": probes,
+        }))
+    }
+
+    /// `hades link` — create compliance edge linking document to smell.
+    pub async fn link_code_smell(
+        pool: &ArangoPool,
+        source_id: &str,
+        smell_id: &str,
+        enforcement: &str,
+        methods: &[String],
+        summary: Option<&str>,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::crud;
+        use crate::db::ArangoErrorKind;
+        use crate::db::query::{self, ExecutionTarget};
+
+        // Validate enforcement type.
+        if !ALLOWED_ENFORCEMENT.contains(&enforcement) {
+            return Err(HandlerError::InvalidParameter {
+                name: "enforcement".into(),
+                reason: format!(
+                    "must be one of: {}",
+                    ALLOWED_ENFORCEMENT.join(", "),
+                ),
+            });
+        }
+
+        // Verify source document exists in arxiv_metadata.
+        let source_key = source_id.trim();
+        crud::get_document(pool, "arxiv_metadata", source_key)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    HandlerError::DocumentNotFound {
+                        collection: "arxiv_metadata".into(),
+                        key: source_key.into(),
+                    }
+                } else {
+                    HandlerError::Query {
+                        context: "failed to verify source document".into(),
+                        source: e,
+                    }
+                }
+            })?;
+
+        // Find smell node — try CS-NN prefix, then exact key.
+        let smell_doc = if let Some(prefix) = smell_key_prefix(smell_id) {
+            let prefix_len = prefix.len() as i64;
+            let aql = r#"
+                FOR s IN nl_code_smells
+                    FILTER LEFT(s._key, @prefix_len) == @prefix
+                    LIMIT 1
+                    RETURN s
+            "#;
+            let bind_vars = json!({ "prefix": prefix, "prefix_len": prefix_len });
+            let result = query::query(
+                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to find smell for {smell_id}"),
+                source: e,
+            })?;
+            result.results.into_iter().next()
+        } else {
+            // Treat as exact key.
+            match crud::get_document(pool, "nl_code_smells", smell_id).await {
+                Ok(doc) => Some(doc),
+                Err(e) if e.is_not_found() => None,
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to look up smell {smell_id}"),
+                        source: e,
+                    });
+                }
+            }
+        };
+
+        let smell_doc = smell_doc.ok_or_else(|| HandlerError::DocumentNotFound {
+            collection: "nl_code_smells".into(),
+            key: smell_id.into(),
+        })?;
+
+        let smell_key = smell_doc["_key"].as_str().unwrap_or(smell_id);
+        let smell_name = smell_doc["name"].as_str().unwrap_or("");
+
+        // Construct edge.
+        let edge_key = format!(
+            "arxiv_metadata_{source_key}__nl_code_smells_{smell_key}"
+        );
+        let from_id = format!("arxiv_metadata/{source_key}");
+        let to_id = format!("nl_code_smells/{smell_key}");
+
+        let mut edge_doc = json!({
+            "_key": edge_key,
+            "_from": from_id,
+            "_to": to_id,
+            "enforcement_type": enforcement,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if !methods.is_empty() {
+            edge_doc["methods"] = json!(methods);
+        }
+        if let Some(s) = summary {
+            edge_doc["summary"] = json!(s);
+        }
+
+        // Insert edge — treat 409 Conflict as idempotent success.
+        let already_exists = match crud::insert_document(
+            pool, "nl_smell_compliance_edges", &edge_doc,
+        ).await {
+            Ok(_) => false,
+            Err(e) if e.kind() == ArangoErrorKind::Conflict => true,
+            Err(e) => {
+                return Err(HandlerError::Query {
+                    context: "failed to insert compliance edge".into(),
+                    source: e,
+                });
+            }
+        };
+
+        Ok(json!({
+            "edge_key": edge_key,
+            "from": from_id,
+            "to": to_id,
+            "smell": smell_name,
+            "enforcement": enforcement,
+            "summary": summary,
+            "methods": methods,
+            "already_exists": already_exists,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5143,5 +5830,139 @@ mod tests {
         // Round-trip
         let serialized = serde_json::to_value(&cmd).unwrap();
         let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
+    }
+
+    #[test]
+    fn test_command_roundtrip_smell_check() {
+        let json = serde_json::json!({
+            "command": "smell.check",
+            "params": { "path": "/tmp/test", "verbose": true }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        match cmd {
+            DaemonCommand::SmellCheck { ref path, verbose } => {
+                assert_eq!(path, "/tmp/test");
+                assert!(verbose);
+            }
+            other => panic!("expected SmellCheck, got {other:?}"),
+        }
+        let serialized = serde_json::to_value(&cmd).unwrap();
+        let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
+    }
+
+    #[test]
+    fn test_command_roundtrip_smell_verify() {
+        let json = serde_json::json!({
+            "command": "smell.verify",
+            "params": { "path": "/tmp/test", "claims": ["CS-32", "CS-10"] }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        match cmd {
+            DaemonCommand::SmellVerify { ref path, ref claims } => {
+                assert_eq!(path, "/tmp/test");
+                assert_eq!(claims, &["CS-32", "CS-10"]);
+            }
+            other => panic!("expected SmellVerify, got {other:?}"),
+        }
+        let serialized = serde_json::to_value(&cmd).unwrap();
+        let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
+    }
+
+    #[test]
+    fn test_command_roundtrip_link_code_smell() {
+        let json = serde_json::json!({
+            "command": "link_code_smell",
+            "params": {
+                "source_id": "conductor-rs",
+                "smell_id": "CS-32",
+                "enforcement": "static",
+                "methods": ["method_a"],
+                "summary": "test summary",
+            }
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        match cmd {
+            DaemonCommand::LinkCodeSmell {
+                ref source_id, ref smell_id, ref enforcement, ref methods, ref summary,
+            } => {
+                assert_eq!(source_id, "conductor-rs");
+                assert_eq!(smell_id, "CS-32");
+                assert_eq!(enforcement, "static");
+                assert_eq!(methods, &["method_a"]);
+                assert_eq!(summary.as_deref(), Some("test summary"));
+            }
+            other => panic!("expected LinkCodeSmell, got {other:?}"),
+        }
+        let serialized = serde_json::to_value(&cmd).unwrap();
+        let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
+    }
+
+    #[test]
+    fn test_smell_tier_classification() {
+        use super::handlers;
+        assert_eq!(handlers::smell_tier(Some(10)), "static");
+        assert_eq!(handlers::smell_tier(Some(11)), "static");
+        assert_eq!(handlers::smell_tier(Some(13)), "static");
+        assert_eq!(handlers::smell_tier(Some(40)), "static");
+        assert_eq!(handlers::smell_tier(Some(27)), "behavioral");
+        assert_eq!(handlers::smell_tier(Some(28)), "behavioral");
+        assert_eq!(handlers::smell_tier(Some(32)), "behavioral");
+        assert_eq!(handlers::smell_tier(Some(31)), "architectural");
+        assert_eq!(handlers::smell_tier(Some(99)), "unknown");
+        assert_eq!(handlers::smell_tier(None), "unknown");
+    }
+
+    #[test]
+    fn test_smell_key_prefix() {
+        use super::handlers;
+        assert_eq!(handlers::smell_key_prefix("CS-32"), Some("smell-032-".into()));
+        assert_eq!(handlers::smell_key_prefix("CS-1"), Some("smell-001-".into()));
+        assert_eq!(handlers::smell_key_prefix("CS-100"), Some("smell-100-".into()));
+        assert_eq!(handlers::smell_key_prefix("cs-10"), Some("smell-010-".into()));
+        assert_eq!(handlers::smell_key_prefix("not-a-smell"), None);
+        assert_eq!(handlers::smell_key_prefix("CS-"), None);
+        assert_eq!(handlers::smell_key_prefix(""), None);
+    }
+
+    #[test]
+    fn test_cosine_similarity() {
+        use super::handlers;
+        // Identical vectors
+        let a = vec![1.0, 0.0, 0.0];
+        assert!((handlers::cosine_similarity(&a, &a) - 1.0).abs() < 1e-6);
+        // Orthogonal
+        let b = vec![0.0, 1.0, 0.0];
+        assert!(handlers::cosine_similarity(&a, &b).abs() < 1e-6);
+        // Zero vector
+        let z = vec![0.0, 0.0, 0.0];
+        assert!(handlers::cosine_similarity(&a, &z).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_is_comment_line() {
+        use super::handlers;
+        assert!(handlers::is_comment_line("  # comment", ".py"));
+        assert!(handlers::is_comment_line("  // comment", ".rs"));
+        assert!(handlers::is_comment_line("  /// doc comment", ".rs"));
+        assert!(handlers::is_comment_line("  //! module doc", ".rs"));
+        assert!(!handlers::is_comment_line("  let x = 1;", ".rs"));
+        assert!(!handlers::is_comment_line("  x = 1", ".py"));
+        assert!(handlers::is_comment_line("  // comment", ".ts"));
+        assert!(handlers::is_comment_line("  # comment", ".yaml"));
+    }
+
+    #[test]
+    fn test_candidate_doc_keys() {
+        use super::handlers;
+        use std::path::Path;
+        let keys = handlers::candidate_doc_keys(Path::new("conductor.rs"));
+        assert!(keys.contains(&"conductor".into()));
+        assert!(keys.contains(&"conductor-rs".into()));
+
+        let keys2 = handlers::candidate_doc_keys(Path::new("my_module.py"));
+        assert!(keys2.contains(&"my_module".into()));
+        assert!(keys2.contains(&"my_module-py".into()));
+        assert!(keys2.contains(&"my-module".into()));
+        assert!(keys2.contains(&"my-module-py".into()));
     }
 }

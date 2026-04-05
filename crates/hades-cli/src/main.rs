@@ -688,6 +688,44 @@ fn main() -> anyhow::Result<()> {
             );
         }
 
+        // ── Smell & compliance commands ──────────────────────────────
+        Commands::Smell(SmellCmd::Check { path, format, verbose }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::smell_mgmt::run_smell_check(
+                &config,
+                &path.display().to_string(),
+                &format,
+                verbose,
+            ));
+        }
+        Commands::Smell(SmellCmd::Verify { path, claims }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::smell_mgmt::run_smell_verify(
+                &config,
+                &path.display().to_string(),
+                &claims,
+            ));
+        }
+        Commands::Smell(SmellCmd::Report { path, output, format }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::smell_mgmt::run_smell_report(
+                &config,
+                &path.display().to_string(),
+                output.as_deref(),
+                &format,
+            ));
+        }
+        Commands::Link { source_id, claims, force: _ } => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::smell_mgmt::run_link(
+                &config, &source_id, &claims,
+            ));
+        }
+
         _ => {} // Remaining commands fall through to Python passthrough.
     }
 

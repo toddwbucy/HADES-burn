@@ -19,6 +19,7 @@ pub mod graph_embed_query;
 pub mod graph_embed_train;
 pub mod ingest;
 pub mod smell;
+pub mod smell_mgmt;
 pub mod system;
 pub mod task;
 pub mod task_mgmt;

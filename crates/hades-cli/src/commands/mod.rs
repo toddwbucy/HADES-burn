@@ -13,6 +13,7 @@ pub mod db_graph;
 pub mod db_read;
 pub mod db_write;
 pub mod embed;
+pub mod embed_mgmt;
 pub mod graph_embed;
 pub mod graph_embed_query;
 pub mod graph_embed_train;

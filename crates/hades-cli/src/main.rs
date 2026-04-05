@@ -15,7 +15,8 @@ use clap::{Parser, Subcommand};
 use hades_core::config;
 
 use commands::{
-    arxiv::ArxivCmd, codebase::CodebaseCmd, db::DbCmd, embed::EmbedCmd,
+    arxiv::ArxivCmd, codebase::CodebaseCmd, db::DbCmd,
+    embed::{EmbedCmd, EmbedGpuCmd, EmbedServiceCmd},
     graph_embed::GraphEmbedCmd, smell::SmellCmd, task::TaskCmd,
 };
 
@@ -647,7 +648,47 @@ fn main() -> anyhow::Result<()> {
             ));
         }
         // All TaskCmd variants are handled natively above.
-        _ => {} // Remaining non-Task commands fall through to Python passthrough.
+
+        // ── Embed commands ────────────────────────────────────────────
+        Commands::Embed(EmbedCmd::Text { text, format }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::embed_mgmt::run_embed_text(&config, &text, &format));
+        }
+        Commands::Embed(EmbedCmd::Service(EmbedServiceCmd::Status)) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::embed_mgmt::run_service_status(&config));
+        }
+        Commands::Embed(EmbedCmd::Service(EmbedServiceCmd::Start { foreground })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::embed_mgmt::run_service_start(&config, foreground));
+        }
+        Commands::Embed(EmbedCmd::Service(EmbedServiceCmd::Stop)) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::embed_mgmt::run_service_stop());
+        }
+        Commands::Embed(EmbedCmd::Gpu(EmbedGpuCmd::Status)) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::embed_mgmt::run_gpu_status(&config));
+        }
+        Commands::Embed(EmbedCmd::Gpu(EmbedGpuCmd::List)) => {
+            return commands::embed_mgmt::run_gpu_list();
+        }
+
+        // ── Extract command ───────────────────────────────────────────
+        Commands::Extract { file, format, output } => {
+            return commands::embed_mgmt::run_extract(
+                &file,
+                &format,
+                output.as_deref(),
+            );
+        }
+
+        _ => {} // Remaining commands fall through to Python passthrough.
     }
 
     // ── Python passthrough (strangler-fig) ───────────────────────────────

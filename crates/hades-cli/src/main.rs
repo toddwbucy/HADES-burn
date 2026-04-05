@@ -269,6 +269,32 @@ fn main() -> anyhow::Result<()> {
                 }
             };
         }
+        Commands::Codebase(CodebaseCmd::Update { path }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(commands::codebase_ingest::run(
+                &config,
+                path,
+                None,  // no language override — auto-detect
+                false, // no batch flag — auto-activates for >5 files
+            ));
+            return match result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    if e.downcast_ref::<commands::codebase_ingest::CodebaseIngestFailure>()
+                        .is_some()
+                    {
+                        process::exit(1);
+                    }
+                    Err(e)
+                }
+            };
+        }
+        Commands::Codebase(CodebaseCmd::Stats) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::codebase_mgmt::run_stats(&config));
+        }
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

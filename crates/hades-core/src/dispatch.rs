@@ -531,6 +531,11 @@ pub struct LinkCodeSmellParams {
     pub summary: Option<String>,
 }
 
+/// Params for `codebase.stats` (no parameters).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodebaseStatsParams {}
+
 // ---------------------------------------------------------------------------
 // Command enum
 // ---------------------------------------------------------------------------
@@ -708,6 +713,10 @@ pub enum DaemonCommand {
 
     #[serde(rename = "link_code_smell")]
     LinkCodeSmell(LinkCodeSmellParams),
+
+    // ── Codebase ────────────────────────────────────────────────────
+    #[serde(rename = "codebase.stats")]
+    CodebaseStats(CodebaseStatsParams),
 }
 
 // Serde defaults
@@ -1078,6 +1087,13 @@ pub async fn dispatch(
             )
             .await
             .map_err(DispatchError::Handler)
+        }
+
+        // ── Codebase ─────────────────────────────────────────────────
+        DaemonCommand::CodebaseStats(_) => {
+            handlers::codebase_stats(pool)
+                .await
+                .map_err(DispatchError::Handler)
         }
 
         // All other commands are not yet implemented natively.
@@ -4457,6 +4473,42 @@ mod handlers {
             "already_exists": already_exists,
         }))
     }
+
+    // ── Codebase stats ─────────────────────────────────────────────
+
+    /// `hades codebase stats` — document counts for all codebase collections.
+    pub async fn codebase_stats(pool: &ArangoPool) -> Result<Value, HandlerError> {
+        use crate::db::collections::CODEBASE;
+        use crate::db::crud;
+
+        let collections = [
+            ("files", CODEBASE.files),
+            ("symbols", CODEBASE.symbols),
+            ("chunks", CODEBASE.chunks),
+            ("embeddings", CODEBASE.embeddings),
+            ("edges", CODEBASE.edges),
+        ];
+
+        let mut counts = serde_json::Map::new();
+        for (label, name) in &collections {
+            let count = match crud::count_collection(pool, name).await {
+                Ok(n) => json!(n),
+                Err(e) if e.is_not_found() => json!(0),
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: format!("failed to count {name}"),
+                        source: e,
+                    });
+                }
+            };
+            counts.insert((*label).to_string(), count);
+        }
+
+        Ok(json!({
+            "command": "codebase stats",
+            "collections": counts,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5971,6 +6023,18 @@ mod tests {
             }
             other => panic!("expected LinkCodeSmell, got {other:?}"),
         }
+        let serialized = serde_json::to_value(&cmd).unwrap();
+        let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
+    }
+
+    #[test]
+    fn test_command_roundtrip_codebase_stats() {
+        let json = serde_json::json!({
+            "command": "codebase.stats",
+            "params": {}
+        });
+        let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(cmd, DaemonCommand::CodebaseStats(_)));
         let serialized = serde_json::to_value(&cmd).unwrap();
         let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
     }

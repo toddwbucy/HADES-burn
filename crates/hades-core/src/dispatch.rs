@@ -3813,18 +3813,30 @@ mod handlers {
     }
 
     /// Collect source files under a path, filtering hidden dirs and noise.
-    fn collect_source_files(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    /// Collect source files under a path, filtering hidden dirs and noise.
+    ///
+    /// Returns `Err` if the initial path does not exist or is unreadable.
+    fn collect_source_files(
+        path: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
+        if !path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("path does not exist: {}", path.display()),
+            ));
+        }
+
         let mut files = Vec::new();
         if path.is_file() {
             files.push(path.to_path_buf());
-            return files;
+            return Ok(files);
         }
 
-        fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => return,
-            };
+        fn walk(
+            dir: &std::path::Path,
+            files: &mut Vec<std::path::PathBuf>,
+        ) -> Result<(), std::io::Error> {
+            let entries = std::fs::read_dir(dir)?;
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name();
@@ -3834,7 +3846,8 @@ mod handlers {
                     continue;
                 }
                 if path.is_dir() {
-                    walk(&path, files);
+                    // Subdirectory read errors are non-fatal — skip and continue.
+                    let _ = walk(&path, files);
                 } else if path.is_file()
                     && let Some(ext) = path.extension().and_then(|e| e.to_str())
                 {
@@ -3844,11 +3857,12 @@ mod handlers {
                     }
                 }
             }
+            Ok(())
         }
 
-        walk(path, &mut files);
+        walk(path, &mut files)?;
         files.sort();
-        files
+        Ok(files)
     }
 
     /// Extract CS-NN references from comment lines in a source file.
@@ -3890,9 +3904,8 @@ mod handlers {
         static CS_NUM_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"(?i)^CS-(\d+)$").unwrap());
 
-        CS_NUM_RE.captures(cs_number).map(|cap| {
-            let num: u32 = cap[1].parse().unwrap_or(0);
-            format!("smell-{num:03}-")
+        CS_NUM_RE.captures(cs_number).and_then(|cap| {
+            cap[1].parse::<u32>().ok().map(|num| format!("smell-{num:03}-"))
         })
     }
 
@@ -3969,7 +3982,12 @@ mod handlers {
 
         // Collect source files.
         let scan_path = std::path::Path::new(path);
-        let files = collect_source_files(scan_path);
+        let files = collect_source_files(scan_path).map_err(|e| {
+            HandlerError::InvalidParameter {
+                name: "path".into(),
+                reason: e.to_string(),
+            }
+        })?;
         let files_checked = files.len();
 
         // Scan for forbidden patterns.
@@ -4045,12 +4063,21 @@ mod handlers {
     pub async fn smell_verify(
         pool: &ArangoPool,
         path: &str,
-        _claims: &[String],
+        claims: &[String],
     ) -> Result<Value, HandlerError> {
         use crate::db::query::{self, ExecutionTarget};
 
+        // Build claims filter set — when non-empty, only these CS-NN refs are verified.
+        let claims_filter: std::collections::HashSet<&str> =
+            claims.iter().map(|s| s.as_str()).collect();
+
         let scan_path = std::path::Path::new(path);
-        let files = collect_source_files(scan_path);
+        let files = collect_source_files(scan_path).map_err(|e| {
+            HandlerError::InvalidParameter {
+                name: "path".into(),
+                reason: e.to_string(),
+            }
+        })?;
 
         // Extract all CS-NN refs from comment lines.
         let mut all_refs: Vec<(std::path::PathBuf, String, Vec<usize>)> = Vec::new();
@@ -4059,6 +4086,10 @@ mod handlers {
         for file in &files {
             let refs = extract_cs_refs(file);
             for (cs_id, lines) in refs {
+                // If claims filter is provided, skip refs not in the filter.
+                if !claims_filter.is_empty() && !claims_filter.contains(cs_id.as_str()) {
+                    continue;
+                }
                 unique_cs.insert(cs_id.clone());
                 all_refs.push((file.clone(), cs_id, lines));
             }
@@ -5384,6 +5415,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_write_denied_on_production_db_link_code_smell() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let config = HadesConfig::default(); // NestedLearning — production
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let result = rt.block_on(dispatch(
+            &pool,
+            &config,
+            DaemonCommand::LinkCodeSmell {
+                source_id: "test-doc".into(),
+                smell_id: "CS-32".into(),
+                enforcement: "static".into(),
+                methods: Vec::new(),
+                summary: None,
+            },
+        ));
+
+        assert!(matches!(
+            result.unwrap_err(),
+            DispatchError::Handler(HandlerError::WriteDenied(_))
+        ));
+    }
+
     // ── Task command tests ─────────────────────────────────────────
 
     #[test]
@@ -5922,6 +5977,8 @@ mod tests {
         assert_eq!(handlers::smell_key_prefix("not-a-smell"), None);
         assert_eq!(handlers::smell_key_prefix("CS-"), None);
         assert_eq!(handlers::smell_key_prefix(""), None);
+        // Overflow: u32::MAX + 1 should return None, not "smell-000-"
+        assert_eq!(handlers::smell_key_prefix("CS-99999999999"), None);
     }
 
     #[test]

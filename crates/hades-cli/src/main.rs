@@ -182,6 +182,30 @@ fn init_tracing() {
         .init();
 }
 
+/// Run `codebase ingest` (or update) with shared runtime + error handling.
+fn run_codebase_ingest(
+    config: &hades_core::config::HadesConfig,
+    path: PathBuf,
+    language: Option<&str>,
+    batch: bool,
+) -> anyhow::Result<()> {
+    init_tracing();
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(commands::codebase_ingest::run(config, path, language, batch));
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.downcast_ref::<commands::codebase_ingest::CodebaseIngestFailure>()
+                .is_some()
+            {
+                tracing::error!(error = %e, "codebase ingest failed");
+                process::exit(1);
+            }
+            Err(e)
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Capture raw args before clap consumes them — used for pass-through dispatch.
     let raw_args: Vec<String> = std::env::args().collect();
@@ -249,25 +273,15 @@ fn main() -> anyhow::Result<()> {
             return rt.block_on(commands::arxiv_sync::status(&config, limit));
         }
         Commands::Codebase(CodebaseCmd::Ingest { path, language, batch }) => {
+            return run_codebase_ingest(&config, path, language.as_deref(), batch);
+        }
+        Commands::Codebase(CodebaseCmd::Update { path }) => {
+            return run_codebase_ingest(&config, path, None, false);
+        }
+        Commands::Codebase(CodebaseCmd::Stats) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            let result = rt.block_on(commands::codebase_ingest::run(
-                &config,
-                path,
-                language.as_deref(),
-                batch,
-            ));
-            return match result {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    if e.downcast_ref::<commands::codebase_ingest::CodebaseIngestFailure>()
-                        .is_some()
-                    {
-                        process::exit(1);
-                    }
-                    Err(e)
-                }
-            };
+            return rt.block_on(commands::codebase_mgmt::run_stats(&config));
         }
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();

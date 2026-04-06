@@ -355,7 +355,7 @@ async fn ingest_file(
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
 
     // Analyze.
-    let analysis = match code::analyze_with_language(&source, lang) {
+    let mut analysis = match code::analyze_with_language(&source, lang) {
         Ok(a) => a,
         Err(CodeAnalysisError::ParseError(msg)) => {
             warn!(path = rel_path, error = %msg, "parse error, skipping");
@@ -402,14 +402,13 @@ async fn ingest_file(
         }
     }
 
-    // Collect Rust use-paths and symbols for later import edge resolution.
+    // Collect Rust use-paths for later import edge resolution.
+    // Symbol transfer into the index is deferred until after all uses of analysis.symbols.
     if lang == Language::Rust {
         let use_paths = rust_imports::collect_use_paths(&analysis.symbols);
         if !use_paths.is_empty() {
             imports.rust_imports.insert(rel_path.to_string(), use_paths);
         }
-        // Store all symbols (not just imports) for the resolution index.
-        imports.rust_file_symbols.insert(rel_path.to_string(), analysis.symbols.clone());
     }
 
     // Chunk with AST-aligned chunking.
@@ -561,6 +560,15 @@ async fn ingest_file(
 
     let num_symbols = analysis.symbols.len();
     let num_chunks = chunks.len();
+
+    // Transfer Rust symbols into the import index (avoids cloning).
+    if lang == Language::Rust {
+        imports.rust_file_symbols.insert(
+            rel_path.to_string(),
+            std::mem::take(&mut analysis.symbols),
+        );
+    }
+
     info!(
         path = rel_path,
         language = lang.name(),

@@ -19,19 +19,6 @@ use super::symbols::{Symbol, SymbolKind};
 use crate::db::collections::CODEBASE;
 use crate::db::keys;
 
-/// A single resolved import edge: source file imports a target symbol.
-#[derive(Debug, Clone)]
-pub struct RustImportEdge {
-    /// Relative path of the importing file.
-    pub source_path: String,
-    /// Relative path of the file that defines the target symbol.
-    pub target_path: String,
-    /// Name of the imported symbol.
-    pub symbol_name: String,
-    /// Full use-path as written (e.g., `hades_core::db::keys`).
-    pub use_path: String,
-}
-
 /// Collect raw use-path strings from a file's symbol list.
 ///
 /// Filters for `SymbolKind::Import` symbols and expands any grouped
@@ -138,8 +125,8 @@ pub fn leaf_name(path: &str) -> &str {
 
 /// Build a symbol index from all ingested files' symbols.
 ///
-/// Returns a map from symbol name → vec of (rel_path, symbol_key).
-/// Both the bare name and qualified name are indexed for flexible matching.
+/// Returns a map from bare symbol name → vec of (rel_path, symbol_key).
+/// Only definition symbols are indexed (imports are skipped).
 pub fn build_symbol_index(
     file_symbols: &HashMap<String, Vec<Symbol>>,
 ) -> HashMap<String, Vec<(String, String)>> {
@@ -278,6 +265,10 @@ fn split_at_top_level_commas(s: &str) -> Vec<&str> {
 /// Prefers targets whose file path structurally matches the use-path.
 /// For example, `use crate::db::keys` should prefer a symbol in
 /// `src/db/keys.rs` over one in `src/config.rs`.
+///
+/// Scoring compares use-path module segments against discrete path
+/// components (not substrings) to avoid false positives like "db"
+/// matching "debug".
 fn pick_best_import_target<'a>(
     targets: &'a [(String, String)],
     use_path: &str,
@@ -304,10 +295,17 @@ fn pick_best_import_target<'a>(
             continue;
         }
 
-        // Score: how many path segments match the file path?
+        // Split rel_path into discrete components for segment matching.
+        // "src/db/keys.rs" → ["src", "db", "keys"]
+        let path_parts: Vec<&str> = rel_path
+            .trim_end_matches(".rs")
+            .split(['/', '\\'])
+            .collect();
+
+        // Score: how many module segments match a discrete path component?
         let score = module_segments
             .iter()
-            .filter(|seg| rel_path.contains(*seg))
+            .filter(|seg| path_parts.contains(seg))
             .count();
 
         if best.is_none() || score > best.unwrap().2 {
@@ -486,6 +484,30 @@ mod tests {
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["target_path"], "src/db/keys.rs");
+    }
+
+    #[test]
+    fn test_resolve_no_substring_false_positive() {
+        // "db" segment should NOT match "debug.rs" — only discrete path components.
+        let mut rust_imports = HashMap::new();
+        rust_imports.insert(
+            "src/main.rs".to_string(),
+            vec!["crate::db::Pool".to_string()],
+        );
+
+        let mut symbol_index = HashMap::new();
+        symbol_index.insert(
+            "Pool".to_string(),
+            vec![
+                ("src/debug.rs".to_string(), "src_debug_rs__Pool__aaaa0000".to_string()),
+                ("src/db/pool.rs".to_string(), "src_db_pool_rs__Pool__bbbb1111".to_string()),
+            ],
+        );
+
+        let edges = resolve_rust_imports(&rust_imports, &symbol_index);
+        assert_eq!(edges.len(), 1);
+        // Must pick src/db/pool.rs (segment match), not src/debug.rs (substring match).
+        assert_eq!(edges[0]["target_path"], "src/db/pool.rs");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Materializes symbol nodes and edges from file-level extraction data
 //! for storage in ArangoDB graph collections:
 //! - `codebase_symbols` — per-symbol documents
-//! - `codebase_edges` — defines, calls, implements, pyo3_exposes, ffi_exposes
+//! - `codebase_edges` — defines, calls, implements, imports, pyo3_exposes, ffi_exposes
 
 use std::collections::{HashMap, HashSet};
 

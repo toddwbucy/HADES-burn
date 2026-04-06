@@ -242,7 +242,7 @@ fn hybrid_rerank(query_text: &str, mut results: Vec<Value>) -> Vec<Value> {
     results
 }
 
-/// Tokenize text into lowercase terms, filtering short/stop words.
+/// Tokenize text into lowercase terms, filtering tokens shorter than 2 chars.
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric() && c != '-')
         .filter(|w| w.len() >= 2)
@@ -250,7 +250,7 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Compute keyword term-frequency score: fraction of query terms found in text.
+/// Compute term-coverage score: fraction of query terms present in text.
 fn keyword_tf_score(query_terms: &[String], text: &str) -> f64 {
     let text_lower = text.to_lowercase();
     let text_terms: HashMap<&str, usize> = {

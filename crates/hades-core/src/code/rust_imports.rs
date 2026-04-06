@@ -82,6 +82,14 @@ pub fn expand_use_group(use_path: &str) -> Vec<String> {
         if part.is_empty() {
             continue;
         }
+        // `use foo::{self}` means "import foo itself" → emit "foo", not "foo::self".
+        if part == "self" {
+            let module = prefix.trim_end_matches("::");
+            if !module.is_empty() {
+                result.push(format!("{module}{suffix}"));
+            }
+            continue;
+        }
         // Recursively expand nested groups.
         let full = format!("{prefix}{part}{suffix}");
         result.extend(expand_use_group(&full));
@@ -115,11 +123,15 @@ pub fn strip_crate_qualifiers(path: &str) -> &str {
 /// `"std::collections::HashMap"` → `"HashMap"`
 /// `"serde::Deserialize"` → `"Deserialize"`
 /// `"HashMap"` → `"HashMap"`
+/// `"foo::Bar as Baz"` → `"Bar"` (definition name, not alias)
 pub fn leaf_name(path: &str) -> &str {
-    // Handle "as" renames: "foo::Bar as Baz" → "Baz"
-    if let Some((_left, alias)) = path.rsplit_once(" as ") {
-        return alias.trim();
-    }
+    // Handle "as" renames: "foo::Bar as Baz" → use "Bar" (the definition name).
+    // The symbol index is keyed by definition names, not aliases.
+    let path = if let Some((left, _alias)) = path.rsplit_once(" as ") {
+        left.trim()
+    } else {
+        path
+    };
     path.rsplit("::").next().unwrap_or(path)
 }
 
@@ -345,7 +357,8 @@ mod tests {
     #[test]
     fn test_expand_self_import() {
         let result = expand_use_group("crate::code::{self, Language}");
-        assert!(result.contains(&"crate::code::self".to_string()));
+        // `self` in a use group means "import the module itself" → "crate::code"
+        assert!(result.contains(&"crate::code".to_string()));
         assert!(result.contains(&"crate::code::Language".to_string()));
     }
 
@@ -378,7 +391,8 @@ mod tests {
 
     #[test]
     fn test_leaf_name_with_rename() {
-        assert_eq!(leaf_name("foo::Bar as Baz"), "Baz");
+        // Returns the definition name, not the alias — symbol index is keyed by definitions.
+        assert_eq!(leaf_name("foo::Bar as Baz"), "Bar");
     }
 
     #[test]
@@ -475,6 +489,27 @@ mod tests {
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["target_path"], "src/db/keys.rs");
+    }
+
+    #[test]
+    fn test_resolve_aliased_import() {
+        // `use crate::config::Config as Cfg` should look up "Config", not "Cfg".
+        let mut rust_imports = HashMap::new();
+        rust_imports.insert(
+            "src/main.rs".to_string(),
+            vec!["crate::config::Config as Cfg".to_string()],
+        );
+
+        let mut symbol_index = HashMap::new();
+        symbol_index.insert(
+            "Config".to_string(),
+            vec![("src/config.rs".to_string(), "src_config_rs__Config__abcd1234".to_string())],
+        );
+
+        let edges = resolve_rust_imports(&rust_imports, &symbol_index);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["symbol_name"], "Config");
+        assert_eq!(edges[0]["target_path"], "src/config.rs");
     }
 
     #[test]

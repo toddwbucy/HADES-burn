@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,31 +42,36 @@ class DoclingExtractor:
 
     def __init__(self, *, use_ocr: bool = False, use_fallback: bool = True) -> None:
         self._converter = None
+        self._converter_lock = threading.Lock()
         self._use_ocr = use_ocr
         self._use_fallback = use_fallback
 
     @property
     def converter(self):
-        """Lazy-load the Docling document converter."""
+        """Lazy-load the Docling document converter (thread-safe)."""
         if self._converter is None:
-            logger.info("Loading Docling document converter...")
-            start = time.time()
-            from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import (
-                PdfPipelineOptions,
-                TableStructureOptions,
-            )
-            from docling.document_converter import DocumentConverter, PdfFormatOption
+            with self._converter_lock:
+                if self._converter is not None:
+                    return self._converter
 
-            pdf_options = PdfPipelineOptions(
-                do_table_structure=True,
-                do_ocr=self._use_ocr,
-                table_structure_options=TableStructureOptions(do_cell_matching=True),
-            )
-            self._converter = DocumentConverter(
-                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
-            )
-            logger.info("Docling converter loaded in %.2fs", time.time() - start)
+                logger.info("Loading Docling document converter...")
+                start = time.time()
+                from docling.datamodel.base_models import InputFormat
+                from docling.datamodel.pipeline_options import (
+                    PdfPipelineOptions,
+                    TableStructureOptions,
+                )
+                from docling.document_converter import DocumentConverter, PdfFormatOption
+
+                pdf_options = PdfPipelineOptions(
+                    do_table_structure=True,
+                    do_ocr=self._use_ocr,
+                    table_structure_options=TableStructureOptions(do_cell_matching=True),
+                )
+                self._converter = DocumentConverter(
+                    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
+                )
+                logger.info("Docling converter loaded in %.2fs", time.time() - start)
         return self._converter
 
     def extract(
@@ -83,6 +89,7 @@ class DoclingExtractor:
         """
         path = Path(file_path)
         start = time.time()
+        effective_ocr = use_ocr if use_ocr is not None else self._use_ocr
 
         if not path.exists():
             return ExtractionResult(error=f"File not found: {path}")
@@ -104,6 +111,12 @@ class DoclingExtractor:
 
         # PDF extraction via Docling
         if path.suffix.lower() == ".pdf":
+            if effective_ocr != self._use_ocr:
+                logger.warning(
+                    "Per-call use_ocr=%s differs from converter default=%s; "
+                    "converter OCR setting cannot be changed at call time",
+                    effective_ocr, self._use_ocr,
+                )
             return self._extract_pdf(path, start, extract_tables, extract_equations, extract_images)
 
         return ExtractionResult(error=f"Unsupported format: {path.suffix}")
@@ -170,14 +183,26 @@ class DoclingExtractor:
                 })
 
         if extract_equations and doc is not None:
-            # Docling v2 stores equations as BaseCell objects in doc.equations
-            for i, item in enumerate(getattr(doc, "equations", [])):
+            # Docling v2: try doc.equations first, fall back to scanning doc.texts
+            eq_items = getattr(doc, "equations", []) or []
+            for i, item in enumerate(eq_items):
                 equations.append({
                     "latex": getattr(item, "text", str(item)),
                     "text": getattr(item, "text", ""),
                     "index": i,
                     "is_inline": getattr(item, "is_inline", False),
                 })
+            # If no equations found via doc.equations, scan texts for formula entries
+            if not equations:
+                for item in getattr(doc, "texts", []):
+                    obj_type = getattr(item, "obj_type", "")
+                    if obj_type == "equation" or hasattr(item, "latex"):
+                        equations.append({
+                            "latex": getattr(item, "latex", getattr(item, "text", str(item))),
+                            "text": getattr(item, "text", ""),
+                            "index": len(equations),
+                            "is_inline": getattr(item, "is_inline", False),
+                        })
 
         if extract_images and doc is not None:
             for i, fig in enumerate(getattr(doc, "pictures", [])):

@@ -105,7 +105,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
             dimension=EMBEDDING_DIM,
             max_seq_length=MAX_TOKENS,
             supported_tasks=SUPPORTED_TASKS,
-            device=self._config.device,
+            device=self._embedder.device,
             model_loaded=self._embedder.is_loaded,
         )
 
@@ -124,8 +124,13 @@ async def idle_monitor(
     servicer: EmbeddingServicer, config: EmbeddingConfig
 ) -> None:
     """Background task to unload model after idle timeout."""
+    poll_interval = (
+        min(60, max(1, int(config.idle_timeout_seconds)))
+        if config.idle_timeout_seconds > 0
+        else 60
+    )
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(poll_interval)
         if (
             config.idle_timeout_seconds > 0
             and servicer._active_requests == 0
@@ -155,6 +160,9 @@ async def serve() -> None:
     embedding_pb2_grpc.add_EmbeddingServiceServicer_to_server(servicer, server)
 
     socket_path = config.socket_path
+    if not socket_path:
+        raise ValueError("HADES_EMBEDDER_SOCKET must be a non-empty path")
+
     socket_dir = Path(socket_path).parent
     socket_dir.mkdir(parents=True, exist_ok=True)
 

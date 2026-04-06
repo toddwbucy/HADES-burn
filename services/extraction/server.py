@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -62,6 +63,7 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
         self._docling: DoclingExtractor | None = None
         self._latex = LaTeXExtractor()
         self._last_request_time = time.time()
+        self._active_requests = 0
 
     def _get_docling(self) -> DoclingExtractor:
         """Lazy-load the Docling extractor."""
@@ -88,55 +90,39 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
 
     async def Extract(self, request, context):
         """Extract structured content from a document."""
-        self._last_request_time = time.time()
         source_type = self._detect_source_type(request)
+
+        try:
+            type_name = extraction_pb2.SourceType.Name(source_type)
+        except ValueError:
+            type_name = f"UNKNOWN({source_type})"
 
         logger.info(
             "Extract request: path=%s, source_type=%s",
             request.file_path,
-            extraction_pb2.SourceType.Name(source_type),
+            type_name,
         )
 
-        # Route to appropriate backend
-        loop = asyncio.get_running_loop()
-        if source_type == extraction_pb2.SOURCE_TYPE_PDF:
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._get_docling().extract(
-                    request.file_path,
-                    extract_tables=request.extract_tables,
-                    extract_equations=request.extract_equations,
-                    extract_images=request.extract_images,
-                    use_ocr=request.use_ocr if request.use_ocr else None,
-                ),
+        # If content bytes provided, write to temp file
+        tmp_path = None
+        if request.content:
+            suffix = Path(request.file_path).suffix if request.file_path else ""
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.write(request.content)
+            tmp.close()
+            tmp_path = tmp.name
+        file_path = tmp_path or request.file_path
+
+        self._active_requests += 1
+        try:
+            result = await self._route_extraction(
+                file_path, source_type, request
             )
-        elif source_type == extraction_pb2.SOURCE_TYPE_LATEX:
-            result = await loop.run_in_executor(
-                None, lambda: self._latex.extract(request.file_path)
-            )
-        elif source_type in (
-            extraction_pb2.SOURCE_TYPE_TEXT,
-            extraction_pb2.SOURCE_TYPE_MARKDOWN,
-        ):
-            result = await loop.run_in_executor(
-                None, lambda: self._extract_text(request.file_path)
-            )
-        elif source_type == extraction_pb2.SOURCE_TYPE_CODE:
-            # Code files: read as plain text (AST parsing is done in Rust)
-            result = await loop.run_in_executor(
-                None, lambda: self._extract_text(request.file_path)
-            )
-        else:
-            # Unknown: try docling (it handles many formats)
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._get_docling().extract(
-                    request.file_path,
-                    extract_tables=request.extract_tables,
-                    extract_equations=request.extract_equations,
-                    extract_images=request.extract_images,
-                ),
-            )
+        finally:
+            self._active_requests -= 1
+            self._last_request_time = time.time()
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
 
         if result.error:
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -179,11 +165,54 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
             source_type=source_type,
         )
 
+    async def _route_extraction(self, file_path, source_type, request):
+        """Route to appropriate backend based on source type."""
+        loop = asyncio.get_running_loop()
+        if source_type == extraction_pb2.SOURCE_TYPE_PDF:
+            return await loop.run_in_executor(
+                None,
+                lambda: self._get_docling().extract(
+                    file_path,
+                    extract_tables=request.extract_tables,
+                    extract_equations=request.extract_equations,
+                    extract_images=request.extract_images,
+                    use_ocr=request.use_ocr if request.use_ocr else None,
+                ),
+            )
+        elif source_type == extraction_pb2.SOURCE_TYPE_LATEX:
+            return await loop.run_in_executor(
+                None,
+                lambda: self._latex.extract(
+                    file_path,
+                    extract_tables=request.extract_tables,
+                    extract_equations=request.extract_equations,
+                ),
+            )
+        elif source_type in (
+            extraction_pb2.SOURCE_TYPE_TEXT,
+            extraction_pb2.SOURCE_TYPE_MARKDOWN,
+            extraction_pb2.SOURCE_TYPE_CODE,
+        ):
+            return await loop.run_in_executor(
+                None, lambda: self._extract_text(file_path)
+            )
+        else:
+            # Unknown: try docling (it handles many formats)
+            return await loop.run_in_executor(
+                None,
+                lambda: self._get_docling().extract(
+                    file_path,
+                    extract_tables=request.extract_tables,
+                    extract_equations=request.extract_equations,
+                    extract_images=request.extract_images,
+                ),
+            )
+
     async def Capabilities(self, request, context):
         """Report extractor capabilities."""
         return extraction_pb2.ExtractorInfo(
             supported_extensions=[
-                ".pdf", ".tex", ".gz", ".tar.gz",
+                ".pdf", ".tex", ".gz", ".tar.gz", ".tgz",
                 ".md", ".markdown", ".txt", ".text", ".rst",
                 ".py", ".rs", ".cu", ".cpp", ".c", ".js", ".ts", ".go", ".java",
             ],
@@ -235,10 +264,16 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
 
 async def idle_monitor(servicer: ExtractionServicer, config: ExtractionConfig) -> None:
     """Background task to unload models after idle timeout."""
+    poll_interval = (
+        min(60, max(1, int(config.idle_timeout_seconds)))
+        if config.idle_timeout_seconds > 0
+        else 60
+    )
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(poll_interval)
         if (
             config.idle_timeout_seconds > 0
+            and servicer._active_requests == 0
             and servicer._docling is not None
             and servicer._docling.is_loaded
             and (time.time() - servicer.last_request_time) > config.idle_timeout_seconds

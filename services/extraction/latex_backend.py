@@ -25,7 +25,14 @@ class LaTeXExtractor:
 
     SUPPORTED_EXTENSIONS = {".tex", ".gz", ".tar.gz"}
 
-    def extract(self, file_path: str | Path, **kwargs: Any) -> ExtractionResult:
+    def extract(
+        self,
+        file_path: str | Path,
+        *,
+        extract_tables: bool = True,
+        extract_equations: bool = True,
+        **kwargs: Any,
+    ) -> ExtractionResult:
         path = Path(file_path)
         start = time.time()
 
@@ -37,11 +44,11 @@ class LaTeXExtractor:
 
         try:
             if name.endswith(".tar.gz") or name.endswith(".tgz"):
-                return self._extract_tar_gz(path, start)
+                return self._extract_tar_gz(path, start, extract_tables, extract_equations)
             elif suffix == ".gz":
-                return self._extract_plain_gz(path, start)
+                return self._extract_plain_gz(path, start, extract_tables, extract_equations)
             elif suffix == ".tex":
-                return self._extract_tex(path, start)
+                return self._extract_tex(path, start, extract_tables, extract_equations)
             else:
                 return ExtractionResult(error=f"Unsupported LaTeX format: {suffix}")
         except Exception as e:
@@ -50,13 +57,16 @@ class LaTeXExtractor:
                 processing_time=time.time() - start,
             )
 
-    def _extract_tar_gz(self, path: Path, start: float) -> ExtractionResult:
+    def _extract_tar_gz(self, path: Path, start: float, extract_tables: bool = True, extract_equations: bool = True) -> ExtractionResult:
         """Extract from arXiv .tar.gz source package."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             with tarfile.open(path, "r:gz") as tar:
                 # Security: filter members
-                safe = [m for m in tar.getmembers() if self._is_safe(m, tmp_path)]
+                safe = [
+                    m for m in tar.getmembers()
+                    if (m.isreg() or m.isdir()) and self._is_safe(m, tmp_path)
+                ]
                 tar.extractall(tmp_path, members=safe)
 
             # Find the main .tex file (largest)
@@ -70,26 +80,26 @@ class LaTeXExtractor:
             main_tex = max(tex_files, key=lambda f: f.stat().st_size)
             latex = main_tex.read_text(encoding="utf-8", errors="replace")
 
-            return self._build_result(latex, path, start)
+            return self._build_result(latex, path, start, extract_tables, extract_equations)
 
-    def _extract_plain_gz(self, path: Path, start: float) -> ExtractionResult:
+    def _extract_plain_gz(self, path: Path, start: float, extract_tables: bool = True, extract_equations: bool = True) -> ExtractionResult:
         """Extract from gzipped .tex file."""
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
             latex = f.read()
-        return self._build_result(latex, path, start)
+        return self._build_result(latex, path, start, extract_tables, extract_equations)
 
-    def _extract_tex(self, path: Path, start: float) -> ExtractionResult:
+    def _extract_tex(self, path: Path, start: float, extract_tables: bool = True, extract_equations: bool = True) -> ExtractionResult:
         """Extract from plain .tex file."""
         latex = path.read_text(encoding="utf-8", errors="replace")
-        return self._build_result(latex, path, start)
+        return self._build_result(latex, path, start, extract_tables, extract_equations)
 
-    def _build_result(self, latex: str, path: Path, start: float) -> ExtractionResult:
+    def _build_result(self, latex: str, path: Path, start: float, extract_tables: bool = True, extract_equations: bool = True) -> ExtractionResult:
         """Build structured result from LaTeX source."""
         # Strip LaTeX commands for plain text (rough)
         text = self._strip_commands(latex)
 
-        equations = self._extract_equations(latex)
-        tables = self._extract_tables(latex)
+        equations = self._extract_equations(latex) if extract_equations else []
+        tables = self._extract_tables(latex) if extract_tables else []
         sections = self._extract_sections(latex)
 
         metadata = {

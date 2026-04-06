@@ -146,6 +146,10 @@ class JinaV4Embedder:
         return self._model_name
 
     @property
+    def device(self) -> str:
+        return self._device
+
+    @property
     def embedding_dimension(self) -> int:
         return EMBEDDING_DIM
 
@@ -175,6 +179,8 @@ class JinaV4Embedder:
         """
         all_embeddings: list[np.ndarray] = []
         batch_size = batch_size or self._batch_size
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
 
         with torch.no_grad():
             for i in range(0, len(texts), batch_size):

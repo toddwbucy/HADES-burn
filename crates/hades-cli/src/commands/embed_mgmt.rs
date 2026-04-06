@@ -14,6 +14,8 @@ use serde_json::json;
 use hades_core::config::HadesConfig;
 use hades_core::persephone::embedder_http::EmbedderHttpClient;
 
+use super::output::{self, OutputFormat};
+
 // ── embed text (direct HTTP, no ArangoDB needed) ─────────────────────────
 
 /// `hades embed text TEXT [--format F]`
@@ -24,32 +26,34 @@ pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> R
         .await
         .context("embedding service error")?;
 
-    match format {
-        "raw" => {
-            // Output just the embedding vector for piping
-            println!("{}", serde_json::to_string(&result.embedding)?);
-        }
-        _ => {
-            let preview_len = 10.min(result.embedding.len());
-            let text_preview: String = if text.chars().count() > 100 {
-                let mut s: String = text.chars().take(100).collect();
-                s.push_str("...");
-                s
-            } else {
-                text.to_string()
-            };
-            let output = json!({
-                "text": text_preview,
-                "dimension": result.dimension,
-                "model": result.model,
-                "embedding": result.embedding,
-                "embedding_preview": &result.embedding[..preview_len],
-                "embedding_truncated": result.embedding.len() > preview_len,
-                "duration_ms": result.duration_ms,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
+    if format == "raw" {
+        // Output just the embedding vector for piping.
+        println!("{}", serde_json::to_string(&result.embedding)?);
+        return Ok(());
     }
+
+    let fmt = OutputFormat::parse(format)?;
+    let preview_len = 10.min(result.embedding.len());
+    let text_preview: String = if text.chars().count() > 100 {
+        let mut s: String = text.chars().take(100).collect();
+        s.push_str("...");
+        s
+    } else {
+        text.to_string()
+    };
+    output::print_output(
+        "embed.text",
+        json!({
+            "text": text_preview,
+            "dimension": result.dimension,
+            "model": result.model,
+            "embedding": result.embedding,
+            "embedding_preview": &result.embedding[..preview_len],
+            "embedding_truncated": result.embedding.len() > preview_len,
+            "duration_ms": result.duration_ms,
+        }),
+        &fmt,
+    );
     Ok(())
 }
 
@@ -62,26 +66,32 @@ pub async fn run_service_status(config: &HadesConfig) -> Result<()> {
 
     match client.health().await {
         Ok(health) => {
-            let result = json!({
-                "service": "hades-embedder",
-                "status": health.status,
-                "model_loaded": health.model_loaded,
-                "device": health.device,
-                "model_name": health.model_name,
-                "uptime_seconds": health.uptime_seconds,
-                "socket_path": socket,
-            });
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            output::print_output(
+                "embed.service.status",
+                json!({
+                    "service": "hades-embedder",
+                    "status": health.status,
+                    "model_loaded": health.model_loaded,
+                    "device": health.device,
+                    "model_name": health.model_name,
+                    "uptime_seconds": health.uptime_seconds,
+                    "socket_path": socket,
+                }),
+                &OutputFormat::Json,
+            );
         }
         Err(_) => {
-            let result = json!({
-                "service": "hades-embedder",
-                "status": "stopped",
-                "model_loaded": false,
-                "socket_path": socket,
-                "hint": "Start with: sudo systemctl start hades-embedder",
-            });
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            output::print_output(
+                "embed.service.status",
+                json!({
+                    "service": "hades-embedder",
+                    "status": "stopped",
+                    "model_loaded": false,
+                    "socket_path": socket,
+                    "hint": "Start with: sudo systemctl start hades-embedder",
+                }),
+                &OutputFormat::Json,
+            );
         }
     }
     Ok(())
@@ -110,13 +120,16 @@ pub async fn run_service_start(config: &HadesConfig, foreground: bool) -> Result
     let client = EmbedderHttpClient::new(&config.embedding.service.socket);
     let available = client.health().await.is_ok();
 
-    let result = json!({
-        "action": "started",
-        "service": "hades-embedder",
-        "available": available,
-        "note": if available { None } else { Some("Model loading may take 10-30 seconds") },
-    });
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output(
+        "embed.service.start",
+        json!({
+            "action": "started",
+            "service": "hades-embedder",
+            "available": available,
+            "note": if available { None } else { Some("Model loading may take 10-30 seconds") },
+        }),
+        &OutputFormat::Json,
+    );
     Ok(())
 }
 
@@ -134,12 +147,15 @@ pub async fn run_service_stop() -> Result<()> {
         bail!("failed to stop service: {}", stderr.trim());
     }
 
-    let result = json!({
-        "action": "stopped",
-        "service": "hades-embedder",
-        "method": "systemctl",
-    });
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output(
+        "embed.service.stop",
+        json!({
+            "action": "stopped",
+            "service": "hades-embedder",
+            "method": "systemctl",
+        }),
+        &OutputFormat::Json,
+    );
     Ok(())
 }
 
@@ -157,13 +173,16 @@ pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
         .ok()
         .map(|h| h.device);
 
-    let result = json!({
-        "cuda_available": !gpus.is_empty(),
-        "device_count": gpus.len(),
-        "gpus": gpus,
-        "embedder_service_device": embedder_device,
-    });
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output(
+        "embed.gpu.status",
+        json!({
+            "cuda_available": !gpus.is_empty(),
+            "device_count": gpus.len(),
+            "gpus": gpus,
+            "embedder_service_device": embedder_device,
+        }),
+        &OutputFormat::Json,
+    );
     Ok(())
 }
 
@@ -173,8 +192,7 @@ pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
 pub fn run_gpu_list() -> Result<()> {
     let gpus = parse_nvidia_smi_output(&run_nvidia_smi()?);
 
-    let result = json!({ "gpus": gpus });
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("embed.gpu.list", json!({ "gpus": gpus }), &OutputFormat::Json);
     Ok(())
 }
 
@@ -230,20 +248,17 @@ pub fn run_extract(file: &Path, format: &str, output: Option<&Path>) -> Result<(
         eprintln!("Written to {}", out_path.display());
     }
 
-    match format {
-        "json" => {
-            let result = json!({
-                "text": text,
-                "source_path": file.display().to_string(),
-                "format_detected": ext,
-                "text_length": text.len(),
-            });
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        _ => {
-            print!("{text}");
-        }
-    }
+    let fmt = OutputFormat::parse(format)?;
+    output::print_output(
+        "extract",
+        json!({
+            "text": text,
+            "source_path": file.display().to_string(),
+            "format_detected": ext,
+            "text_length": text.len(),
+        }),
+        &fmt,
+    );
     Ok(())
 }
 

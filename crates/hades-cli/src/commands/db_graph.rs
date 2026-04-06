@@ -1,8 +1,9 @@
 //! Native Rust handlers for `hades db graph` commands.
 //!
 //! Each function constructs a [`DaemonCommand`], calls [`dispatch`], and
-//! prints the result to stdout.  Graph create/drop enforce the database
-//! safety guard (production databases are read-only).
+//! prints the result to stdout using the standard HADES JSON envelope.
+//! Graph create/drop enforce the database safety guard (production
+//! databases are read-only).
 
 use anyhow::{Context, Result};
 
@@ -10,11 +11,13 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
-/// Connect, dispatch a command, and pretty-print the JSON result.
-async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand) -> Result<()> {
+use super::output::{self, OutputFormat};
+
+/// Connect, dispatch a command, and print the result in the requested format.
+async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, command_name: &str) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(&pool, config, cmd).await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output(command_name, result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -37,6 +40,7 @@ pub async fn run_traverse(
             limit: None,
             graph: graph.map(String::from),
         }),
+        "db.graph.traverse",
     )
     .await
 }
@@ -56,6 +60,7 @@ pub async fn run_shortest_path(
             direction: "any".to_string(),
             graph: graph.map(String::from),
         }),
+        "db.graph.shortest-path",
     )
     .await
 }
@@ -76,13 +81,14 @@ pub async fn run_neighbors(
             limit: Some(limit),
             graph: graph.map(String::from),
         }),
+        "db.graph.neighbors",
     )
     .await
 }
 
 /// `hades db graph list`
 pub async fn run_list(config: &HadesConfig) -> Result<()> {
-    dispatch_and_print(config, DaemonCommand::DbGraphList {}).await
+    dispatch_and_print(config, DaemonCommand::DbGraphList {}, "db.graph.list").await
 }
 
 /// `hades db graph create NAME [--edge-definitions JSON]`
@@ -102,6 +108,7 @@ pub async fn run_create(
             name: name.to_string(),
             edge_definitions: edge_defs,
         }),
+        "db.graph.create",
     )
     .await
 }
@@ -128,6 +135,7 @@ pub async fn run_drop(
             drop_collections,
             force,
         }),
+        "db.graph.drop",
     )
     .await
 }

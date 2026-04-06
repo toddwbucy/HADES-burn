@@ -11,8 +11,8 @@ pub enum SmellCmd {
         /// Path to file or directory.
         path: PathBuf,
 
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
         /// Verbose output.
@@ -39,8 +39,8 @@ pub enum SmellCmd {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
 
-        /// Output format (text, json, html).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 }

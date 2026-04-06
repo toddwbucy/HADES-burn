@@ -13,6 +13,8 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, CodebaseStatsParams, DaemonCommand};
 
+use super::output::{self, OutputFormat};
+
 // ── codebase stats ──────────────────────────────────────────────────
 
 /// `hades codebase stats`
@@ -23,7 +25,7 @@ pub async fn run_stats(config: &HadesConfig) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("codebase.stats", result.clone(), &OutputFormat::Json);
 
     // Human-readable summary to stderr.
     if let Some(cols) = result["collections"].as_object() {

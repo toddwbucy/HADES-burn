@@ -31,6 +31,8 @@ use hades_core::db::ArangoPool;
 use hades_core::persephone::embedding::EmbeddingClient;
 use hades_core::HadesConfig;
 
+use super::output::{self, OutputFormat};
+
 /// Directories to skip during recursive traversal.
 const SKIP_DIRS: &[&str] = &[
     ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
@@ -121,13 +123,11 @@ pub async fn run(
     // Discover source files.
     let files = discover_files(&path, lang_override)?;
     if files.is_empty() {
-        let output = json!({
-            "success": true,
-            "command": "codebase ingest",
-            "data": { "total": 0, "message": "no supported source files found" },
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        output::print_output(
+            "codebase.ingest",
+            json!({ "total": 0, "message": "no supported source files found" }),
+            &OutputFormat::Json,
+        );
         return Ok(());
     }
 
@@ -231,24 +231,19 @@ pub async fn run(
     let skipped = results.iter().filter(|r| r.skipped == Some(true)).count();
     let duration_ms = cmd_start.elapsed().as_millis() as u64;
 
-    let output = json!({
-        "success": failed == 0,
-        "command": "codebase ingest",
-        "data": {
-            "total": total,
-            "completed": succeeded,
-            "failed": failed,
-            "skipped": skipped,
-            "import_edges": total_import_edges,
-            "python_import_edges": py_import_edges.len(),
-            "rust_import_edges": rs_import_edges.len(),
-            "results": results,
-        },
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+    let result_data = json!({
+        "total": total,
+        "completed": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "import_edges": total_import_edges,
+        "python_import_edges": py_import_edges.len(),
+        "rust_import_edges": rs_import_edges.len(),
+        "results": results,
         "duration_ms": duration_ms,
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("codebase.ingest", result_data, &OutputFormat::Json);
 
     if failed > 0 {
         return Err(CodebaseIngestFailure { total, failed }.into());

@@ -15,6 +15,8 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
+use super::output::{self, OutputFormat};
+
 /// Read JSON data from `--data` arg, `--input` file, or stdin.
 fn resolve_json_input(data: Option<&str>, input: Option<&Path>) -> Result<serde_json::Value> {
     if let Some(s) = data {
@@ -58,7 +60,7 @@ pub async fn run_insert(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.insert", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -82,7 +84,7 @@ pub async fn run_update(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.update", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -110,7 +112,7 @@ pub async fn run_delete(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.delete", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -136,7 +138,7 @@ pub async fn run_purge(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.purge", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -157,7 +159,7 @@ pub async fn run_create_collection(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.create", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -187,13 +189,14 @@ pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()>
         .await
         .with_context(|| format!("failed to create database '{name}'"))?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
+    output::print_output(
+        "db.create-database",
+        json!({
             "created": true,
             "name": name,
             "response": resp,
-        }))?
+        }),
+        &OutputFormat::Json,
     );
     Ok(())
 }
@@ -225,7 +228,7 @@ pub async fn run_create_index(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("db.create-index", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -366,10 +369,13 @@ pub async fn run_backfill_text(
         }
     }
 
-    let output = json!({
-        "total_updated": total_updated,
-        "dry_run": dry_run,
-    });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output(
+        "db.backfill-text",
+        json!({
+            "total_updated": total_updated,
+            "dry_run": dry_run,
+        }),
+        &OutputFormat::Json,
+    );
     Ok(())
 }

@@ -11,6 +11,8 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::persephone::embedding::EmbeddingClient;
 
+use super::output::{self, OutputFormat};
+
 /// Run the `hades arxiv sync` command.
 pub async fn run(
     config: &HadesConfig,
@@ -100,7 +102,7 @@ pub async fn run(
     if let Some(wm_err) = &watermark_error {
         summary["watermark_error"] = json!(wm_err);
     }
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    output::print_output("arxiv.sync", summary, &OutputFormat::Json);
 
     if result.errors > 0 {
         warn!(errors = result.errors, "some papers failed to sync");
@@ -119,19 +121,25 @@ pub async fn status(config: &HadesConfig, limit: u32) -> Result<()> {
             let history_len = watermark.sync_history.len();
             let start = history_len.saturating_sub(limit as usize);
 
-            let output = json!({
-                "last_sync": watermark.last_sync,
-                "total_synced": watermark.total_synced,
-                "history": &watermark.sync_history[start..],
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            output::print_output(
+                "arxiv.sync-status",
+                json!({
+                    "last_sync": watermark.last_sync,
+                    "total_synced": watermark.total_synced,
+                    "history": &watermark.sync_history[start..],
+                }),
+                &OutputFormat::Json,
+            );
         }
         None => {
-            let output = json!({
-                "status": "no_sync_history",
-                "message": "No sync has been performed yet.",
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            output::print_output(
+                "arxiv.sync-status",
+                json!({
+                    "status": "no_sync_history",
+                    "message": "No sync has been performed yet.",
+                }),
+                &OutputFormat::Json,
+            );
         }
     }
 

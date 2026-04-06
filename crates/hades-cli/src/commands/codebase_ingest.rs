@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 use hades_core::chunking::ChunkingStrategy;
-use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol};
+use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
 use hades_core::code::rust_imports;
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
@@ -70,8 +70,10 @@ pub struct CodebaseIngestFailure {
 /// Collects per-file import data during the ingest loop so that
 /// import edges can be resolved in a batch pass after all files are processed.
 struct ImportContext {
-    /// Python: rel_path → list of imported module names.
-    python_imports: HashMap<String, Vec<String>>,
+    /// Python: rel_path → list of import symbols (with metadata for resolution).
+    python_imports: HashMap<String, Vec<Symbol>>,
+    /// Python: rel_path → all definition symbols (for building the resolution index).
+    python_file_symbols: HashMap<String, Vec<Symbol>>,
     /// Rust: rel_path → list of expanded use-paths.
     rust_imports: HashMap<String, Vec<String>>,
     /// Rust: rel_path → all symbols (for building the resolution index).
@@ -147,6 +149,7 @@ pub async fn run(
     // Accumulators for cross-file import resolution.
     let mut imports = ImportContext {
         python_imports: HashMap::new(),
+        python_file_symbols: HashMap::new(),
         rust_imports: HashMap::new(),
         rust_file_symbols: HashMap::new(),
     };
@@ -203,8 +206,13 @@ pub async fn run(
         }
     }
 
-    // Resolve Python import graph edges.
-    let py_import_edges = resolve_python_imports(&imports.python_imports, &base);
+    // Resolve Python import graph edges (file→symbol where possible, file→file fallback).
+    let py_symbol_index = build_python_symbol_index(&imports.python_file_symbols);
+    let py_import_edges = resolve_python_imports(
+        &imports.python_imports,
+        &imports.python_file_symbols,
+        &py_symbol_index,
+    );
     if !py_import_edges.is_empty() {
         info!(edge_count = py_import_edges.len(), "resolved Python import edges");
         if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &py_import_edges, true).await {
@@ -384,16 +392,16 @@ async fn ingest_file(
         });
     }
 
-    // Collect Python import names for later edge resolution.
+    // Collect Python import symbols for later edge resolution.
     if lang == Language::Python {
-        let py_imports: Vec<String> = analysis
+        let py_import_syms: Vec<Symbol> = analysis
             .symbols
             .iter()
             .filter(|s| s.kind == hades_core::code::SymbolKind::Import)
-            .filter_map(|s| s.metadata.get("module").and_then(|v| v.as_str()).map(String::from))
+            .cloned()
             .collect();
-        if !py_imports.is_empty() {
-            imports.python_imports.insert(rel_path.to_string(), py_imports);
+        if !py_import_syms.is_empty() {
+            imports.python_imports.insert(rel_path.to_string(), py_import_syms);
         }
     }
 
@@ -556,12 +564,21 @@ async fn ingest_file(
     let num_symbols = analysis.symbols.len();
     let num_chunks = chunks.len();
 
-    // Transfer Rust symbols into the import index (avoids cloning).
-    if lang == Language::Rust {
-        imports.rust_file_symbols.insert(
-            rel_path.to_string(),
-            std::mem::take(&mut analysis.symbols),
-        );
+    // Transfer symbols into the import index (avoids cloning).
+    match lang {
+        Language::Rust => {
+            imports.rust_file_symbols.insert(
+                rel_path.to_string(),
+                std::mem::take(&mut analysis.symbols),
+            );
+        }
+        Language::Python => {
+            imports.python_file_symbols.insert(
+                rel_path.to_string(),
+                std::mem::take(&mut analysis.symbols),
+            );
+        }
+        _ => {}
     }
 
     info!(
@@ -611,84 +628,186 @@ async fn check_unchanged(
 ///
 /// Only creates edges for imports that resolve to files within the
 /// ingested set. External package imports are silently skipped.
-fn resolve_python_imports(
-    python_imports: &HashMap<String, Vec<String>>,
-    _base: &Path,
-) -> Vec<Value> {
-    // Build a mapping from Python module name → relative file path.
+/// Build a symbol index for Python files: bare name → vec of (rel_path, symbol_key).
+fn build_python_symbol_index(
+    file_symbols: &HashMap<String, Vec<Symbol>>,
+) -> HashMap<String, Vec<(String, String)>> {
+    let mut index: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (rel_path, symbols) in file_symbols {
+        let fkey = keys::file_key(rel_path);
+        for sym in symbols {
+            // Only index definitions, not imports.
+            if sym.kind == SymbolKind::Import {
+                continue;
+            }
+            let skey = keys::symbol_key(&fkey, &sym.name);
+            index
+                .entry(sym.name.clone())
+                .or_default()
+                .push((rel_path.clone(), skey));
+        }
+    }
+    index
+}
+
+/// Build a mapping from Python module name → relative file path.
+fn build_python_module_map(all_files: &HashMap<String, Vec<Symbol>>) -> HashMap<String, String> {
     let mut module_to_file: HashMap<String, String> = HashMap::new();
-    for rel_path in python_imports.keys() {
-        // Convert path to module name using Path components (platform-safe).
-        // "core/models.py" → ["core", "models"] → "core.models"
+    for rel_path in all_files.keys() {
         let p = Path::new(rel_path);
         let stem = p
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        // Collect directory components + file stem.
         let mut parts: Vec<&str> = p
             .parent()
-            .map(|parent| parent.components()
-                .filter_map(|c| c.as_os_str().to_str())
-                .collect())
+            .map(|parent| {
+                parent
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect()
+            })
             .unwrap_or_default();
         parts.push(stem);
-
         let module = parts.join(".");
-
-        // Strip trailing .__init__ for package init files.
         let module = module
             .strip_suffix(".__init__")
             .unwrap_or(&module)
             .to_string();
-
         module_to_file.insert(module, rel_path.clone());
     }
+    module_to_file
+}
+
+/// Resolve a Python module name to a file path, trying exact then prefix match.
+fn resolve_module_to_file<'a>(
+    module: &str,
+    module_to_file: &'a HashMap<String, String>,
+) -> Option<&'a String> {
+    module_to_file.get(module).or_else(|| {
+        let mut parts: Vec<&str> = module.split('.').collect();
+        while parts.len() > 1 {
+            parts.pop();
+            let prefix = parts.join(".");
+            if let Some(path) = module_to_file.get(&prefix) {
+                return Some(path);
+            }
+        }
+        None
+    })
+}
+
+fn resolve_python_imports(
+    python_imports: &HashMap<String, Vec<Symbol>>,
+    python_file_symbols: &HashMap<String, Vec<Symbol>>,
+    symbol_index: &HashMap<String, Vec<(String, String)>>,
+) -> Vec<Value> {
+    // Build module→file mapping from all known Python files.
+    let module_to_file = build_python_module_map(python_file_symbols);
 
     let mut edges = Vec::new();
-    for (source_path, imports) in python_imports {
-        let source_fkey = keys::file_key(source_path);
-        for import_module in imports {
-            // Try exact match first, then prefix match for submodule imports.
-            let target_path = module_to_file.get(import_module.as_str())
-                .or_else(|| {
-                    // "core.models.Config" → try "core.models", then "core"
-                    let mut parts: Vec<&str> = import_module.split('.').collect();
-                    while parts.len() > 1 {
-                        parts.pop();
-                        let prefix = parts.join(".");
-                        if let Some(path) = module_to_file.get(&prefix) {
-                            return Some(path);
-                        }
-                    }
-                    None
-                });
+    let mut seen = std::collections::HashSet::new();
 
-            if let Some(target_path) = target_path {
-                // Don't create self-edges.
-                if target_path == source_path {
-                    continue;
+    for (source_path, import_syms) in python_imports {
+        let source_fkey = keys::file_key(source_path);
+
+        for sym in import_syms {
+            let import_type = sym.metadata.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let module = sym.metadata.get("module").and_then(|v| v.as_str()).unwrap_or("");
+
+            if module.is_empty() {
+                continue;
+            }
+
+            match import_type {
+                "from_import" => {
+                    // `from module import Name` — try to resolve Name to a specific symbol.
+                    let original_name = sym
+                        .metadata
+                        .get("original_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&sym.name);
+
+                    // First, find the target file.
+                    let target_file = resolve_module_to_file(module, &module_to_file);
+
+                    // Try symbol-level resolution: look up the imported name in the symbol index.
+                    let mut resolved = false;
+                    if let Some(targets) = symbol_index.get(original_name) {
+                        // If we know the target file, prefer symbols from that file.
+                        let target = if let Some(tf) = target_file {
+                            targets.iter().find(|(path, _)| path == tf)
+                        } else {
+                            None
+                        }
+                        .or_else(|| targets.first());
+
+                        if let Some((target_path, target_skey)) = target
+                            && target_path != source_path {
+                                let edge_key =
+                                    format!("{source_fkey}_imports_{target_skey}");
+                                if seen.insert(edge_key.clone()) {
+                                    edges.push(json!({
+                                        "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                        "_to": format!("{}/{}", CODEBASE.symbols, target_skey),
+                                        "_key": edge_key,
+                                        "type": "imports",
+                                        "source_path": source_path,
+                                        "target_path": target_path,
+                                        "symbol_name": original_name,
+                                        "module_path": module,
+                                    }));
+                                    resolved = true;
+                                }
+                            }
+                    }
+
+                    // Fall back to file→file if symbol not found (external package or
+                    // symbol not in our index).
+                    if !resolved
+                        && let Some(target_path) = target_file
+                            && target_path != source_path {
+                                let target_fkey = keys::file_key(target_path);
+                                let edge_key =
+                                    format!("{source_fkey}_imports_{target_fkey}");
+                                if seen.insert(edge_key.clone()) {
+                                    edges.push(json!({
+                                        "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                        "_to": format!("{}/{}", CODEBASE.files, target_fkey),
+                                        "_key": edge_key,
+                                        "type": "imports",
+                                        "source_path": source_path,
+                                        "target_path": target_path,
+                                        "module_path": module,
+                                    }));
+                                }
+                            }
                 }
-                let target_fkey = keys::file_key(target_path);
-                edges.push(json!({
-                    "_from": format!("{}/{}", CODEBASE.files, source_fkey),
-                    "_to": format!("{}/{}", CODEBASE.files, target_fkey),
-                    "_key": format!("{}_imports_{}", source_fkey, target_fkey),
-                    "type": "imports",
-                    "source_path": source_path,
-                    "target_path": target_path,
-                    "module": import_module,
-                }));
+
+                "import" => {
+                    // `import module` — file-level edge (no specific symbol target).
+                    if let Some(target_path) = resolve_module_to_file(module, &module_to_file)
+                        && target_path != source_path {
+                            let target_fkey = keys::file_key(target_path);
+                            let edge_key = format!("{source_fkey}_imports_{target_fkey}");
+                            if seen.insert(edge_key.clone()) {
+                                edges.push(json!({
+                                    "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                    "_to": format!("{}/{}", CODEBASE.files, target_fkey),
+                                    "_key": edge_key,
+                                    "type": "imports",
+                                    "source_path": source_path,
+                                    "target_path": target_path,
+                                    "module_path": module,
+                                }));
+                            }
+                        }
+                }
+
+                _ => {}
             }
         }
     }
-
-    // Deduplicate edges by _key (multiple imports from same file to same target).
-    let mut seen = std::collections::HashSet::new();
-    edges.retain(|e| {
-        let key = e["_key"].as_str().unwrap_or("").to_string();
-        seen.insert(key)
-    });
 
     edges
 }
@@ -763,25 +882,62 @@ mod tests {
         assert_eq!(files.len(), 2); // script + real.py, not readme.md or data.json
     }
 
+    /// Helper to create a Python import symbol for tests.
+    fn make_import_sym(name: &str, import_type: &str, module: &str) -> Symbol {
+        let mut metadata = json!({ "type": import_type, "module": module });
+        if import_type == "from_import" {
+            metadata["original_name"] = json!(name);
+        }
+        Symbol {
+            name: name.to_string(),
+            kind: SymbolKind::Import,
+            start_line: 1,
+            end_line: 1,
+            metadata,
+        }
+    }
+
+    /// Helper to create a definition symbol for tests.
+    fn make_def_sym(name: &str, kind: SymbolKind) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            kind,
+            start_line: 1,
+            end_line: 10,
+            metadata: json!({}),
+        }
+    }
+
     #[test]
     fn test_resolve_python_imports_basic() {
+        // core/models.py does `from core.utils import helper`
         let mut imports = HashMap::new();
         imports.insert(
             "core/models.py".to_string(),
-            vec!["core.utils".to_string()],
+            vec![make_import_sym("helper", "from_import", "core.utils")],
         );
-        imports.insert(
+        imports.insert("core/utils.py".to_string(), vec![]);
+
+        // utils.py defines a function called `helper`
+        let mut file_symbols = HashMap::new();
+        file_symbols.insert(
+            "core/models.py".to_string(),
+            vec![make_def_sym("Model", SymbolKind::Class)],
+        );
+        file_symbols.insert(
             "core/utils.py".to_string(),
-            vec!["os".to_string()], // external, should be skipped
+            vec![make_def_sym("helper", SymbolKind::Function)],
         );
 
-        let base = PathBuf::from("/tmp/project");
-        let edges = resolve_python_imports(&imports, &base);
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
 
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["type"], "imports");
         assert_eq!(edges[0]["source_path"], "core/models.py");
-        assert_eq!(edges[0]["target_path"], "core/utils.py");
+        assert_eq!(edges[0]["symbol_name"], "helper");
+        // Should be file→symbol edge
+        assert!(edges[0]["_to"].as_str().unwrap().contains("codebase_symbols"));
     }
 
     #[test]
@@ -789,28 +945,30 @@ mod tests {
         let mut imports = HashMap::new();
         imports.insert(
             "core/models.py".to_string(),
-            vec!["core.models".to_string()],
+            vec![make_import_sym("core.models", "import", "core.models")],
         );
 
-        let base = PathBuf::from("/tmp");
-        let edges = resolve_python_imports(&imports, &base);
+        let file_symbols: HashMap<String, Vec<Symbol>> = HashMap::new();
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
         assert!(edges.is_empty());
     }
 
     #[test]
     fn test_resolve_python_imports_init_package() {
         let mut imports = HashMap::new();
-        imports.insert(
-            "core/__init__.py".to_string(),
-            vec![],
-        );
+        imports.insert("core/__init__.py".to_string(), vec![]);
         imports.insert(
             "app.py".to_string(),
-            vec!["core".to_string()],
+            vec![make_import_sym("core", "import", "core")],
         );
 
-        let base = PathBuf::from("/tmp");
-        let edges = resolve_python_imports(&imports, &base);
+        let mut file_symbols = HashMap::new();
+        file_symbols.insert("core/__init__.py".to_string(), vec![]);
+        file_symbols.insert("app.py".to_string(), vec![]);
+
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
 
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0]["target_path"], "core/__init__.py");
@@ -821,12 +979,66 @@ mod tests {
         let mut imports = HashMap::new();
         imports.insert(
             "a.py".to_string(),
-            vec!["b".to_string(), "b".to_string()], // duplicate
+            vec![
+                make_import_sym("b", "import", "b"),
+                make_import_sym("b", "import", "b"), // duplicate
+            ],
         );
-        imports.insert("b.py".to_string(), vec![]);
 
-        let base = PathBuf::from("/tmp");
-        let edges = resolve_python_imports(&imports, &base);
+        let mut file_symbols = HashMap::new();
+        file_symbols.insert("a.py".to_string(), vec![]);
+        file_symbols.insert("b.py".to_string(), vec![]);
+
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
         assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_python_imports_from_import_symbol_level() {
+        // server.py does `from config import EmbeddingConfig`
+        let mut imports = HashMap::new();
+        imports.insert(
+            "server.py".to_string(),
+            vec![make_import_sym("EmbeddingConfig", "from_import", "config")],
+        );
+
+        let mut file_symbols = HashMap::new();
+        file_symbols.insert("server.py".to_string(), vec![]);
+        file_symbols.insert(
+            "config.py".to_string(),
+            vec![make_def_sym("EmbeddingConfig", SymbolKind::Class)],
+        );
+
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
+
+        assert_eq!(edges.len(), 1);
+        // Should target the symbol, not the file
+        let to = edges[0]["_to"].as_str().unwrap();
+        assert!(to.starts_with("codebase_symbols/"), "expected symbol edge, got: {to}");
+        assert!(to.contains("EmbeddingConfig"));
+    }
+
+    #[test]
+    fn test_resolve_python_imports_fallback_to_file() {
+        // server.py does `from config import SomethingUnknown`
+        let mut imports = HashMap::new();
+        imports.insert(
+            "server.py".to_string(),
+            vec![make_import_sym("SomethingUnknown", "from_import", "config")],
+        );
+
+        let mut file_symbols = HashMap::new();
+        file_symbols.insert("server.py".to_string(), vec![]);
+        file_symbols.insert("config.py".to_string(), vec![]); // no symbols defined
+
+        let index = build_python_symbol_index(&file_symbols);
+        let edges = resolve_python_imports(&imports, &file_symbols, &index);
+
+        assert_eq!(edges.len(), 1);
+        // Should fall back to file→file
+        let to = edges[0]["_to"].as_str().unwrap();
+        assert!(to.starts_with("codebase_files/"), "expected file edge fallback, got: {to}");
     }
 }

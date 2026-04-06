@@ -13,7 +13,7 @@ use hades_core::dispatch::{self, DaemonCommand};
 
 use super::output::{self, OutputFormat};
 
-/// Connect, dispatch a command, and print the result with envelope.
+/// Connect, dispatch a command, and print the result in the requested format.
 async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, command_name: &str) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(&pool, config, cmd).await?;

@@ -16,7 +16,7 @@ use hades_core::dispatch::{
 
 use super::output::{self, OutputFormat};
 
-/// Connect, dispatch a command, and print the result with envelope.
+/// Connect, dispatch a command, and print the result in the requested format.
 async fn dispatch_and_print(
     config: &HadesConfig,
     cmd: DaemonCommand,

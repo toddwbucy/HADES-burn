@@ -19,6 +19,8 @@ use hades_core::db::ArangoPool;
 use hades_core::graph::{ExportConfig, decode_f32_embeddings, export_embeddings};
 use hades_core::persephone::training::{TrainingClient, TrainingClientConfig};
 
+use super::output::{self, OutputFormat};
+
 /// Run the `graph-embed update` command.
 pub async fn run(
     config: &HadesConfig,
@@ -147,7 +149,7 @@ pub async fn run(
     }
 
     // ── JSON output to stdout ───────────────────────────────────────
-    let output = json!({
+    let result_data = json!({
         "status": "success",
         "graph": {
             "num_nodes": graph.num_nodes,
@@ -168,6 +170,6 @@ pub async fn run(
         },
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("graph-embed.update", result_data, &OutputFormat::Json);
     Ok(())
 }

@@ -1,10 +1,9 @@
 //! Native Rust handlers for `hades task` CRUD commands.
 //!
 //! Each function constructs a [`DaemonCommand`], calls [`dispatch`], and
-//! prints the result to stdout.
+//! prints the result to stdout using the standard HADES JSON envelope.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
@@ -15,33 +14,20 @@ use hades_core::dispatch::{
     TaskShowParams, TaskStartParams, TaskUnblockParams, TaskUpdateParams, TaskUsageParams,
 };
 
-/// Connect, dispatch a command, and print the result in the requested format.
-async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, format: &str) -> Result<()> {
+use super::output::{self, OutputFormat};
+
+/// Connect, dispatch a command, and print the result with envelope.
+async fn dispatch_and_print(
+    config: &HadesConfig,
+    cmd: DaemonCommand,
+    command_name: &str,
+    format: &str,
+) -> Result<()> {
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(&pool, config, cmd).await?;
-    match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
-        _ => print_text(&result),
-    }
+    output::print_output(command_name, result, &fmt);
     Ok(())
-}
-
-/// Simple text rendering of a JSON value.
-fn print_text(value: &Value) {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                match v {
-                    Value::Object(_) | Value::Array(_) => {
-                        println!("{k}:");
-                        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
-                    }
-                    _ => println!("{k}: {v}"),
-                }
-            }
-        }
-        _ => println!("{}", serde_json::to_string_pretty(value).unwrap_or_default()),
-    }
 }
 
 /// `hades task list [--status S] [--type T] [--parent P] [--limit N] [--format F]`
@@ -61,6 +47,7 @@ pub async fn run_list(
             parent: parent.map(String::from),
             limit: Some(limit),
         }),
+        "task.list",
         format,
     )
     .await
@@ -73,6 +60,7 @@ pub async fn run_show(config: &HadesConfig, key: &str, format: &str) -> Result<(
         DaemonCommand::TaskShow(TaskShowParams {
             key: key.to_string(),
         }),
+        "task.show",
         format,
     )
     .await
@@ -98,6 +86,7 @@ pub async fn run_create(
             priority: priority.unwrap_or("medium").to_string(),
             tags: tags.to_vec(),
         }),
+        "task.create",
         "json",
     )
     .await
@@ -105,7 +94,7 @@ pub async fn run_create(
 
 /// `hades task update KEY [options]`
 pub async fn run_update(config: &HadesConfig, params: TaskUpdateParams) -> Result<()> {
-    dispatch_and_print(config, DaemonCommand::TaskUpdate(params), "json").await
+    dispatch_and_print(config, DaemonCommand::TaskUpdate(params), "task.update", "json").await
 }
 
 /// `hades task close KEY [--message M]`
@@ -116,6 +105,7 @@ pub async fn run_close(config: &HadesConfig, key: &str, message: Option<&str>) -
             key: key.to_string(),
             message: message.map(String::from),
         }),
+        "task.close",
         "json",
     )
     .await
@@ -128,6 +118,7 @@ pub async fn run_start(config: &HadesConfig, key: &str) -> Result<()> {
         DaemonCommand::TaskStart(TaskStartParams {
             key: key.to_string(),
         }),
+        "task.start",
         "json",
     )
     .await
@@ -141,6 +132,7 @@ pub async fn run_review(config: &HadesConfig, key: &str, message: Option<&str>) 
             key: key.to_string(),
             message: message.map(String::from),
         }),
+        "task.review",
         "json",
     )
     .await
@@ -154,6 +146,7 @@ pub async fn run_approve(config: &HadesConfig, key: &str, human: bool) -> Result
             key: key.to_string(),
             human,
         }),
+        "task.approve",
         "json",
     )
     .await
@@ -173,6 +166,7 @@ pub async fn run_block(
             message: message.map(String::from),
             blocker: blocker.map(String::from),
         }),
+        "task.block",
         "json",
     )
     .await
@@ -185,6 +179,7 @@ pub async fn run_unblock(config: &HadesConfig, key: &str) -> Result<()> {
         DaemonCommand::TaskUnblock(TaskUnblockParams {
             key: key.to_string(),
         }),
+        "task.unblock",
         "json",
     )
     .await
@@ -198,6 +193,7 @@ pub async fn run_handoff(config: &HadesConfig, key: &str, message: Option<&str>)
             key: key.to_string(),
             message: message.map(String::from),
         }),
+        "task.handoff",
         "json",
     )
     .await
@@ -210,6 +206,7 @@ pub async fn run_handoff_show(config: &HadesConfig, key: &str, format: &str) -> 
         DaemonCommand::TaskHandoffShow(TaskHandoffShowParams {
             key: key.to_string(),
         }),
+        "task.handoff-show",
         format,
     )
     .await
@@ -222,6 +219,7 @@ pub async fn run_context(config: &HadesConfig, key: &str) -> Result<()> {
         DaemonCommand::TaskContext(TaskContextParams {
             key: key.to_string(),
         }),
+        "task.context",
         "json",
     )
     .await
@@ -235,6 +233,7 @@ pub async fn run_log(config: &HadesConfig, key: &str, limit: u32) -> Result<()> 
             key: key.to_string(),
             limit: Some(limit),
         }),
+        "task.log",
         "json",
     )
     .await
@@ -247,6 +246,7 @@ pub async fn run_sessions(config: &HadesConfig, key: &str) -> Result<()> {
         DaemonCommand::TaskSessions(TaskSessionsParams {
             key: key.to_string(),
         }),
+        "task.sessions",
         "json",
     )
     .await
@@ -268,6 +268,7 @@ pub async fn run_dep(
             remove: remove.map(String::from),
             graph,
         }),
+        "task.dep",
         "json",
     )
     .await
@@ -278,6 +279,7 @@ pub async fn run_usage(config: &HadesConfig) -> Result<()> {
     dispatch_and_print(
         config,
         DaemonCommand::TaskUsage(TaskUsageParams {}),
+        "task.usage",
         "json",
     )
     .await
@@ -288,6 +290,7 @@ pub async fn run_graph_integration(config: &HadesConfig, format: &str) -> Result
     dispatch_and_print(
         config,
         DaemonCommand::TaskGraphIntegration(TaskGraphIntegrationParams {}),
+        "task.graph-integration",
         format,
     )
     .await

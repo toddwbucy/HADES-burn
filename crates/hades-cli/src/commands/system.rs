@@ -1,43 +1,28 @@
 //! Native Rust handlers for `hades status` and `hades orient` commands.
 //!
 //! Each function constructs a [`DaemonCommand`], calls [`dispatch`], and
-//! prints the result to stdout.  The `format` parameter is accepted for
-//! CLI compatibility; currently only JSON output is implemented.
+//! prints the result to stdout using the standard HADES JSON envelope.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand, OrientParams, StatusParams};
 
-/// Connect, dispatch a command, and print the result in the requested format.
-async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, format: &str) -> Result<()> {
+use super::output::{self, OutputFormat};
+
+/// Connect, dispatch a command, and print the result with envelope.
+async fn dispatch_and_print(
+    config: &HadesConfig,
+    cmd: DaemonCommand,
+    command_name: &str,
+    format: &str,
+) -> Result<()> {
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(&pool, config, cmd).await?;
-    match format {
-        "json" => println!("{}", serde_json::to_string_pretty(&result)?),
-        _ => print_text(&result),
-    }
+    output::print_output(command_name, result, &fmt);
     Ok(())
-}
-
-/// Simple text rendering of a JSON value — one key: value per line.
-fn print_text(value: &Value) {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                match v {
-                    Value::Object(_) | Value::Array(_) => {
-                        println!("{k}:");
-                        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
-                    }
-                    _ => println!("{k}: {v}"),
-                }
-            }
-        }
-        _ => println!("{}", serde_json::to_string_pretty(value).unwrap_or_default()),
-    }
 }
 
 /// `hades status [--verbose] [--format F]`
@@ -45,6 +30,7 @@ pub async fn run_status(config: &HadesConfig, verbose: bool, format: &str) -> Re
     dispatch_and_print(
         config,
         DaemonCommand::Status(StatusParams { verbose }),
+        "status",
         format,
     )
     .await
@@ -57,6 +43,7 @@ pub async fn run_orient(config: &HadesConfig, collection: Option<&str>, format: 
         DaemonCommand::Orient(OrientParams {
             collection: collection.map(String::from),
         }),
+        "orient",
         format,
     )
     .await

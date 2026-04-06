@@ -11,6 +11,8 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, GraphEmbedEmbedParams, GraphEmbedNeighborsParams};
 
+use super::output::{self, OutputFormat};
+
 // ---------------------------------------------------------------------------
 // graph-embed embed
 // ---------------------------------------------------------------------------
@@ -29,8 +31,8 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
     )
     .await?;
 
-    let output = json!({ "status": "success", "data": data });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    let result_data = json!({ "status": "success", "data": data });
+    output::print_output("graph-embed.query", result_data, &OutputFormat::Json);
     Ok(())
 }
 
@@ -53,13 +55,13 @@ pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> R
     )
     .await?;
 
-    let output = json!({
+    let result_data = json!({
         "status": "success",
         "data": data,
         "metadata": {
             "count": data.get("neighbors").and_then(|n| n.as_array()).map(|a| a.len()).unwrap_or(0),
         },
     });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("graph-embed.similar", result_data, &OutputFormat::Json);
     Ok(())
 }

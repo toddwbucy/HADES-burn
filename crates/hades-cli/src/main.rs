@@ -41,8 +41,8 @@ struct Cli {
 enum Commands {
     /// System status for workspace discovery.
     Status {
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
         /// Verbose output.
@@ -56,8 +56,8 @@ enum Commands {
         #[arg(short = 'c', long)]
         collection: Option<String>,
 
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -66,8 +66,8 @@ enum Commands {
         /// File path to extract from.
         file: PathBuf,
 
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
         /// Output file path.

@@ -14,6 +14,8 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand, SmellCheckParams, SmellVerifyParams, SmellReportParams, LinkCodeSmellParams};
 
+use super::output::{self, OutputFormat};
+
 // ── smell check ─────────────────────────────────────────────────────
 
 /// `hades smell check PATH [--format F] [--verbose]`
@@ -23,6 +25,7 @@ pub async fn run_smell_check(
     format: &str,
     verbose: bool,
 ) -> Result<()> {
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let cmd = DaemonCommand::SmellCheck(SmellCheckParams {
         path: path.display().to_string(),
@@ -32,11 +35,11 @@ pub async fn run_smell_check(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // JSON to stdout (convention: all CLI output is JSON to stdout).
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    // JSON to stdout with envelope.
+    output::print_output("smell.check", result.clone(), &fmt);
 
-    // Human-readable summary to stderr when not in json mode.
-    if format != "json" {
+    // Human-readable summary to stderr when using table format.
+    if matches!(fmt, OutputFormat::Table) {
         let mut err = std::io::stderr().lock();
         let passed = result["passed"].as_bool().unwrap_or(true);
         let count = result["violation_count"].as_u64().unwrap_or(0);
@@ -87,7 +90,7 @@ pub async fn run_smell_verify(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    output::print_output("smell.verify", result, &OutputFormat::Json);
     Ok(())
 }
 
@@ -100,6 +103,7 @@ pub async fn run_smell_report(
     output: Option<&Path>,
     format: &str,
 ) -> Result<()> {
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let cmd = DaemonCommand::SmellReport(SmellReportParams {
         path: path.display().to_string(),
@@ -108,18 +112,18 @@ pub async fn run_smell_report(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let output_json = serde_json::to_string_pretty(&result)?;
-
+    // Write full report to file if --output specified.
     if let Some(out_path) = output {
+        let output_json = serde_json::to_string_pretty(&result)?;
         std::fs::write(out_path, &output_json)?;
         eprintln!("Report written to {}", out_path.display());
     }
 
-    // JSON to stdout always.
-    println!("{output_json}");
+    // JSON to stdout with envelope.
+    output::print_output("smell.report", result.clone(), &fmt);
 
-    // Human-readable summary to stderr when not in json mode.
-    if format != "json" {
+    // Human-readable summary to stderr when using table format.
+    if matches!(fmt, OutputFormat::Table) {
         let mut err = std::io::stderr().lock();
         let passed = result["passed"].as_bool().unwrap_or(true);
         let verdict = if passed { "PASSED" } else { "FAILED" };
@@ -189,6 +193,6 @@ pub async fn run_link(
         results.push(result);
     }
 
-    println!("{}", serde_json::to_string_pretty(&results)?);
+    output::print_output("link", serde_json::Value::Array(results), &OutputFormat::Json);
     Ok(())
 }

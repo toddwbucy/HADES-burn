@@ -30,6 +30,8 @@ use hades_core::persephone::extraction::ExtractionClient;
 use hades_core::pipeline::{Pipeline, PipelineConfig};
 use hades_core::HadesConfig;
 
+use super::output::{self, OutputFormat};
+
 /// Code-file extensions for auto-detecting the `code` embedding task.
 const CODE_EXTENSIONS: &[&str] = &[
     "py", "rs", "cu", "cuh", "cpp", "c", "h", "hpp", "js", "ts",
@@ -297,7 +299,7 @@ pub async fn run(
             })
             .count();
 
-    let output = json!({
+    let result_data = json!({
         "success": summary.failed == 0,
         "command": "ingest",
         "data": {
@@ -311,7 +313,7 @@ pub async fn run(
         "duration_ms": duration_ms,
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("ingest", result_data, &OutputFormat::Json);
 
     if summary.failed > 0 {
         return Err(IngestFailure {

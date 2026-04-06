@@ -17,6 +17,8 @@ use hades_core::db::ArangoPool;
 use hades_core::graph::{ExportConfig, decode_f32_embeddings, export_embeddings};
 use hades_core::persephone::training::{TrainingClient, TrainingClientConfig};
 
+use super::output::{self, OutputFormat};
+
 use hades_prefetch::{
     Orchestrator, SplitConfig, TrainConfig, prepare_training_data,
 };
@@ -192,7 +194,7 @@ pub async fn run(
     }
 
     // ── JSON output to stdout ────────────────────────────────────────
-    let output = json!({
+    let result_data = json!({
         "status": "success",
         "training": {
             "best_epoch": result.best_epoch,
@@ -216,7 +218,7 @@ pub async fn run(
         "checkpoint_path": result.checkpoint_path,
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("graph-embed.train", result_data, &OutputFormat::Json);
     Ok(())
 }
 

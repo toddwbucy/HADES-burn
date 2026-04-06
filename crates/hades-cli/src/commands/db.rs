@@ -31,8 +31,8 @@ pub enum DbCmd {
         #[arg(short = 'S', long)]
         structural: bool,
 
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
         /// Verbose output.
@@ -49,7 +49,7 @@ pub enum DbCmd {
         #[arg(short = 'b', long)]
         bind: Option<String>,
 
-        /// Output format (json, table, raw).
+        /// Output format (json, jsonl, table).
         #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
@@ -68,8 +68,8 @@ pub enum DbCmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: u32,
 
-        /// Output format.
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
 
         /// Filter by paper ID.
@@ -79,8 +79,8 @@ pub enum DbCmd {
 
     /// Show database statistics.
     Stats {
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -90,8 +90,8 @@ pub enum DbCmd {
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
 
-        /// Output format.
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -143,15 +143,15 @@ pub enum DbCmd {
 
     /// List all collections in the database.
     Collections {
-        /// Output format (table, json).
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
     /// List all databases.
     Databases {
-        /// Output format (table, json).
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -175,7 +175,7 @@ pub enum DbCmd {
         /// Document key.
         key: String,
 
-        /// Output format (json, raw).
+        /// Output format (json, jsonl, table).
         #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
@@ -216,7 +216,7 @@ pub enum DbCmd {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
 
-        /// Output format (json, jsonl, csv).
+        /// Output format (json, jsonl, table).
         #[arg(short = 'f', long, default_value = "jsonl")]
         format: String,
 
@@ -246,8 +246,8 @@ pub enum DbCmd {
         #[arg(short = 'c', long)]
         collection: Option<String>,
 
-        /// Output format (text, json).
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -287,8 +287,8 @@ pub enum DbGraphCmd {
 
     /// List all named graphs.
     List {
-        /// Output format (table, json).
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -327,8 +327,8 @@ pub enum DbGraphCmd {
         #[arg(short = 'g', long)]
         graph: Option<String>,
 
-        /// Output format (tree, json, table).
-        #[arg(short = 'f', long, default_value = "tree")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -344,8 +344,8 @@ pub enum DbGraphCmd {
         #[arg(short = 'g', long)]
         graph: Option<String>,
 
-        /// Output format.
-        #[arg(short = 'f', long, default_value = "text")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 
@@ -366,8 +366,8 @@ pub enum DbGraphCmd {
         #[arg(short = 'g', long)]
         graph: Option<String>,
 
-        /// Output format.
-        #[arg(short = 'f', long, default_value = "table")]
+        /// Output format (json, jsonl, table).
+        #[arg(short = 'f', long, default_value = "json")]
         format: String,
     },
 

@@ -1,9 +1,7 @@
 //! Native Rust handlers for `hades db` read commands.
 //!
 //! Each function builds a [`DaemonCommand`], calls [`dispatch`], and
-//! prints the result to stdout.  The `format` parameter is accepted on
-//! all commands that expose it in the CLI; currently all formats emit
-//! JSON (matching CLAUDE.md: "All CLI output is JSON to stdout").
+//! prints the result to stdout using the standard HADES JSON envelope.
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -12,18 +10,7 @@ use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::dispatch::{self, DaemonCommand};
 
-/// Validate the `--format` flag.
-///
-/// Most commands emit pretty-printed JSON (`"json"`).  The `export`
-/// command emits newline-delimited JSON and also accepts `"jsonl"`.
-fn validate_format(format: &str) -> Result<()> {
-    match format {
-        "json" | "jsonl" => Ok(()),
-        other => anyhow::bail!(
-            "unsupported format '{other}' — supported values: json, jsonl"
-        ),
-    }
-}
+use super::output::{self, OutputFormat};
 
 /// `hades db get <collection> <key> [--format F]`
 pub async fn run_get(
@@ -32,7 +19,7 @@ pub async fn run_get(
     key: &str,
     format: &str,
 ) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
@@ -43,7 +30,7 @@ pub async fn run_get(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.get", data, &fmt);
     Ok(())
 }
 
@@ -58,16 +45,16 @@ pub async fn run_count(config: &HadesConfig, collection: &str) -> Result<()> {
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.count", data, &OutputFormat::Json);
     Ok(())
 }
 
 /// `hades db collections [--format F]`
 pub async fn run_collections(config: &HadesConfig, format: &str) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(&pool, config, DaemonCommand::DbCollections {}).await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.collections", data, &fmt);
     Ok(())
 }
 
@@ -82,13 +69,13 @@ pub async fn run_check(config: &HadesConfig, document_id: &str) -> Result<()> {
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.check", data, &OutputFormat::Json);
     Ok(())
 }
 
 /// `hades db recent [--limit N] [--format F]`
 pub async fn run_recent(config: &HadesConfig, limit: u32, format: &str) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
@@ -96,7 +83,7 @@ pub async fn run_recent(config: &HadesConfig, limit: u32, format: &str) -> Resul
         DaemonCommand::DbRecent(dispatch::DbRecentParams { limit: Some(limit) }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.recent", data, &fmt);
     Ok(())
 }
 
@@ -108,7 +95,7 @@ pub async fn run_list(
     paper: Option<&str>,
     format: &str,
 ) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(
         &pool,
@@ -120,7 +107,7 @@ pub async fn run_list(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.list", data, &fmt);
     Ok(())
 }
 
@@ -132,7 +119,7 @@ pub async fn run_aql(
     limit: Option<u32>,
     format: &str,
 ) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let bind_value = match bind {
         Some(s) => {
@@ -162,7 +149,7 @@ pub async fn run_aql(
         }),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.aql", data, &fmt);
     Ok(())
 }
 
@@ -175,18 +162,16 @@ pub async fn run_health(config: &HadesConfig, verbose: bool) -> Result<()> {
         DaemonCommand::DbHealth(dispatch::DbHealthParams { verbose }),
     )
     .await?;
-
-    let output = json!({ "status": "success", "data": data });
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    output::print_output("db.health", data, &OutputFormat::Json);
     Ok(())
 }
 
 /// `hades db stats [--format F]`
 pub async fn run_stats(config: &HadesConfig, format: &str) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let data = dispatch::dispatch(&pool, config, DaemonCommand::DbStats {}).await?;
-    println!("{}", serde_json::to_string_pretty(&data)?);
+    output::print_output("db.stats", data, &fmt);
     Ok(())
 }
 
@@ -202,7 +187,7 @@ pub async fn run_export(
     format: &str,
     limit: Option<u32>,
 ) -> Result<()> {
-    validate_format(format)?;
+    let _fmt = OutputFormat::parse(format)?;
     use std::io::Write;
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
@@ -300,7 +285,7 @@ pub async fn run_index_status(
     collection: Option<&str>,
     format: &str,
 ) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     use hades_core::db::collections::CollectionProfile;
     use hades_core::db::index;
 
@@ -337,7 +322,7 @@ pub async fn run_index_status(
         }));
     }
 
-    println!("{}", serde_json::to_string_pretty(&json!({ "indexes": results }))?);
+    output::print_output("db.index-status", json!({ "indexes": results }), &fmt);
     Ok(())
 }
 
@@ -345,7 +330,7 @@ pub async fn run_index_status(
 ///
 /// CLI-only — lists accessible databases.
 pub async fn run_databases(config: &HadesConfig, format: &str) -> Result<()> {
-    validate_format(format)?;
+    let fmt = OutputFormat::parse(format)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let resp = pool
         .reader()
@@ -359,12 +344,13 @@ pub async fn run_databases(config: &HadesConfig, format: &str) -> Result<()> {
         .cloned()
         .unwrap_or_default();
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
+    output::print_output(
+        "db.databases",
+        json!({
             "databases": databases,
             "count": databases.len(),
-        }))?
+        }),
+        &fmt,
     );
     Ok(())
 }

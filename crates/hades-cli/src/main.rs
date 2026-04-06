@@ -341,17 +341,19 @@ fn main() -> anyhow::Result<()> {
                 socket.as_deref(),
             ));
         }
-        // ── Native DB search ────────────────────────────────────────────
+        // ── Native DB search (basic vector + optional hybrid) ───────────
+        // Only handle the subset we support natively; rerank/structural
+        // fall through to Python.
         Commands::Db(commands::db::DbCmd::Query {
-            search_text, limit, collection, hybrid, format, ..
+            search_text: Some(ref text),
+            limit, ref collection, hybrid,
+            rerank: false, structural: false,
+            ref format, ..
         }) => {
-            let text = search_text.ok_or_else(|| {
-                anyhow::anyhow!("search text is required — usage: hades db query \"your search\"")
-            })?;
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::db_search::run_query(
-                &config, &text, limit, collection.as_deref(), hybrid, &format,
+                &config, text, limit, collection.as_deref(), hybrid, format,
             ));
         }
         // ── Native DB read commands ─────────────────────────────────────

@@ -1,10 +1,14 @@
 //! Native Rust handler for `hades db query` — semantic search.
 //!
-//! Implements the core vector search pipeline:
+//! Implements a two-phase vector search pipeline:
 //! 1. Embed query text via the embedder HTTP service
-//! 2. AQL `APPROX_NEAR_COSINE` against the collection's embedding vectors
-//! 3. JOIN chunks + metadata for context
-//! 4. (Optional) hybrid keyword reranking
+//! 2. Fetch stored embeddings from ArangoDB (no vector index required)
+//! 3. Brute-force cosine similarity in Rust, select top-K
+//! 4. Batch-fetch chunk text + metadata for top-K results
+//! 5. (Optional) hybrid reranking: blend cosine score with term-coverage score
+//!
+//! Efficient for collections up to ~100K embeddings. For larger collections,
+//! a vector index (`APPROX_NEAR_COSINE`) would be needed.
 //!
 //! Outputs results via the shared output formatter with envelope.
 
@@ -33,8 +37,16 @@ pub async fn run_query(
 ) -> Result<()> {
     let fmt = OutputFormat::parse(format)?;
 
-    // 1. Resolve collection profile.
-    let profile_name = collection.unwrap_or("arxiv");
+    // 1. Resolve collection profile (honors HADES_DEFAULT_COLLECTION env var).
+    let default_name;
+    let profile_name = match collection {
+        Some(name) => name,
+        None => {
+            default_name = std::env::var("HADES_DEFAULT_COLLECTION")
+                .unwrap_or_else(|_| "arxiv".to_string());
+            &default_name
+        }
+    };
     let profile = CollectionProfile::get(profile_name).ok_or_else(|| {
         anyhow::anyhow!(
             "unknown collection profile '{profile_name}' — valid: {}",

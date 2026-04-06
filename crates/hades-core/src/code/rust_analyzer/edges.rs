@@ -3,7 +3,7 @@
 //! Materializes symbol nodes and edges from file-level extraction data
 //! for storage in ArangoDB graph collections:
 //! - `codebase_symbols` — per-symbol documents
-//! - `codebase_edges` — defines, calls, implements, pyo3_exposes, ffi_exposes
+//! - `codebase_edges` — defines, calls, implements, imports, pyo3_exposes, ffi_exposes
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,6 +27,8 @@ pub enum EdgeKind {
     Pyo3Exposes,
     /// Symbol is exposed via FFI boundary.
     FfiExposes,
+    /// File imports a symbol from another file.
+    Imports,
 }
 
 impl EdgeKind {
@@ -38,6 +40,7 @@ impl EdgeKind {
             Self::Implements => "implements",
             Self::Pyo3Exposes => "pyo3_exposes",
             Self::FfiExposes => "ffi_exposes",
+            Self::Imports => "imports",
         }
     }
 }

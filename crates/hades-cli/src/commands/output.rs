@@ -7,6 +7,7 @@
 //! - **Format validation**: Accepts "json", "jsonl", and "table".
 
 use anyhow::Result;
+use chrono::Utc;
 use serde_json::Value;
 
 /// Supported output formats.
@@ -41,17 +42,18 @@ pub fn envelope(command: &str, data: Value) -> Value {
         "success": true,
         "command": command,
         "data": data,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": Utc::now().to_rfc3339(),
     })
 }
 
 /// Wrap an error in the standard HADES JSON envelope.
+#[allow(dead_code)]
 pub fn error_envelope(command: &str, message: &str) -> Value {
     serde_json::json!({
         "success": false,
         "command": command,
         "error": message,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "timestamp": Utc::now().to_rfc3339(),
     })
 }
 
@@ -149,8 +151,8 @@ fn print_array_table(arr: &[Value]) {
         }
     };
 
-    // Compute column widths.
-    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    // Compute column widths using character count (safe for multi-byte UTF-8).
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
     let rows: Vec<Vec<String>> = arr
         .iter()
         .map(|item| {
@@ -162,8 +164,9 @@ fn print_array_table(arr: &[Value]) {
                         Some(v) => format_scalar(v),
                         None => String::new(),
                     };
-                    if s.len() > widths[i] {
-                        widths[i] = s.len();
+                    let char_len = s.chars().count();
+                    if char_len > widths[i] {
+                        widths[i] = char_len;
                     }
                     s
                 })
@@ -195,8 +198,11 @@ fn print_array_table(arr: &[Value]) {
             .iter()
             .enumerate()
             .map(|(i, val)| {
-                let truncated = if val.len() > widths[i] {
-                    format!("{}…", &val[..widths[i] - 1])
+                let char_len = val.chars().count();
+                let truncated = if char_len > widths[i] {
+                    let mut s: String = val.chars().take(widths[i] - 1).collect();
+                    s.push('…');
+                    s
                 } else {
                     val.clone()
                 };

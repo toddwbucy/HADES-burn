@@ -35,7 +35,7 @@ pub async fn run_smell_check(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // JSON to stdout with envelope.
+    // Output to stdout with envelope.
     output::print_output("smell.check", result.clone(), &fmt);
 
     // Human-readable summary to stderr when using table format.
@@ -119,7 +119,7 @@ pub async fn run_smell_report(
         eprintln!("Report written to {}", out_path.display());
     }
 
-    // JSON to stdout with envelope.
+    // Output to stdout with envelope.
     output::print_output("smell.report", result.clone(), &fmt);
 
     // Human-readable summary to stderr when using table format.

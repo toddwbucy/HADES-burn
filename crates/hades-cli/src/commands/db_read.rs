@@ -187,7 +187,13 @@ pub async fn run_export(
     format: &str,
     limit: Option<u32>,
 ) -> Result<()> {
-    let _fmt = OutputFormat::parse(format)?;
+    let fmt = OutputFormat::parse(format)?;
+    if !matches!(fmt, OutputFormat::Jsonl) {
+        anyhow::bail!(
+            "export only supports jsonl format (streaming output) — \
+             use --format jsonl or omit --format"
+        );
+    }
     use std::io::Write;
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;

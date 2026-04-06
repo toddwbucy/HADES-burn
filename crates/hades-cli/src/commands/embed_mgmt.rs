@@ -26,35 +26,34 @@ pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> R
         .await
         .context("embedding service error")?;
 
-    match format {
-        "raw" => {
-            // Output just the embedding vector for piping
-            println!("{}", serde_json::to_string(&result.embedding)?);
-        }
-        _ => {
-            let preview_len = 10.min(result.embedding.len());
-            let text_preview: String = if text.chars().count() > 100 {
-                let mut s: String = text.chars().take(100).collect();
-                s.push_str("...");
-                s
-            } else {
-                text.to_string()
-            };
-            output::print_output(
-                "embed.text",
-                json!({
-                    "text": text_preview,
-                    "dimension": result.dimension,
-                    "model": result.model,
-                    "embedding": result.embedding,
-                    "embedding_preview": &result.embedding[..preview_len],
-                    "embedding_truncated": result.embedding.len() > preview_len,
-                    "duration_ms": result.duration_ms,
-                }),
-                &OutputFormat::Json,
-            );
-        }
+    if format == "raw" {
+        // Output just the embedding vector for piping.
+        println!("{}", serde_json::to_string(&result.embedding)?);
+        return Ok(());
     }
+
+    let fmt = OutputFormat::parse(format)?;
+    let preview_len = 10.min(result.embedding.len());
+    let text_preview: String = if text.chars().count() > 100 {
+        let mut s: String = text.chars().take(100).collect();
+        s.push_str("...");
+        s
+    } else {
+        text.to_string()
+    };
+    output::print_output(
+        "embed.text",
+        json!({
+            "text": text_preview,
+            "dimension": result.dimension,
+            "model": result.model,
+            "embedding": result.embedding,
+            "embedding_preview": &result.embedding[..preview_len],
+            "embedding_truncated": result.embedding.len() > preview_len,
+            "duration_ms": result.duration_ms,
+        }),
+        &fmt,
+    );
     Ok(())
 }
 
@@ -249,6 +248,7 @@ pub fn run_extract(file: &Path, format: &str, output: Option<&Path>) -> Result<(
         eprintln!("Written to {}", out_path.display());
     }
 
+    let fmt = OutputFormat::parse(format)?;
     output::print_output(
         "extract",
         json!({
@@ -257,7 +257,7 @@ pub fn run_extract(file: &Path, format: &str, output: Option<&Path>) -> Result<(
             "format_detected": ext,
             "text_length": text.len(),
         }),
-        &OutputFormat::Json,
+        &fmt,
     );
     Ok(())
 }

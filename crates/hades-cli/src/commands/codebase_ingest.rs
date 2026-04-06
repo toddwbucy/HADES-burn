@@ -123,13 +123,11 @@ pub async fn run(
     // Discover source files.
     let files = discover_files(&path, lang_override)?;
     if files.is_empty() {
-        let result_data = json!({
-            "success": true,
-            "command": "codebase ingest",
-            "data": { "total": 0, "message": "no supported source files found" },
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-        output::print_output("codebase.ingest", result_data, &OutputFormat::Json);
+        output::print_output(
+            "codebase.ingest",
+            json!({ "total": 0, "message": "no supported source files found" }),
+            &OutputFormat::Json,
+        );
         return Ok(());
     }
 
@@ -234,19 +232,14 @@ pub async fn run(
     let duration_ms = cmd_start.elapsed().as_millis() as u64;
 
     let result_data = json!({
-        "success": failed == 0,
-        "command": "codebase ingest",
-        "data": {
-            "total": total,
-            "completed": succeeded,
-            "failed": failed,
-            "skipped": skipped,
-            "import_edges": total_import_edges,
-            "python_import_edges": py_import_edges.len(),
-            "rust_import_edges": rs_import_edges.len(),
-            "results": results,
-        },
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "total": total,
+        "completed": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "import_edges": total_import_edges,
+        "python_import_edges": py_import_edges.len(),
+        "rust_import_edges": rs_import_edges.len(),
+        "results": results,
         "duration_ms": duration_ms,
     });
 

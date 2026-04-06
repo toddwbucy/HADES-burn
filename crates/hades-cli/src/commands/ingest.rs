@@ -300,16 +300,11 @@ pub async fn run(
             .count();
 
     let result_data = json!({
-        "success": summary.failed == 0,
-        "command": "ingest",
-        "data": {
-            "total": summary.total,
-            "completed": summary.completed,
-            "failed": summary.failed,
-            "skipped": skipped,
-            "results": result_values,
-        },
-        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "total": summary.total,
+        "completed": summary.completed,
+        "failed": summary.failed,
+        "skipped": skipped,
+        "results": result_values,
         "duration_ms": duration_ms,
     });
 

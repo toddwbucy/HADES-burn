@@ -1,7 +1,8 @@
 //! Native Rust handlers for `hades status` and `hades orient` commands.
 //!
 //! Each function constructs a [`DaemonCommand`], calls [`dispatch`], and
-//! prints the result to stdout using the standard HADES JSON envelope.
+//! prints the result to stdout via the shared output formatter
+//! ([`OutputFormat`] supports JSON envelope, JSONL, and table).
 
 use anyhow::{Context, Result};
 

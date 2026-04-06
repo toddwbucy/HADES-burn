@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import signal
+import stat
 import sys
 import time
 from pathlib import Path
@@ -166,10 +167,15 @@ async def serve() -> None:
     socket_dir = Path(socket_path).parent
     socket_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean stale socket
+    # Clean stale socket (only if it's actually a socket)
     sock = Path(socket_path)
     if sock.exists():
-        sock.unlink()
+        if stat.S_ISSOCK(sock.stat().st_mode):
+            sock.unlink()
+        else:
+            raise RuntimeError(
+                f"Path {socket_path} exists but is not a socket; refusing to remove"
+            )
 
     server.add_insecure_port(f"unix:{socket_path}")
 
@@ -203,7 +209,7 @@ async def serve() -> None:
     servicer.unload_model()
 
     # Clean up socket
-    if sock.exists():
+    if sock.exists() and stat.S_ISSOCK(sock.stat().st_mode):
         sock.unlink()
 
     logger.info("Embedding service stopped")

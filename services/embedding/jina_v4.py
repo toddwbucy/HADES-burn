@@ -92,54 +92,61 @@ class JinaV4Embedder:
         self._model = None
         self._tokenizer = None
 
-    def _load(self) -> None:
-        """Load model and tokenizer into GPU memory (thread-safe)."""
-        with self._load_lock:
-            if self._model is not None:
-                return  # Another thread loaded while we waited
+    def _load_unlocked(self) -> None:
+        """Load model and tokenizer. Caller MUST hold _load_lock."""
+        if self._model is not None:
+            return
 
-            logger.info(
-                "Loading %s on %s (dtype=%s)", self._model_name, self._device, self._dtype
-            )
-            start = time.time()
+        logger.info(
+            "Loading %s on %s (dtype=%s)", self._model_name, self._device, self._dtype
+        )
+        start = time.time()
 
-            tokenizer = AutoTokenizer.from_pretrained(
-                self._model_name, trust_remote_code=True
-            )
+        tokenizer = AutoTokenizer.from_pretrained(
+            self._model_name, trust_remote_code=True
+        )
 
-            model = AutoModel.from_pretrained(
-                self._model_name, trust_remote_code=True, torch_dtype=self._dtype
-            )
+        model = AutoModel.from_pretrained(
+            self._model_name, trust_remote_code=True, torch_dtype=self._dtype
+        )
 
-            if self._device != "cpu":
-                model = model.to(self._device)
+        if self._device != "cpu":
+            model = model.to(self._device)
 
-            # Set model to inference mode
-            model.requires_grad_(False)
+        # Set model to inference mode
+        model.requires_grad_(False)
 
-            # Assign atomically — both succeed or neither is visible
-            self._tokenizer = tokenizer
-            self._model = model
+        # Assign atomically — both succeed or neither is visible
+        self._tokenizer = tokenizer
+        self._model = model
 
-            logger.info(
-                "Model loaded in %.2fs (dtype=%s)",
-                time.time() - start,
-                next(self._model.parameters()).dtype,
-            )
+        logger.info(
+            "Model loaded in %.2fs (dtype=%s)",
+            time.time() - start,
+            next(self._model.parameters()).dtype,
+        )
 
     @property
     def model(self):
         """Lazy-load model on first access (double-checked locking)."""
-        if self._model is None:
-            self._load()
-        return self._model
+        m = self._model
+        if m is not None:
+            return m
+        with self._load_lock:
+            if self._model is None:
+                self._load_unlocked()
+            return self._model
 
     @property
     def tokenizer(self):
         """Lazy-load tokenizer on first access (double-checked locking)."""
-        if self._tokenizer is None:
-            self._load()
-        return self._tokenizer
+        t = self._tokenizer
+        if t is not None:
+            return t
+        with self._load_lock:
+            if self._tokenizer is None:
+                self._load_unlocked()
+            return self._tokenizer
 
     @property
     def model_name(self) -> str:
@@ -258,13 +265,14 @@ class JinaV4Embedder:
 
     def unload(self) -> None:
         """Release GPU memory held by the model."""
-        if self._model is not None:
-            logger.info("Unloading Jina V4 model...")
-            del self._model
-            self._model = None
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
+        with self._load_lock:
+            if self._model is not None:
+                logger.info("Unloading Jina V4 model...")
+                del self._model
+                self._model = None
+            if self._tokenizer is not None:
+                del self._tokenizer
+                self._tokenizer = None
         gc.collect()
         try:
             if torch.cuda.is_available():

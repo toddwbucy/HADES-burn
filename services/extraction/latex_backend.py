@@ -176,6 +176,26 @@ class LaTeXExtractor:
             })
             idx += 1
 
+        # Inline math: \( ... \)
+        for m in re.finditer(r"\\\((.*?)\\\)", latex, re.DOTALL):
+            equations.append({
+                "latex": m.group(1).strip(),
+                "text": "",
+                "index": idx,
+                "is_inline": True,
+            })
+            idx += 1
+
+        # Inline math: $...$ (but not $$...$$, and not escaped \$)
+        for m in re.finditer(r"(?<!\$)(?<!\\)\$((?!\$).+?)\$(?!\$)", latex):
+            equations.append({
+                "latex": m.group(1).strip(),
+                "text": "",
+                "index": idx,
+                "is_inline": True,
+            })
+            idx += 1
+
         return equations
 
     @classmethod

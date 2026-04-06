@@ -168,8 +168,8 @@ class LaTeXExtractor:
 
         return equations
 
-    @staticmethod
-    def _extract_tables(latex: str) -> list[dict[str, Any]]:
+    @classmethod
+    def _extract_tables(cls, latex: str) -> list[dict[str, Any]]:
         """Extract tables from LaTeX source."""
         tables: list[dict[str, Any]] = []
 
@@ -181,7 +181,7 @@ class LaTeXExtractor:
             )
         ):
             content = m.group(1)
-            caption = self._extract_braced(content, r"\caption")
+            caption = cls._extract_braced(content, r"\caption")
 
             tables.append({
                 "content": content.strip(),
@@ -191,19 +191,23 @@ class LaTeXExtractor:
 
         return tables
 
-    @staticmethod
-    def _extract_sections(latex: str) -> list[dict[str, Any]]:
+    @classmethod
+    def _extract_sections(cls, latex: str) -> list[dict[str, Any]]:
         """Extract section headings."""
         sections: list[dict[str, Any]] = []
         level_map = {"section": 1, "subsection": 2, "subsubsection": 3, "paragraph": 4}
 
         for m in re.finditer(
-            r"\\(section|subsection|subsubsection|paragraph)\*?\{(.*?)\}",
+            r"\\(section|subsection|subsubsection|paragraph)\*?\{",
             latex,
         ):
+            cmd = m.group(1)
+            title = cls._extract_braced(latex[m.start():], f"\\{cmd}")
+            if not title:
+                title = cls._extract_braced(latex[m.start():], f"\\{cmd}*")
             sections.append({
-                "level": level_map.get(m.group(1), 0),
-                "title": m.group(2),
+                "level": level_map.get(cmd, 0),
+                "title": title,
             })
 
         return sections

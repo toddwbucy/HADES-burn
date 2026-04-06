@@ -301,8 +301,8 @@ async def serve() -> None:
         await monitor
     except asyncio.CancelledError:
         pass
-    servicer.unload_models()
     await server.stop(grace=5)
+    servicer.unload_models()
 
     # Clean up socket
     if sock.exists():

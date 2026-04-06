@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 import time
 from typing import Any
 
@@ -58,9 +59,26 @@ class JinaV4Embedder:
         self._batch_size = batch_size
 
         # Validate device
-        if device.startswith("cuda") and not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available, falling back to CPU")
-            self._device = "cpu"
+        if device.startswith("cuda"):
+            if not torch.cuda.is_available():
+                logger.warning("CUDA requested but not available, falling back to CPU")
+                self._device = "cpu"
+            else:
+                # Validate ordinal if specified (e.g. "cuda:2")
+                if ":" in device:
+                    try:
+                        ordinal = int(device.split(":", 1)[1])
+                    except ValueError:
+                        raise ValueError(
+                            f"Invalid CUDA device ordinal: {device!r}"
+                        ) from None
+                    count = torch.cuda.device_count()
+                    if ordinal < 0 or ordinal >= count:
+                        raise ValueError(
+                            f"CUDA device {device!r} out of range "
+                            f"(available: {count} device(s), indices 0-{count - 1})"
+                        )
+                self._device = device
         else:
             self._device = device
 
@@ -70,45 +88,55 @@ class JinaV4Embedder:
             else torch.float32
         )
 
+        self._load_lock = threading.Lock()
         self._model = None
         self._tokenizer = None
 
     def _load(self) -> None:
-        """Load model and tokenizer into GPU memory."""
-        logger.info(
-            "Loading %s on %s (dtype=%s)", self._model_name, self._device, self._dtype
-        )
-        start = time.time()
+        """Load model and tokenizer into GPU memory (thread-safe)."""
+        with self._load_lock:
+            if self._model is not None:
+                return  # Another thread loaded while we waited
 
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self._model_name, trust_remote_code=True
-        )
+            logger.info(
+                "Loading %s on %s (dtype=%s)", self._model_name, self._device, self._dtype
+            )
+            start = time.time()
 
-        self._model = AutoModel.from_pretrained(
-            self._model_name, trust_remote_code=True, torch_dtype=self._dtype
-        )
+            tokenizer = AutoTokenizer.from_pretrained(
+                self._model_name, trust_remote_code=True
+            )
 
-        if self._device != "cpu":
-            self._model = self._model.to(self._device)
+            model = AutoModel.from_pretrained(
+                self._model_name, trust_remote_code=True, torch_dtype=self._dtype
+            )
 
-        # Set model to inference mode
-        self._model.requires_grad_(False)
-        logger.info(
-            "Model loaded in %.2fs (dtype=%s)",
-            time.time() - start,
-            next(self._model.parameters()).dtype,
-        )
+            if self._device != "cpu":
+                model = model.to(self._device)
+
+            # Set model to inference mode
+            model.requires_grad_(False)
+
+            # Assign atomically — both succeed or neither is visible
+            self._tokenizer = tokenizer
+            self._model = model
+
+            logger.info(
+                "Model loaded in %.2fs (dtype=%s)",
+                time.time() - start,
+                next(self._model.parameters()).dtype,
+            )
 
     @property
     def model(self):
-        """Lazy-load model on first access."""
+        """Lazy-load model on first access (double-checked locking)."""
         if self._model is None:
             self._load()
         return self._model
 
     @property
     def tokenizer(self):
-        """Lazy-load tokenizer on first access."""
+        """Lazy-load tokenizer on first access (double-checked locking)."""
         if self._tokenizer is None:
             self._load()
         return self._tokenizer

@@ -146,35 +146,41 @@ class DoclingExtractor:
         extract_equations: bool,
         extract_images: bool,
     ) -> ExtractionResult:
-        """Core Docling extraction — THE ML CALL."""
+        """Core Docling extraction �� THE ML CALL."""
         result = self.converter.convert_single(str(path))
 
+        # Docling v2 exposes the document via result.document or result.output
+        doc = getattr(result, "document", None) or getattr(result, "output", None)
+
         # Extract markdown as the full text
-        full_text = result.document.export_to_markdown() if hasattr(result, "document") else ""
+        full_text = ""
+        if doc is not None and hasattr(doc, "export_to_markdown"):
+            full_text = doc.export_to_markdown()
 
         tables = []
         equations = []
         images = []
 
-        if extract_tables and hasattr(result, "document"):
-            for i, table in enumerate(result.document.tables):
+        if extract_tables and doc is not None:
+            for i, table in enumerate(getattr(doc, "tables", [])):
                 tables.append({
                     "content": table.export_to_markdown() if hasattr(table, "export_to_markdown") else str(table),
                     "caption": getattr(table, "caption", ""),
                     "index": i,
                 })
 
-        if extract_equations and hasattr(result, "document"):
-            for i, item in enumerate(getattr(result.document, "equations", [])):
+        if extract_equations and doc is not None:
+            # Docling v2 stores equations as BaseCell objects in doc.equations
+            for i, item in enumerate(getattr(doc, "equations", [])):
                 equations.append({
-                    "latex": getattr(item, "latex", str(item)),
+                    "latex": getattr(item, "text", str(item)),
                     "text": getattr(item, "text", ""),
                     "index": i,
                     "is_inline": getattr(item, "is_inline", False),
                 })
 
-        if extract_images and hasattr(result, "document"):
-            for i, fig in enumerate(getattr(result.document, "pictures", [])):
+        if extract_images and doc is not None:
+            for i, fig in enumerate(getattr(doc, "pictures", [])):
                 images.append({
                     "path": getattr(fig, "uri", ""),
                     "caption": getattr(fig, "caption", ""),
@@ -185,7 +191,7 @@ class DoclingExtractor:
             "source": str(path),
             "format": "pdf",
             "extractor": "docling",
-            "num_pages": str(getattr(result.document, "num_pages", 0)) if hasattr(result, "document") else "0",
+            "num_pages": str(getattr(doc, "num_pages", 0)) if doc is not None else "0",
         }
 
         return ExtractionResult(

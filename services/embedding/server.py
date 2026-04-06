@@ -36,42 +36,44 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
-        self._embedder: JinaV4Embedder | None = None
+        # Eagerly create the embedder wrapper (model loads lazily on first request)
+        self._embedder = JinaV4Embedder(
+            model_name=config.model_name,
+            device=config.device,
+            use_fp16=config.use_fp16,
+            batch_size=config.batch_size,
+        )
         self._last_request_time = time.time()
-
-    def _get_embedder(self) -> JinaV4Embedder:
-        """Get or create the embedder (lazy load on first request)."""
-        if self._embedder is None:
-            self._embedder = JinaV4Embedder(
-                model_name=self._config.model_name,
-                device=self._config.device,
-                use_fp16=self._config.use_fp16,
-                batch_size=self._config.batch_size,
-            )
-        return self._embedder
+        self._active_requests = 0
 
     async def Embed(self, request, context):
         """Embed a batch of texts into vectors."""
-        self._last_request_time = time.time()
-
         if not request.texts:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("No texts provided")
             return embedding_pb2.EmbedResponse()
 
+        task = request.task or "retrieval.passage"
+        if task not in SUPPORTED_TASKS:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                f"Unknown task {task!r}; supported: {', '.join(SUPPORTED_TASKS)}"
+            )
+            return embedding_pb2.EmbedResponse()
+
         logger.info(
-            "Embed request: %d texts, task=%s", len(request.texts), request.task
+            "Embed request: %d texts, task=%s", len(request.texts), task
         )
 
-        task = request.task or "retrieval.passage"
         batch_size = request.batch_size if request.batch_size > 0 else None
+        self._active_requests += 1
 
         try:
             loop = asyncio.get_running_loop()
             start = time.time()
             vectors = await loop.run_in_executor(
                 None,
-                lambda: self._get_embedder().embed_texts(
+                lambda: self._embedder.embed_texts(
                     list(request.texts), task=task, batch_size=batch_size
                 ),
             )
@@ -81,6 +83,9 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Embedding failed: {e}")
             return embedding_pb2.EmbedResponse()
+        finally:
+            self._active_requests -= 1
+            self._last_request_time = time.time()
 
         embeddings = [
             embedding_pb2.Embedding(values=row.tolist()) for row in vectors
@@ -88,7 +93,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
 
         return embedding_pb2.EmbedResponse(
             embeddings=embeddings,
-            model=self._get_embedder().model_name,
+            model=self._embedder.model_name,
             dimension=EMBEDDING_DIM,
             duration_ms=duration_ms,
         )
@@ -101,7 +106,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
             max_seq_length=MAX_TOKENS,
             supported_tasks=SUPPORTED_TASKS,
             device=self._config.device,
-            model_loaded=self._embedder is not None and self._embedder.is_loaded,
+            model_loaded=self._embedder.is_loaded,
         )
 
     @property
@@ -110,7 +115,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
 
     def unload_model(self) -> None:
         """Unload the embedding model to free GPU memory."""
-        if self._embedder is not None and self._embedder.is_loaded:
+        if self._embedder.is_loaded:
             self._embedder.unload()
             logger.info("Embedding model unloaded")
 
@@ -123,7 +128,7 @@ async def idle_monitor(
         await asyncio.sleep(60)
         if (
             config.idle_timeout_seconds > 0
-            and servicer._embedder is not None
+            and servicer._active_requests == 0
             and servicer._embedder.is_loaded
             and (time.time() - servicer.last_request_time)
             > config.idle_timeout_seconds
@@ -186,8 +191,8 @@ async def serve() -> None:
         await monitor
     except asyncio.CancelledError:
         pass
-    servicer.unload_model()
     await server.stop(grace=5)
+    servicer.unload_model()
 
     # Clean up socket
     if sock.exists():

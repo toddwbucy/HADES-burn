@@ -27,6 +27,8 @@ pub enum EdgeKind {
     Pyo3Exposes,
     /// Symbol is exposed via FFI boundary.
     FfiExposes,
+    /// File imports a symbol from another file.
+    Imports,
 }
 
 impl EdgeKind {
@@ -38,6 +40,7 @@ impl EdgeKind {
             Self::Implements => "implements",
             Self::Pyo3Exposes => "pyo3_exposes",
             Self::FfiExposes => "ffi_exposes",
+            Self::Imports => "imports",
         }
     }
 }

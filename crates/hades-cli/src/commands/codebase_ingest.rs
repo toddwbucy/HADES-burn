@@ -22,7 +22,8 @@ use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 use hades_core::chunking::ChunkingStrategy;
-use hades_core::code::{self, AstChunking, CodeAnalysisError, Language};
+use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol};
+use hades_core::code::rust_imports;
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
@@ -60,6 +61,19 @@ struct FileResult {
 pub struct CodebaseIngestFailure {
     pub total: usize,
     pub failed: usize,
+}
+
+/// Accumulators for cross-file import resolution.
+///
+/// Collects per-file import data during the ingest loop so that
+/// import edges can be resolved in a batch pass after all files are processed.
+struct ImportContext {
+    /// Python: rel_path → list of imported module names.
+    python_imports: HashMap<String, Vec<String>>,
+    /// Rust: rel_path → list of expanded use-paths.
+    rust_imports: HashMap<String, Vec<String>>,
+    /// Rust: rel_path → all symbols (for building the resolution index).
+    rust_file_symbols: HashMap<String, Vec<Symbol>>,
 }
 
 /// Run the codebase ingest command.
@@ -130,8 +144,12 @@ pub async fn run(
 
     // Process each file with per-file error isolation.
     let mut results: Vec<FileResult> = Vec::with_capacity(files.len());
-    // Track Python files and their imports for edge resolution.
-    let mut python_imports: HashMap<String, Vec<String>> = HashMap::new();
+    // Accumulators for cross-file import resolution.
+    let mut imports = ImportContext {
+        python_imports: HashMap::new(),
+        rust_imports: HashMap::new(),
+        rust_file_symbols: HashMap::new(),
+    };
 
     // Auto-activate batch mode for large input sets.
     let batch_mode = batch || files.len() > 5;
@@ -162,7 +180,7 @@ pub async fn run(
             file_path,
             &rel_path,
             lang_override,
-            &mut python_imports,
+            &mut imports,
         )
         .await;
 
@@ -186,13 +204,25 @@ pub async fn run(
     }
 
     // Resolve Python import graph edges.
-    let import_edges = resolve_python_imports(&python_imports, &base);
-    if !import_edges.is_empty() {
-        info!(edge_count = import_edges.len(), "resolved Python import edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &import_edges, true).await {
-            warn!(error = %e, "failed to store import edges");
+    let py_import_edges = resolve_python_imports(&imports.python_imports, &base);
+    if !py_import_edges.is_empty() {
+        info!(edge_count = py_import_edges.len(), "resolved Python import edges");
+        if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &py_import_edges, true).await {
+            warn!(error = %e, "failed to store Python import edges");
         }
     }
+
+    // Resolve Rust import graph edges (file → symbol).
+    let rust_symbol_index = rust_imports::build_symbol_index(&imports.rust_file_symbols);
+    let rs_import_edges = rust_imports::resolve_rust_imports(&imports.rust_imports, &rust_symbol_index);
+    if !rs_import_edges.is_empty() {
+        info!(edge_count = rs_import_edges.len(), "resolved Rust import edges");
+        if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &rs_import_edges, true).await {
+            warn!(error = %e, "failed to store Rust import edges");
+        }
+    }
+
+    let total_import_edges = py_import_edges.len() + rs_import_edges.len();
 
     // Output summary.
     let total = results.len();
@@ -209,7 +239,9 @@ pub async fn run(
             "completed": succeeded,
             "failed": failed,
             "skipped": skipped,
-            "import_edges": import_edges.len(),
+            "import_edges": total_import_edges,
+            "python_import_edges": py_import_edges.len(),
+            "rust_import_edges": rs_import_edges.len(),
             "results": results,
         },
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -311,7 +343,7 @@ async fn ingest_file(
     file_path: &Path,
     rel_path: &str,
     lang_override: Option<Language>,
-    python_imports: &mut HashMap<String, Vec<String>>,
+    imports: &mut ImportContext,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -359,15 +391,25 @@ async fn ingest_file(
 
     // Collect Python import names for later edge resolution.
     if lang == Language::Python {
-        let imports: Vec<String> = analysis
+        let py_imports: Vec<String> = analysis
             .symbols
             .iter()
             .filter(|s| s.kind == hades_core::code::SymbolKind::Import)
             .filter_map(|s| s.metadata.get("module").and_then(|v| v.as_str()).map(String::from))
             .collect();
-        if !imports.is_empty() {
-            python_imports.insert(rel_path.to_string(), imports);
+        if !py_imports.is_empty() {
+            imports.python_imports.insert(rel_path.to_string(), py_imports);
         }
+    }
+
+    // Collect Rust use-paths and symbols for later import edge resolution.
+    if lang == Language::Rust {
+        let use_paths = rust_imports::collect_use_paths(&analysis.symbols);
+        if !use_paths.is_empty() {
+            imports.rust_imports.insert(rel_path.to_string(), use_paths);
+        }
+        // Store all symbols (not just imports) for the resolution index.
+        imports.rust_file_symbols.insert(rel_path.to_string(), analysis.symbols.clone());
     }
 
     // Chunk with AST-aligned chunking.

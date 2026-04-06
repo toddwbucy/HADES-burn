@@ -341,6 +341,19 @@ fn main() -> anyhow::Result<()> {
                 socket.as_deref(),
             ));
         }
+        // ── Native DB search ────────────────────────────────────────────
+        Commands::Db(commands::db::DbCmd::Query {
+            search_text, limit, collection, hybrid, format, ..
+        }) => {
+            let text = search_text.ok_or_else(|| {
+                anyhow::anyhow!("search text is required — usage: hades db query \"your search\"")
+            })?;
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_search::run_query(
+                &config, &text, limit, collection.as_deref(), hybrid, &format,
+            ));
+        }
         // ── Native DB read commands ─────────────────────────────────────
         Commands::Db(commands::db::DbCmd::Get { collection, key, format }) => {
             init_tracing();

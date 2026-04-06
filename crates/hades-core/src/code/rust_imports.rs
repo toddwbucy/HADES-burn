@@ -313,15 +313,6 @@ fn pick_best_import_target<'a>(
         }
     }
 
-    // If all candidates were self-references, try returning first non-self.
-    if best.is_none() {
-        for (rel_path, skey) in targets {
-            if rel_path != source_path {
-                return Some((rel_path.as_str(), skey.as_str()));
-            }
-        }
-    }
-
     best.map(|(path, skey, _)| (path, skey))
 }
 

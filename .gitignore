@@ -28,6 +28,13 @@ target
 *.swp
 *.swo
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+services/generated/
+
 # OS
 .DS_Store
 Thumbs.db

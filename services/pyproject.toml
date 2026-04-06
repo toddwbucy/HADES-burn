@@ -1,0 +1,35 @@
+[project]
+name = "hades-services"
+version = "0.1.0"
+description = "Persephone ML services for HADES — extraction and embedding over gRPC"
+requires-python = ">=3.11"
+
+dependencies = [
+    # gRPC
+    "grpcio>=1.62",
+    "grpcio-tools>=1.62",
+    "protobuf>=4.25",
+
+    # ML - Extraction
+    "docling>=2.0",
+
+    # ML - Embedding
+    "torch>=2.0",
+    "transformers>=4.35",
+
+    # Shared
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.62",
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["extraction*", "embedding*", "generated*"]

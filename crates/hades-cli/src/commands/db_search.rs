@@ -12,7 +12,7 @@
 //!
 //! Outputs results via the shared output formatter with envelope.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -89,7 +89,7 @@ pub async fn run_query(
     // Phase 1: Fetch all embedding vectors with their keys.
     let fetch_aql = format!(
         "FOR emb IN @@embeddings \
-             FILTER emb.chunk_key != null \
+             FILTER emb.chunk_key != null AND emb.{fk} != null AND emb.{fk} != '' \
              RETURN {{ chunk_key: emb.chunk_key, {fk}: emb.{fk}, embedding: emb.embedding }}"
     );
     let fetch_bind = json!({ "@embeddings": profile.embeddings });
@@ -250,25 +250,25 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Compute term-coverage score: fraction of query terms present in text.
+/// Compute term-coverage score: fraction of unique query terms present in text.
 fn keyword_tf_score(query_terms: &[String], text: &str) -> f64 {
     let text_lower = text.to_lowercase();
-    let text_terms: HashMap<&str, usize> = {
-        let mut map = HashMap::new();
-        for word in text_lower.split(|c: char| !c.is_alphanumeric() && c != '-') {
-            if word.len() >= 2 {
-                *map.entry(word).or_insert(0) += 1;
-            }
-        }
-        map
-    };
+    let text_terms: HashSet<&str> = text_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .filter(|w| w.len() >= 2)
+        .collect();
 
-    let matches = query_terms
+    let unique_terms: HashSet<&str> = query_terms.iter().map(|s| s.as_str()).collect();
+    if unique_terms.is_empty() {
+        return 0.0;
+    }
+
+    let matches = unique_terms
         .iter()
-        .filter(|qt| text_terms.contains_key(qt.as_str()))
+        .filter(|qt| text_terms.contains(*qt))
         .count();
 
-    matches as f64 / query_terms.len() as f64
+    matches as f64 / unique_terms.len() as f64
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

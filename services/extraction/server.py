@@ -17,6 +17,7 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -62,18 +63,22 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
     def __init__(self, config: ExtractionConfig) -> None:
         self._config = config
         self._docling: DoclingExtractor | None = None
+        self._docling_lock = threading.Lock()
         self._latex = LaTeXExtractor()
         self._last_request_time = time.time()
         self._active_requests = 0
 
     def _get_docling(self) -> DoclingExtractor:
-        """Lazy-load the Docling extractor."""
-        if self._docling is None:
-            self._docling = DoclingExtractor(
-                use_ocr=self._config.use_ocr,
-                use_fallback=self._config.use_fallback,
-            )
-        return self._docling
+        """Lazy-load the Docling extractor (thread-safe)."""
+        if self._docling is not None:
+            return self._docling
+        with self._docling_lock:
+            if self._docling is None:
+                self._docling = DoclingExtractor(
+                    use_ocr=self._config.use_ocr,
+                    use_fallback=self._config.use_fallback,
+                )
+            return self._docling
 
     def _detect_source_type(self, request: extraction_pb2.ExtractRequest) -> int:
         """Detect source type from request or file extension."""
@@ -107,7 +112,8 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
         # If content bytes provided, write to temp file
         tmp_path = None
         if request.content:
-            suffix = Path(request.file_path).suffix if request.file_path else ""
+            # Use all suffixes to preserve multipart extensions like .tar.gz
+            suffix = "".join(Path(request.file_path).suffixes) if request.file_path else ""
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
             tmp.write(request.content)
             tmp.close()

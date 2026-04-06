@@ -25,6 +25,10 @@ class LaTeXExtractor:
 
     SUPPORTED_EXTENSIONS = {".tex", ".gz", ".tar.gz"}
 
+    # Tar bomb limits
+    MAX_TAR_MEMBERS = 500
+    MAX_TAR_EXPANDED_BYTES = 200 * 1024 * 1024  # 200 MB
+
     def extract(
         self,
         file_path: str | Path,
@@ -67,6 +71,17 @@ class LaTeXExtractor:
                     m for m in tar.getmembers()
                     if (m.isreg() or m.isdir()) and self._is_safe(m, tmp_path)
                 ]
+                if len(safe) > self.MAX_TAR_MEMBERS:
+                    return ExtractionResult(
+                        error=f"Archive has {len(safe)} members, exceeds limit of {self.MAX_TAR_MEMBERS}",
+                        processing_time=time.time() - start,
+                    )
+                total_bytes = sum(m.size for m in safe if m.isreg())
+                if total_bytes > self.MAX_TAR_EXPANDED_BYTES:
+                    return ExtractionResult(
+                        error=f"Archive expanded size {total_bytes} bytes exceeds limit of {self.MAX_TAR_EXPANDED_BYTES}",
+                        processing_time=time.time() - start,
+                    )
                 tar.extractall(tmp_path, members=safe)
 
             # Find the main .tex file (largest)

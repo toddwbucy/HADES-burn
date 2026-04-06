@@ -46,6 +46,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
         )
         self._last_request_time = time.time()
         self._active_requests = 0
+        self._executor_futures: set[asyncio.Future] = set()
 
     async def Embed(self, request, context):
         """Embed a batch of texts into vectors."""
@@ -66,18 +67,25 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
             "Embed request: %d texts, task=%s", len(request.texts), task
         )
 
+        if request.batch_size < 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"batch_size must be non-negative, got {request.batch_size}")
+            return embedding_pb2.EmbedResponse()
         batch_size = request.batch_size if request.batch_size > 0 else None
         self._active_requests += 1
 
         try:
             loop = asyncio.get_running_loop()
             start = time.time()
-            vectors = await loop.run_in_executor(
+            fut = loop.run_in_executor(
                 None,
                 lambda: self._embedder.embed_texts(
                     list(request.texts), task=task, batch_size=batch_size
                 ),
             )
+            self._executor_futures.add(fut)
+            fut.add_done_callback(self._executor_futures.discard)
+            vectors = await fut
             duration_ms = int((time.time() - start) * 1000)
         except Exception as e:
             logger.error("Embedding failed: %s", e)
@@ -116,6 +124,9 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
 
     def unload_model(self) -> None:
         """Unload the embedding model to free GPU memory."""
+        if self._executor_futures:
+            logger.info("Skipping unload — %d executor futures in flight", len(self._executor_futures))
+            return
         if self._embedder.is_loaded:
             self._embedder.unload()
             logger.info("Embedding model unloaded")

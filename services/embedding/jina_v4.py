@@ -185,7 +185,8 @@ class JinaV4Embedder:
             Numpy array of shape (N, 2048) with float32 embeddings.
         """
         all_embeddings: list[np.ndarray] = []
-        batch_size = batch_size or self._batch_size
+        if batch_size is None:
+            batch_size = self._batch_size
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
 

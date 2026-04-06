@@ -28,4 +28,8 @@ class ExtractionConfig:
             idle_timeout_seconds=float(
                 os.environ.get("HADES_EXTRACTOR_IDLE_TIMEOUT", cls.idle_timeout_seconds)
             ),
+            use_fallback=os.environ.get(
+                "HADES_EXTRACTOR_FALLBACK", str(cls.use_fallback)
+            ).lower()
+            in ("1", "true", "yes"),
         )

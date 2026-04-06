@@ -236,6 +236,6 @@ class JinaV4Embedder:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 logger.info("CUDA cache cleared")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to clear CUDA cache: %s", e)
         logger.info("Jina V4 model unloaded")

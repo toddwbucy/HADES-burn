@@ -67,7 +67,7 @@ class EmbeddingServicer(embedding_pb2_grpc.EmbeddingServiceServicer):
         batch_size = request.batch_size if request.batch_size > 0 else None
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             start = time.time()
             vectors = await loop.run_in_executor(
                 None,
@@ -173,7 +173,7 @@ async def serve() -> None:
         logger.info("Shutdown signal received")
         stop_event.set()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler)
 
@@ -182,6 +182,10 @@ async def serve() -> None:
 
     logger.info("Shutting down embedding service...")
     monitor.cancel()
+    try:
+        await monitor
+    except asyncio.CancelledError:
+        pass
     servicer.unload_model()
     await server.stop(grace=5)
 

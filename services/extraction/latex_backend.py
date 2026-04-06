@@ -114,8 +114,15 @@ class LaTeXExtractor:
         """Reject symlinks, absolute paths, path traversal."""
         if member.issym() or member.islnk():
             return False
+        if member.name.startswith("/") or ":" in member.name[:3]:
+            return False
+        target_resolved = target.resolve()
         resolved = (target / member.name).resolve()
-        return str(resolved).startswith(str(target.resolve()))
+        try:
+            resolved.relative_to(target_resolved)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _strip_commands(latex: str) -> str:
@@ -174,10 +181,7 @@ class LaTeXExtractor:
             )
         ):
             content = m.group(1)
-            caption = ""
-            cap_m = re.search(r"\\caption\{(.*?)\}", content)
-            if cap_m:
-                caption = cap_m.group(1)
+            caption = self._extract_braced(content, r"\caption")
 
             tables.append({
                 "content": content.strip(),
@@ -203,3 +207,23 @@ class LaTeXExtractor:
             })
 
         return sections
+
+    @staticmethod
+    def _extract_braced(text: str, command: str) -> str:
+        """Extract brace-delimited argument from a LaTeX command, handling nesting."""
+        idx = text.find(command)
+        if idx == -1:
+            return ""
+        # Find the opening brace after the command
+        brace_start = text.find("{", idx + len(command))
+        if brace_start == -1:
+            return ""
+        depth = 0
+        for i in range(brace_start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[brace_start + 1 : i]
+        return ""

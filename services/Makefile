@@ -2,7 +2,12 @@ PROTO_DIR := proto
 GEN_DIR := generated
 PYTHON := python
 
-.PHONY: proto-gen clean install start-extraction stop-extraction start-embedding stop-embedding start-all stop-all
+.PHONY: all test proto-gen clean install start-extraction stop-extraction start-embedding stop-embedding start-all stop-all
+
+all: proto-gen start-all
+
+test:
+	$(PYTHON) -m pytest tests/ -v
 
 # Generate Python gRPC stubs from proto definitions.
 proto-gen:

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "generated"))
 from persephone.extraction import extraction_pb2, extraction_pb2_grpc  # noqa: E402
 
 from .config import ExtractionConfig  # noqa: E402
-from .docling_backend import DoclingExtractor  # noqa: E402
+from .docling_backend import DoclingExtractor, ExtractionResult  # noqa: E402
 from .latex_backend import LaTeXExtractor  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
         )
 
         # Route to appropriate backend
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if source_type == extraction_pb2.SOURCE_TYPE_PDF:
             result = await loop.run_in_executor(
                 None,
@@ -210,10 +210,8 @@ class ExtractionServicer(extraction_pb2_grpc.ExtractionServiceServicer):
             logger.info("Docling extractor unloaded")
 
     @staticmethod
-    def _extract_text(file_path: str) -> "ExtractionResult":
+    def _extract_text(file_path: str) -> ExtractionResult:
         """Read a plain text file."""
-        from .docling_backend import ExtractionResult
-
         path = Path(file_path)
         if not path.exists():
             return ExtractionResult(error=f"File not found: {path}")
@@ -290,7 +288,7 @@ async def serve() -> None:
         logger.info("Shutdown signal received")
         stop_event.set()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler)
 
@@ -299,6 +297,10 @@ async def serve() -> None:
 
     logger.info("Shutting down extraction service...")
     monitor.cancel()
+    try:
+        await monitor
+    except asyncio.CancelledError:
+        pass
     servicer.unload_models()
     await server.stop(grace=5)
 

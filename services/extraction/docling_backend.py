@@ -50,18 +50,21 @@ class DoclingExtractor:
         if self._converter is None:
             logger.info("Loading Docling document converter...")
             start = time.time()
+            from docling.datamodel.base_models import InputFormat
             from docling.datamodel.pipeline_options import (
-                PipelineOptions,
+                PdfPipelineOptions,
                 TableStructureOptions,
             )
-            from docling.document_converter import DocumentConverter
+            from docling.document_converter import DocumentConverter, PdfFormatOption
 
-            pipeline_options = PipelineOptions(
+            pdf_options = PdfPipelineOptions(
                 do_table_structure=True,
                 do_ocr=self._use_ocr,
                 table_structure_options=TableStructureOptions(do_cell_matching=True),
             )
-            self._converter = DocumentConverter(pipeline_options=pipeline_options)
+            self._converter = DocumentConverter(
+                format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)}
+            )
             logger.info("Docling converter loaded in %.2fs", time.time() - start)
         return self._converter
 
@@ -205,12 +208,9 @@ class DoclingExtractor:
             )
 
         try:
-            doc = fitz.open(str(path))
-            pages = []
-            for page in doc:
-                pages.append(page.get_text())
+            with fitz.open(str(path)) as doc:
+                pages = [page.get_text() for page in doc]
             full_text = "\n\n".join(pages)
-            doc.close()
 
             return ExtractionResult(
                 text=full_text,

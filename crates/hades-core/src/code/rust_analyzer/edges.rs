@@ -72,8 +72,8 @@ pub struct CrateEdge {
 
 /// Map an LSP/rust-analyzer kind string to a universal graph primitive.
 ///
-/// Returns `None` for kinds that are not graph primitives (e.g., `"field"`,
-/// `"property"`, `"unknown"`). Callers should skip non-primitive symbols.
+/// Returns `None` for kinds that are not graph primitives (e.g., `"unknown"`,
+/// `"string"`, `"number"`). Callers should skip non-primitive symbols.
 fn universal_kind_from_lsp(lsp_kind: &str) -> Option<&'static str> {
     match lsp_kind {
         "function" | "method" | "constructor" | "macro" => Some("callable"),

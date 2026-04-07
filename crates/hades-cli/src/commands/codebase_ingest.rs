@@ -31,7 +31,7 @@ use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
 use hades_core::db::query::ExecutionTarget;
-use hades_core::db::ArangoPool;
+use hades_core::db::{ArangoErrorKind, ArangoPool};
 use hades_core::persephone::embedding::EmbeddingClient;
 use hades_core::HadesConfig;
 
@@ -326,8 +326,15 @@ pub async fn run(
 
 // ── Collection setup ────────────────────────────────────────────────────
 
-/// Ensure all codebase collections exist, creating any that are missing.
+/// Ensure all codebase collections, named graph, and indices exist.
+///
+/// Creation order (per ontology spec §7.1):
+/// 1. Document collections (files, chunks, embeddings, symbols)
+/// 2. Edge collections (defines, calls, implements, imports)
+/// 3. Named graph `codebase_graph` via Gharial API
+/// 4. Persistent indices on document collections
 async fn ensure_collections(db: &ArangoPool) -> Result<()> {
+    // Step 1–2: Create collections.
     let existing = crud::list_collections(db, false)
         .await
         .context("failed to list collections")?;
@@ -341,6 +348,95 @@ async fn ensure_collections(db: &ArangoPool) -> Result<()> {
                 .with_context(|| format!("failed to create collection: {name}"))?;
         }
     }
+
+    // Step 3: Create named graph (idempotent — 409 means it already exists).
+    ensure_named_graph(db).await?;
+
+    // Step 4: Ensure persistent indices.
+    ensure_indices(db).await?;
+
+    Ok(())
+}
+
+/// The named graph name.
+const CODEBASE_GRAPH: &str = "codebase_graph";
+
+/// Create the `codebase_graph` named graph via the Gharial API.
+///
+/// The named graph enforces `_from`/`_to` vertex constraints at insert
+/// time — an edge with `_from` pointing to the wrong collection is
+/// rejected by ArangoDB rather than silently corrupting the graph.
+async fn ensure_named_graph(db: &ArangoPool) -> Result<()> {
+    let body = json!({
+        "name": CODEBASE_GRAPH,
+        "edgeDefinitions": [
+            {
+                "collection": CODEBASE.defines_edges,
+                "from": [CODEBASE.files],
+                "to": [CODEBASE.symbols],
+            },
+            {
+                "collection": CODEBASE.calls_edges,
+                "from": [CODEBASE.symbols],
+                "to": [CODEBASE.symbols],
+            },
+            {
+                "collection": CODEBASE.implements_edges,
+                "from": [CODEBASE.symbols],
+                "to": [CODEBASE.symbols],
+            },
+            {
+                "collection": CODEBASE.imports_edges,
+                "from": [CODEBASE.files],
+                "to": [CODEBASE.files, CODEBASE.symbols],
+            },
+        ],
+        "orphanCollections": [CODEBASE.chunks, CODEBASE.embeddings],
+    });
+
+    match db.writer().post("gharial", &body).await {
+        Ok(_) => {
+            info!(graph = CODEBASE_GRAPH, "created named graph");
+        }
+        Err(e) if e.kind() == ArangoErrorKind::Conflict => {
+            debug!(graph = CODEBASE_GRAPH, "named graph already exists");
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e).context("failed to create named graph"));
+        }
+    }
+    Ok(())
+}
+
+/// Ensure persistent indices exist on codebase document collections.
+///
+/// ArangoDB's `ensureIndex` is idempotent — if an index with the same
+/// fields and type already exists, it returns the existing index.
+async fn ensure_indices(db: &ArangoPool) -> Result<()> {
+    let indices: &[(&str, &[&str])] = &[
+        (CODEBASE.chunks, &["file_key"]),
+        (CODEBASE.chunks, &["symbols[*]"]),
+        (CODEBASE.embeddings, &["file_key"]),
+        (CODEBASE.embeddings, &["chunk_key"]),
+        (CODEBASE.symbols, &["file_key"]),
+        (CODEBASE.symbols, &["kind"]),
+    ];
+
+    for (collection, fields) in indices {
+        let path = format!("index?collection={collection}");
+        let body = json!({
+            "type": "persistent",
+            "fields": fields,
+        });
+        db.writer()
+            .post(&path, &body)
+            .await
+            .with_context(|| {
+                format!("failed to ensure index on {collection} {fields:?}")
+            })?;
+    }
+
+    debug!("ensured {} persistent indices", indices.len());
     Ok(())
 }
 

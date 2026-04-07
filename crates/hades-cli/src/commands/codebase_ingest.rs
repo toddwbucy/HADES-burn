@@ -118,9 +118,17 @@ pub async fn run(
     let db = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;
 
-    let embedder = EmbeddingClient::connect_default()
-        .await
-        .context("failed to connect to embedding service")?;
+    // Embedding is optional — ingest proceeds without vectors if the service is unavailable.
+    let embedder = match EmbeddingClient::connect_default().await {
+        Ok(client) => {
+            info!("connected to embedding service");
+            Some(client)
+        }
+        Err(e) => {
+            warn!(error = %e, "embedding service unavailable — ingesting without vectors");
+            None
+        }
+    };
 
     // Ensure codebase collections exist.
     ensure_collections(&db).await?;
@@ -190,7 +198,7 @@ pub async fn run(
 
         let result = ingest_file(
             &db,
-            &embedder,
+            embedder.as_ref(),
             config,
             file_path,
             &rel_path,
@@ -280,6 +288,7 @@ pub async fn run(
         "completed": succeeded,
         "failed": failed,
         "skipped": skipped,
+        "embedding_available": embedder.is_some(),
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
@@ -382,7 +391,7 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
 /// Ingest a single source file: analyze → chunk → embed → store.
 async fn ingest_file(
     db: &ArangoPool,
-    embedder: &EmbeddingClient,
+    embedder: Option<&EmbeddingClient>,
     config: &HadesConfig,
     file_path: &Path,
     rel_path: &str,
@@ -534,43 +543,44 @@ async fn ingest_file(
         })
         .collect();
 
-    // Embed chunks.
+    // Embed chunks (skipped if embedder is unavailable).
     let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-    let embedding_docs = if !chunk_texts.is_empty() {
-        match embedder
-            .embed(
-                &chunk_texts,
-                "retrieval.code",
-                Some(config.embedding.batch.size),
-            )
-            .await
-        {
-            Ok(embed_result) => {
-                embed_result
-                    .embeddings
-                    .iter()
-                    .enumerate()
-                    .map(|(i, vec)| {
-                        let ckey = keys::chunk_key(&fkey, i);
-                        let ekey = keys::embedding_key(&ckey);
-                        json!({
-                            "_key": ekey,
-                            "chunk_key": ckey,
-                            "file_key": fkey,
-                            "embedding": vec,
-                            "model": embed_result.model,
-                            "dimension": embed_result.dimension,
+    let embedding_docs = match embedder {
+        Some(emb) if !chunk_texts.is_empty() => {
+            match emb
+                .embed(
+                    &chunk_texts,
+                    "retrieval.code",
+                    Some(config.embedding.batch.size),
+                )
+                .await
+            {
+                Ok(embed_result) => {
+                    embed_result
+                        .embeddings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vec)| {
+                            let ckey = keys::chunk_key(&fkey, i);
+                            let ekey = keys::embedding_key(&ckey);
+                            json!({
+                                "_key": ekey,
+                                "chunk_key": ckey,
+                                "file_key": fkey,
+                                "embedding": vec,
+                                "model": embed_result.model,
+                                "dimension": embed_result.dimension,
+                            })
                         })
-                    })
-                    .collect::<Vec<Value>>()
-            }
-            Err(e) => {
-                warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
-                Vec::new()
+                        .collect::<Vec<Value>>()
+                }
+                Err(e) => {
+                    warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
+                    Vec::new()
+                }
             }
         }
-    } else {
-        Vec::new()
+        _ => Vec::new(),
     };
 
     // Store everything to ArangoDB (overwrite mode for idempotent re-runs).

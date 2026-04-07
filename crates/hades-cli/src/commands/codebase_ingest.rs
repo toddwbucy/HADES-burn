@@ -816,25 +816,24 @@ async fn run_rust_analyzer_phase(
         info!(count = edge_docs.len(), "stored rust-analyzer edges");
     }
 
-    // Patch file documents with rust-analyzer metadata.
-    if !file_patches.is_empty() {
-        let patch_docs: Vec<Value> = file_patches
-            .iter()
-            .map(|(rel_path, sym_count, analyzed_at)| {
-                let fkey = keys::file_key(rel_path);
-                json!({
-                    "_key": fkey,
-                    "ra_analyzed": true,
-                    "ra_symbol_count": sym_count,
-                    "ra_analyzed_at": analyzed_at,
-                })
-            })
-            .collect();
-        if let Err(e) = crud::insert_documents(db, CODEBASE.files, &patch_docs, true).await {
-            warn!(error = %e, "failed to patch file documents with rust-analyzer metadata");
-        } else {
-            info!(count = patch_docs.len(), "patched file documents with rust-analyzer metadata");
+    // Patch file documents with rust-analyzer metadata (partial update — preserves existing fields).
+    let mut patched_count = 0;
+    for (rel_path, sym_count, analyzed_at) in &file_patches {
+        let fkey = keys::file_key(rel_path);
+        let patch = json!({
+            "ra_analyzed": true,
+            "ra_symbol_count": sym_count,
+            "ra_analyzed_at": analyzed_at,
+        });
+        match crud::update_document(db, CODEBASE.files, &fkey, &patch).await {
+            Ok(_) => patched_count += 1,
+            Err(e) => {
+                debug!(file_key = %fkey, error = %e, "failed to patch file document (non-fatal)");
+            }
         }
+    }
+    if patched_count > 0 {
+        info!(count = patched_count, "patched file documents with rust-analyzer metadata");
     }
 
     Ok(RustAnalyzerStats {

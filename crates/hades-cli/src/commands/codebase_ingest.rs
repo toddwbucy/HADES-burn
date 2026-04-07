@@ -23,6 +23,9 @@ use walkdir::WalkDir;
 
 use hades_core::chunking::ChunkingStrategy;
 use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
+use hades_core::code::rust_analyzer::{
+    RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
+};
 use hades_core::code::rust_imports;
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
@@ -153,6 +156,8 @@ pub async fn run(
         rust_imports: HashMap::new(),
         rust_file_symbols: HashMap::new(),
     };
+    // Collect absolute paths for Rust files — used for rust-analyzer post-loop phase.
+    let mut rust_abs_paths: Vec<PathBuf> = Vec::new();
 
     // Auto-activate batch mode for large input sets.
     let batch_mode = batch || files.len() > 5;
@@ -175,6 +180,13 @@ pub async fn run(
             .unwrap_or(file_path)
             .to_string_lossy()
             .to_string();
+
+        // Track Rust files for rust-analyzer post-loop enrichment.
+        let is_rust = lang_override == Some(Language::Rust)
+            || file_path.extension().and_then(|e| e.to_str()) == Some("rs");
+        if is_rust {
+            rust_abs_paths.push(file_path.clone());
+        }
 
         let result = ingest_file(
             &db,
@@ -232,6 +244,30 @@ pub async fn run(
 
     let total_import_edges = py_import_edges.len() + rs_import_edges.len();
 
+    // ── rust-analyzer deep analysis ────────────────────────────────────
+    // When Rust files were ingested, optionally use rust-analyzer for richer
+    // symbol extraction: qualified names, call hierarchy, impl-trait edges,
+    // PyO3/FFI detection. This enrichment phase runs after the syn-based loop.
+    let ra_stats = if !rust_abs_paths.is_empty() {
+        match run_rust_analyzer_phase(&db, &base, &rust_abs_paths).await {
+            Ok(stats) => {
+                info!(
+                    symbols = stats.symbols,
+                    edges = stats.edges,
+                    crates = stats.crates,
+                    "rust-analyzer enrichment complete"
+                );
+                stats
+            }
+            Err(e) => {
+                warn!(error = %e, "rust-analyzer enrichment failed, syn-based data retained");
+                RustAnalyzerStats::default()
+            }
+        }
+    } else {
+        RustAnalyzerStats::default()
+    };
+
     // Output summary.
     let total = results.len();
     let succeeded = results.iter().filter(|r| r.success).count();
@@ -247,6 +283,11 @@ pub async fn run(
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
+        "rust_analyzer": {
+            "symbols": ra_stats.symbols,
+            "edges": ra_stats.edges,
+            "crates_analyzed": ra_stats.crates,
+        },
         "results": results,
         "duration_ms": duration_ms,
     });
@@ -620,6 +661,154 @@ async fn check_unchanged(
         Err(e) if e.is_not_found() => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+// ── rust-analyzer enrichment ───────────────────────────────────────────
+
+/// Stats returned from the rust-analyzer enrichment phase.
+#[derive(Default)]
+struct RustAnalyzerStats {
+    symbols: usize,
+    edges: usize,
+    crates: usize,
+}
+
+/// Run rust-analyzer over ingested Rust files to produce rich symbols and edges.
+///
+/// Groups files by crate root, spawns a `RustAnalyzerSession` per crate,
+/// extracts qualified symbols with call hierarchy and impl-trait info, then
+/// stores the enriched symbol documents and edges to ArangoDB.
+///
+/// This phase is additive: it overwrites top-level symbol documents (same
+/// keys as syn) and adds new method-level symbols and cross-file edges
+/// that syn cannot produce.
+async fn run_rust_analyzer_phase(
+    db: &ArangoPool,
+    base: &Path,
+    rust_files: &[PathBuf],
+) -> Result<RustAnalyzerStats> {
+    let groups = group_files_by_crate(rust_files);
+    if groups.is_empty() {
+        return Ok(RustAnalyzerStats::default());
+    }
+
+    info!(
+        crate_count = groups.len(),
+        file_count = rust_files.len(),
+        "starting rust-analyzer enrichment"
+    );
+
+    let mut all_extractions = HashMap::new();
+    let mut crates_analyzed = 0;
+
+    for (crate_root, crate_files) in &groups {
+        info!(
+            crate_root = %crate_root.display(),
+            file_count = crate_files.len(),
+            "analyzing crate with rust-analyzer"
+        );
+
+        let session = match RustAnalyzerSession::start(crate_root).await {
+            Ok(s) => s,
+            Err(e) => {
+                // If rust-analyzer isn't installed or fails to start,
+                // skip this crate but try others.
+                warn!(
+                    crate_root = %crate_root.display(),
+                    error = %e,
+                    "failed to start rust-analyzer session, skipping crate"
+                );
+                continue;
+            }
+        };
+
+        let extractor = RustSymbolExtractor::new(&session, true);
+        let file_refs: Vec<&Path> = crate_files.iter().map(|p| p.as_path()).collect();
+        let extractions = extractor.extract_crate(&file_refs).await;
+
+        // Convert absolute path keys to relative paths (matching file_key convention).
+        for (abs_path_str, extraction) in extractions {
+            let abs = Path::new(&abs_path_str);
+            let rel = abs
+                .strip_prefix(base)
+                .unwrap_or(abs)
+                .to_string_lossy()
+                .to_string();
+            all_extractions.insert(rel, extraction);
+        }
+
+        crates_analyzed += 1;
+
+        // Graceful shutdown — non-fatal if it fails.
+        if let Err(e) = session.shutdown().await {
+            debug!(error = %e, "rust-analyzer shutdown warning (non-fatal)");
+        }
+    }
+
+    if all_extractions.is_empty() {
+        return Ok(RustAnalyzerStats {
+            crates: crates_analyzed,
+            ..Default::default()
+        });
+    }
+
+    // Build rich symbol documents and edges via RustEdgeResolver.
+    let resolver = RustEdgeResolver::new(all_extractions);
+    let symbol_docs = resolver.build_symbol_documents();
+    let crate_edges = resolver.build_edges();
+
+    let sym_count = symbol_docs.len();
+    let edge_count = crate_edges.len();
+
+    // Store enriched symbol documents (overwrite=true for idempotent re-runs).
+    if !symbol_docs.is_empty() {
+        let docs: Vec<Value> = symbol_docs
+            .iter()
+            .filter_map(|s| serde_json::to_value(s).ok())
+            .collect();
+        crud::insert_documents(db, CODEBASE.symbols, &docs, true)
+            .await
+            .context("failed to store rust-analyzer symbol documents")?;
+        info!(count = docs.len(), "stored rust-analyzer symbol documents");
+    }
+
+    // Store edges with deterministic keys for idempotent re-runs.
+    if !crate_edges.is_empty() {
+        let edge_docs: Vec<Value> = crate_edges
+            .iter()
+            .map(|e| {
+                // Build a deterministic key from from/to/kind to prevent duplicates.
+                let from_suffix = e.from.rsplit('/').next().unwrap_or(&e.from);
+                let to_suffix = e.to.rsplit('/').next().unwrap_or(&e.to);
+                let edge_key = keys::edge_key(from_suffix, e.kind.as_str(), to_suffix);
+                let mut doc = json!({
+                    "_key": edge_key,
+                    "_from": e.from,
+                    "_to": e.to,
+                    "type": e.kind.as_str(),
+                });
+                // Merge edge metadata.
+                if let Value::Object(meta) = &e.metadata
+                    && let Value::Object(ref mut obj) = doc
+                {
+                    for (k, v) in meta {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+                doc
+            })
+            .collect();
+        crud::insert_documents(db, CODEBASE.edges, &edge_docs, true)
+            .await
+            .context("failed to store rust-analyzer edges")?;
+        info!(count = edge_docs.len(), "stored rust-analyzer edges");
+    }
+
+    Ok(RustAnalyzerStats {
+        symbols: sym_count,
+        edges: edge_count,
+        crates: crates_analyzed,
+    })
 }
 
 // ── Python import graph resolution ──────────────────────────────────────

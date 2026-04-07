@@ -51,6 +51,10 @@ impl SymbolKind {
     ///
     /// - `Import` → produces edges, not vertices
     /// - `Impl` → scaffolding; methods extracted individually as `callable`
+    ///
+    /// **Keep in sync with `universal_kind_from_lsp()`** in
+    /// `code::rust_analyzer::edges`, which maps LSP kind strings to the
+    /// same four primitives for the rust-analyzer enrichment path.
     pub fn universal_kind(&self) -> Option<&'static str> {
         match self {
             Self::Function => Some("callable"),

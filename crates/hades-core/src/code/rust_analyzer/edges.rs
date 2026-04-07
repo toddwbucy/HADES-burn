@@ -74,6 +74,11 @@ pub struct CrateEdge {
 ///
 /// Returns `None` for kinds that are not graph primitives (e.g., `"unknown"`,
 /// `"string"`, `"number"`). Callers should skip non-primitive symbols.
+///
+/// **Keep in sync with [`SymbolKind::universal_kind()`](crate::code::symbols::SymbolKind::universal_kind).**
+/// That method maps the syn `SymbolKind` enum to the same four primitives.
+/// The two functions accept different input types (LSP strings vs enum) but
+/// must agree on which primitives exist: `callable`, `type`, `value`, `module`.
 fn universal_kind_from_lsp(lsp_kind: &str) -> Option<&'static str> {
     match lsp_kind {
         "function" | "method" | "constructor" | "macro" => Some("callable"),

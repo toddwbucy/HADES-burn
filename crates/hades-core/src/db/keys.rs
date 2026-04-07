@@ -105,6 +105,37 @@ pub fn symbol_key(file_key: &str, qualified_name: &str) -> String {
     format!("{file_key}__{readable}__{hash8}")
 }
 
+/// Build a deterministic edge key from source, type, and target.
+///
+/// Uses a truncated SHA-256 hash of the combined input to keep keys
+/// short while preventing collisions from lossy normalization.
+///
+/// Format: `{from_prefix}__{kind}__{to_prefix}__{hash8}`
+///
+/// # Examples
+/// ```
+/// # use hades_core::db::keys::edge_key;
+/// let key = edge_key("src_lib_rs__Config__abc12345", "defines", "src_lib_rs__Config__new__def67890");
+/// assert!(key.contains("defines"));
+/// ```
+pub fn edge_key(from: &str, kind: &str, to: &str) -> String {
+    // Truncate from/to for readability (first 20 chars each).
+    let from_prefix: String = from.chars().take(20).collect();
+    let to_prefix: String = to.chars().take(20).collect();
+
+    // Deterministic hash of the full from+kind+to.
+    let mut hasher = Sha256::new();
+    hasher.update(from.as_bytes());
+    hasher.update(b"|");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"|");
+    hasher.update(to.as_bytes());
+    let digest = hasher.finalize();
+    let hash8 = hex8(&digest);
+
+    format!("{from_prefix}__{kind}__{to_prefix}__{hash8}")
+}
+
 /// First 8 hex chars of a SHA-256 digest.
 fn hex8(digest: &[u8]) -> String {
     // 4 bytes = 8 hex chars
@@ -181,6 +212,20 @@ mod tests {
         let a = symbol_key("src_lib_rs", "Config::new");
         let b = symbol_key("src_lib_rs", "Config::new");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_edge_key_deterministic() {
+        let a = edge_key("src_lib_rs__Config__abc", "defines", "src_lib_rs__new__def");
+        let b = edge_key("src_lib_rs__Config__abc", "defines", "src_lib_rs__new__def");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_edge_key_no_collision() {
+        let a = edge_key("src_lib_rs__Config__abc", "defines", "src_lib_rs__new__def");
+        let b = edge_key("src_lib_rs__Config__abc", "calls", "src_lib_rs__new__def");
+        assert_ne!(a, b, "different edge kinds should produce different keys");
     }
 
     #[test]

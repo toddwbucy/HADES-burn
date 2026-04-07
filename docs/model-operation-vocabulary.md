@@ -175,9 +175,21 @@ All commands use the same JSON envelope over the Unix socket:
     "limit": 10,
     "hybrid": true
   },
+  "session": "agent",
   "request_id": "optional-echo-id"
 }
 ```
+
+### Session-Level Enforcement
+
+The optional `"session"` field declares the caller type:
+
+| Value | Meaning | Allowed tiers |
+|-------|---------|---------------|
+| `"agent"` | AI model agent | `Agent` only |
+| *(omitted)* | Human operator (default) | All tiers |
+
+When `"session": "agent"` is set, the daemon rejects any non-`Agent`-tier command with error code `ACCESS_DENIED` **before dispatch**. This is the runtime enforcement of the vocabulary boundary — a model agent cannot invoke `db.aql` even if it constructs the correct JSON.
 
 Response:
 

@@ -613,11 +613,10 @@ async fn ingest_file(
         "ingested_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    // Store everything to ArangoDB (overwrite mode for idempotent re-runs).
-    crud::insert_documents(db, CODEBASE.files, &[file_doc], true)
-        .await
-        .context("failed to store file document")?;
-
+    // Store to ArangoDB. Embeddings are persisted BEFORE the file document
+    // so that embedding_count is only recorded once the vectors are durable.
+    // This prevents check_unchanged() from skipping future backfills if
+    // embedding persistence fails partway through.
     if !chunk_docs.is_empty() {
         crud::insert_documents(db, CODEBASE.chunks, &chunk_docs, true)
             .await
@@ -641,6 +640,12 @@ async fn ingest_file(
             .await
             .context("failed to store define edges")?;
     }
+
+    // File document stored last — embedding_count is only recorded after
+    // vectors are durable, so check_unchanged() won't wrongly skip backfills.
+    crud::insert_documents(db, CODEBASE.files, &[file_doc], true)
+        .await
+        .context("failed to store file document")?;
 
     // Transfer symbols into the import index (avoids cloning).
     match lang {
@@ -721,6 +726,11 @@ async fn check_unchanged(
             }
             // Code unchanged. Skip only if embeddings aren't needed or already present.
             if embedder_available {
+                // Files with no chunks have nothing to embed — always skip.
+                let chunk_count = doc["chunk_count"].as_u64().unwrap_or(0);
+                if chunk_count == 0 {
+                    return Ok(Some(true));
+                }
                 let has_embeddings = doc["embedding_count"]
                     .as_u64()
                     .is_some_and(|n| n > 0);

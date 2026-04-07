@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::db::keys;
+use crate::db::{collections::CODEBASE, keys};
 use super::symbols::FileExtraction;
 
 /// Edge types produced by the resolver.
@@ -43,12 +43,15 @@ impl EdgeKind {
     }
 
     /// The ArangoDB edge collection name for this edge kind.
+    ///
+    /// Derived from the [`CODEBASE`] singleton to prevent drift between
+    /// the edge kind enum and the collection registry.
     pub fn collection(&self) -> &'static str {
         match self {
-            Self::Defines => "codebase_defines_edges",
-            Self::Calls => "codebase_calls_edges",
-            Self::Implements => "codebase_implements_edges",
-            Self::Imports => "codebase_imports_edges",
+            Self::Defines => CODEBASE.defines_edges,
+            Self::Calls => CODEBASE.calls_edges,
+            Self::Implements => CODEBASE.implements_edges,
+            Self::Imports => CODEBASE.imports_edges,
         }
     }
 }
@@ -67,6 +70,20 @@ pub struct CrateEdge {
     pub metadata: serde_json::Value,
 }
 
+/// Map an LSP/rust-analyzer kind string to a universal graph primitive.
+///
+/// Returns `None` for kinds that are not graph primitives (e.g., `"field"`,
+/// `"property"`, `"unknown"`). Callers should skip non-primitive symbols.
+fn universal_kind_from_lsp(lsp_kind: &str) -> Option<&'static str> {
+    match lsp_kind {
+        "function" | "method" | "constructor" | "macro" => Some("callable"),
+        "struct" | "enum" | "interface" | "class" | "type_parameter" => Some("type"),
+        "constant" | "variable" | "enum_member" | "field" | "property" => Some("value"),
+        "module" | "namespace" | "package" => Some("module"),
+        _ => None,
+    }
+}
+
 /// A symbol document ready for ArangoDB insertion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolDocument {
@@ -75,7 +92,10 @@ pub struct SymbolDocument {
     pub key: String,
     pub name: String,
     pub qualified_name: String,
+    /// Universal graph primitive: `"callable"`, `"type"`, `"value"`, `"module"`.
     pub kind: String,
+    /// Original LSP kind string (e.g., `"function"`, `"struct"`, `"interface"`).
+    pub lang_kind: String,
     pub visibility: String,
     pub signature: String,
     pub file_path: String,
@@ -121,6 +141,11 @@ impl RustEdgeResolver {
 
         for (rel_path, extraction) in &self.file_data {
             for sym in &extraction.symbols {
+                // Only emit documents for graph primitives.
+                let Some(universal) = universal_kind_from_lsp(&sym.kind) else {
+                    continue;
+                };
+
                 let sk = keys::symbol_key(
                     &keys::file_key(rel_path),
                     &sym.qualified_name,
@@ -130,7 +155,8 @@ impl RustEdgeResolver {
                     key: sk,
                     name: sym.name.clone(),
                     qualified_name: sym.qualified_name.clone(),
-                    kind: sym.kind.clone(),
+                    kind: universal.to_string(),
+                    lang_kind: sym.kind.clone(),
                     visibility: sym.visibility.clone(),
                     signature: sym.signature.clone(),
                     file_path: rel_path.clone(),

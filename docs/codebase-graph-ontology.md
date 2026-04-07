@@ -24,7 +24,7 @@ The codebase graph stores the structural representation of ingested source code:
 
 ## 2. Named Graph Definition
 
-```
+```text
 Graph: "codebase_graph"
 
 Edge collections:
@@ -166,7 +166,7 @@ Nested under `metrics` on every file document.
 
 #### Key Generation
 
-```
+```text
 file_key("src/lib.rs")           → "src_lib_rs"
 file_key("core/models.py")      → "core_models_py"
 file_key("tests/test_config.rs") → "tests_test_config_rs"
@@ -210,7 +210,7 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 
 #### Key Generation
 
-```
+```text
 symbol_key("src_lib_rs", "Config::new")
   → readable: "Config__new"
   → hash8:    SHA-256("Config::new")[:8]
@@ -254,7 +254,7 @@ Rust-analyzer is a post-pass that enriches symbol documents only. Chunk document
 
 #### Key Generation
 
-```
+```text
 chunk_key("src_lib_rs", 0)  → "src_lib_rs_chunk_0"
 chunk_key("src_lib_rs", 3)  → "src_lib_rs_chunk_3"
 ```
@@ -277,7 +277,7 @@ One document per embedding vector. Each embedding corresponds to one chunk.
 
 #### Key Generation
 
-```
+```text
 embedding_key("src_lib_rs_chunk_0")  → "src_lib_rs_chunk_0_emb"
 ```
 
@@ -297,7 +297,7 @@ Four edge collections, one per relation type. The collection name IS the relatio
 
 #### Edge Key Generation
 
-```
+```text
 edge_key("src_lib_rs", "defines", "src_lib_rs__Config__new__e5f6a7b8")
   → from_prefix: "src_lib_rs" (first 20 chars)
   → to_prefix:   "src_lib_rs__Config__" (first 20 chars)
@@ -464,7 +464,7 @@ Collections, graph, and indices are created by `ensure_collections()` at the sta
 
 Creation order matters: vertex collections must exist before the named graph is created, because the graph definition references them.
 
-```
+```text
 1. Create document collections: files, chunks, embeddings, symbols     (4)
 2. Create edge collections: defines, calls, implements, imports        (4)
 3. Create named graph: codebase_graph (via POST /_api/gharial)         (1)
@@ -500,7 +500,7 @@ The codebase graph and the NL knowledge graph are **separate named graphs** in t
 
 Future bridging between them (e.g., linking a code symbol to the equation it implements) would use a **new edge collection** — not by mixing vertices across graph boundaries:
 
-```
+```text
 Potential future bridge:
   Edge collection: nl_code_equation_edges
   _from: codebase_symbols (code callable)
@@ -582,7 +582,7 @@ ArangoDB supports `arangosearch` views for text search. Adding a view over `code
 
 ## 12. Collection Summary
 
-```
+```text
 codebase_graph (Named Graph)
 |
 +-- codebase_files               (document, vertex)    — kind: file

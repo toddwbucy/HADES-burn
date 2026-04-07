@@ -605,6 +605,7 @@ async fn ingest_file(
                                 "file_key": fkey,
                                 "embedding": vec,
                                 "model": embed_result.model,
+                                "model_hash": keys::model_hash(&embed_result.model),
                                 "dimension": embed_result.dimension,
                             })
                         })
@@ -726,6 +727,7 @@ fn build_line_offsets(source: &str) -> Vec<usize> {
             offsets.push(i + 1);
         }
     }
+    offsets.push(source.len());
     offsets
 }
 
@@ -1101,7 +1103,7 @@ fn resolve_python_imports(
                         if let Some((target_path, target_skey)) = target
                             && target_path != source_path {
                                 let edge_key =
-                                    format!("{source_fkey}_imports_{target_skey}");
+                                    keys::edge_key(&source_fkey, "imports", target_skey);
                                 if seen.insert(edge_key.clone()) {
                                     edges.push(json!({
                                         "_from": format!("{}/{}", CODEBASE.files, source_fkey),
@@ -1125,7 +1127,7 @@ fn resolve_python_imports(
                             && target_path != source_path {
                                 let target_fkey = keys::file_key(target_path);
                                 let edge_key =
-                                    format!("{source_fkey}_imports_{target_fkey}");
+                                    keys::edge_key(&source_fkey, "imports", &target_fkey);
                                 if seen.insert(edge_key.clone()) {
                                     edges.push(json!({
                                         "_from": format!("{}/{}", CODEBASE.files, source_fkey),
@@ -1145,7 +1147,7 @@ fn resolve_python_imports(
                     if let Some(target_path) = resolve_module_to_file(module, &module_to_file)
                         && target_path != source_path {
                             let target_fkey = keys::file_key(target_path);
-                            let edge_key = format!("{source_fkey}_imports_{target_fkey}");
+                            let edge_key = keys::edge_key(&source_fkey, "imports", &target_fkey);
                             if seen.insert(edge_key.clone()) {
                                 edges.push(json!({
                                     "_from": format!("{}/{}", CODEBASE.files, source_fkey),

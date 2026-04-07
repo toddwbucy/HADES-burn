@@ -232,7 +232,17 @@ fn parse_request(
 
     let session = match frame.get("session").and_then(|v| v.as_str()) {
         Some("agent") => SessionKind::Agent,
-        _ => SessionKind::Admin,
+        Some("admin") => SessionKind::Admin,
+        None => SessionKind::Admin,
+        Some(other) => {
+            return Err(
+                DaemonResponse::err(
+                    "INVALID_SESSION",
+                    format!("unknown session type '{other}'; expected \"agent\" or \"admin\""),
+                )
+                .with_request_id(request_id),
+            );
+        }
     };
 
     let cmd: DaemonCommand = serde_json::from_value(frame).map_err(|e| {
@@ -393,6 +403,54 @@ mod tests {
         assert_eq!(cmd.access_tier(), AccessTier::Admin);
         // The daemon would reject this combination before dispatch.
         assert!(!cmd.is_agent_safe());
+    }
+
+    #[test]
+    fn test_parse_request_rejects_unknown_session() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "superuser",
+            "command": "orient",
+            "params": {}
+        }))
+        .unwrap();
+        let resp = parse_request(&payload).unwrap_err();
+        assert!(!resp.success);
+        assert_eq!(resp.error_code.as_deref(), Some("INVALID_SESSION"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_access_denied_wire_protocol() {
+        // End-to-end: send an agent-session admin command over the wire
+        // and verify the daemon returns ACCESS_DENIED without dispatching.
+        let (mut client, server) = UnixStream::pair().unwrap();
+
+        // Dummy pool+config — dispatch is never reached (tier check fires first).
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "agent",
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1" }
+        }))
+        .unwrap();
+
+        // Run client I/O and server handler concurrently.
+        let client_task = async {
+            write_request(&mut client, &payload).await;
+            let resp = read_response(&mut client).await;
+            // Close client → handle_connection sees EOF and exits.
+            drop(client);
+            resp
+        };
+
+        let (resp, _) = tokio::join!(
+            client_task,
+            handle_connection(server, &pool, &config),
+        );
+
+        assert!(!resp.success);
+        assert_eq!(resp.error_code.as_deref(), Some("ACCESS_DENIED"));
     }
 
     #[tokio::test]

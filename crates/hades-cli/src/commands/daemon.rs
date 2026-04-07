@@ -19,7 +19,9 @@ use tokio::time::timeout;
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
-use hades_core::dispatch::{self, DaemonCommand, DaemonResponse, DispatchError, HandlerError};
+use hades_core::dispatch::{
+    self, AccessTier, DaemonCommand, DaemonResponse, DispatchError, HandlerError,
+};
 
 /// Default socket path per the daemon protocol spec.
 const DEFAULT_SOCKET: &str = "/run/hades/hades.sock";
@@ -135,15 +137,29 @@ async fn handle_connection(
             Err(_) => return Ok(()), // client stalled mid-payload → close
         }
 
-        // Parse request_id and command before applying dispatch timeout,
-        // so request_id is available for all error responses.
-        let (request_id, cmd) = match parse_request(&payload) {
+        // Parse request_id, session kind, and command before applying
+        // dispatch timeout, so request_id is available for all error responses.
+        let (request_id, session, cmd) = match parse_request(&payload) {
             Ok(parsed) => parsed,
             Err(resp) => {
                 write_frame(&mut stream, &resp).await?;
                 continue; // keep connection open for next request
             }
         };
+
+        // Enforce access tier: agent sessions may only invoke Agent-tier commands.
+        if session == SessionKind::Agent && cmd.access_tier() != AccessTier::Agent {
+            let resp = DaemonResponse::err(
+                "ACCESS_DENIED",
+                format!(
+                    "agent session cannot invoke {:?}-tier command",
+                    cmd.access_tier(),
+                ),
+            )
+            .with_request_id(request_id);
+            write_frame(&mut stream, &resp).await?;
+            continue;
+        }
 
         // Preserve command payload for NotImplemented subprocess fallback.
         let cmd_value = serde_json::to_value(&cmd).ok();
@@ -194,7 +210,18 @@ async fn write_frame(stream: &mut UnixStream, response: &DaemonResponse) -> Resu
 ///
 /// Returns `Err(DaemonResponse)` on parse failure — the caller sends it
 /// directly to the client.
-fn parse_request(payload: &[u8]) -> Result<(Option<String>, DaemonCommand), DaemonResponse> {
+/// Whether the connected session is an AI agent (restricted) or admin (unrestricted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    /// Unrestricted — human operator or unspecified caller.
+    Admin,
+    /// Restricted — AI model agent, limited to `AccessTier::Agent` commands.
+    Agent,
+}
+
+fn parse_request(
+    payload: &[u8],
+) -> Result<(Option<String>, SessionKind, DaemonCommand), DaemonResponse> {
     let frame: Value = serde_json::from_slice(payload)
         .map_err(|e| DaemonResponse::err("MALFORMED_JSON", e.to_string()))?;
 
@@ -203,11 +230,26 @@ fn parse_request(payload: &[u8]) -> Result<(Option<String>, DaemonCommand), Daem
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let session = match frame.get("session").and_then(|v| v.as_str()) {
+        Some("agent") => SessionKind::Agent,
+        Some("admin") => SessionKind::Admin,
+        None => SessionKind::Admin,
+        Some(other) => {
+            return Err(
+                DaemonResponse::err(
+                    "INVALID_SESSION",
+                    format!("unknown session type '{other}'; expected \"agent\" or \"admin\""),
+                )
+                .with_request_id(request_id),
+            );
+        }
+    };
+
     let cmd: DaemonCommand = serde_json::from_value(frame).map_err(|e| {
         DaemonResponse::err("UNKNOWN_COMMAND", e.to_string()).with_request_id(request_id.clone())
     })?;
 
-    Ok((request_id, cmd))
+    Ok((request_id, session, cmd))
 }
 
 /// Map a [`HandlerError`] to a protocol error code string.
@@ -331,8 +373,84 @@ mod tests {
             "params": {}
         }))
         .unwrap();
-        let (request_id, _cmd) = parse_request(&payload).unwrap();
+        let (request_id, session, _cmd) = parse_request(&payload).unwrap();
         assert_eq!(request_id.as_deref(), Some("req-1"));
+        assert_eq!(session, SessionKind::Admin); // default when no session field
+    }
+
+    #[test]
+    fn test_parse_request_agent_session() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "agent",
+            "command": "orient",
+            "params": {}
+        }))
+        .unwrap();
+        let (_request_id, session, _cmd) = parse_request(&payload).unwrap();
+        assert_eq!(session, SessionKind::Agent);
+    }
+
+    #[test]
+    fn test_agent_session_blocks_admin_commands() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "agent",
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1" }
+        }))
+        .unwrap();
+        let (_request_id, session, cmd) = parse_request(&payload).unwrap();
+        assert_eq!(session, SessionKind::Agent);
+        assert_eq!(cmd.access_tier(), AccessTier::Admin);
+        // The daemon would reject this combination before dispatch.
+        assert!(!cmd.is_agent_safe());
+    }
+
+    #[test]
+    fn test_parse_request_rejects_unknown_session() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "superuser",
+            "command": "orient",
+            "params": {}
+        }))
+        .unwrap();
+        let resp = parse_request(&payload).unwrap_err();
+        assert!(!resp.success);
+        assert_eq!(resp.error_code.as_deref(), Some("INVALID_SESSION"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_access_denied_wire_protocol() {
+        // End-to-end: send an agent-session admin command over the wire
+        // and verify the daemon returns ACCESS_DENIED without dispatching.
+        let (mut client, server) = UnixStream::pair().unwrap();
+
+        // Dummy pool+config — dispatch is never reached (tier check fires first).
+        let config = HadesConfig::default();
+        let pool = ArangoPool::from_config(&config).unwrap();
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "session": "agent",
+            "command": "db.aql",
+            "params": { "aql": "RETURN 1" }
+        }))
+        .unwrap();
+
+        // Run client I/O and server handler concurrently.
+        let client_task = async {
+            write_request(&mut client, &payload).await;
+            let resp = read_response(&mut client).await;
+            // Close client → handle_connection sees EOF and exits.
+            drop(client);
+            resp
+        };
+
+        let (resp, _) = tokio::join!(
+            client_task,
+            handle_connection(server, &pool, &config),
+        );
+
+        assert!(!resp.success);
+        assert_eq!(resp.error_code.as_deref(), Some("ACCESS_DENIED"));
     }
 
     #[tokio::test]

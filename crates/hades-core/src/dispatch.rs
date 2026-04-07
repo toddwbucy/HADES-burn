@@ -719,6 +719,139 @@ pub enum DaemonCommand {
     CodebaseStats(CodebaseStatsParams),
 }
 
+// ---------------------------------------------------------------------------
+// Access tier
+// ---------------------------------------------------------------------------
+
+/// Access tier for daemon commands.
+///
+/// Partitions the command vocabulary into three tiers:
+///
+/// - **Agent**: Safe for model/AI agent use. Bounded operations with
+///   predictable cost and no raw query injection. This is the closed
+///   vocabulary that models operate within — no AQL, no schema mutation,
+///   no unbounded writes.
+/// - **Admin**: Requires human authorization. Raw AQL, schema changes,
+///   destructive operations. Never exposed to model agents.
+/// - **Internal**: System bookkeeping (health, stats). Safe for any
+///   caller but not part of the model-facing vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTier {
+    /// Safe for model/AI agents — bounded, predictable operations.
+    Agent,
+    /// Requires human authorization — raw queries, schema changes.
+    Admin,
+    /// System bookkeeping — health checks, diagnostics.
+    Internal,
+}
+
+impl DaemonCommand {
+    /// Classify this command's access tier.
+    ///
+    /// The tier determines whether a model agent is allowed to invoke
+    /// the command. The daemon can enforce this boundary at the wire
+    /// protocol level, rejecting `Admin` commands from agent sessions.
+    ///
+    /// # Tier assignments
+    ///
+    /// **Agent** — bounded reads, task management, semantic search,
+    /// graph traversal, code smell checks:
+    /// - `db.query`, `db.get`, `db.list`, `db.count`, `db.check`, `db.recent`
+    /// - `db.graph.traverse`, `db.graph.neighbors`, `db.graph.shortest_path`
+    /// - `embed.text`, `graph_embed.embed`, `graph_embed.neighbors`
+    /// - `task.*` (all task management)
+    /// - `smell.check`, `smell.verify`, `smell.report`, `link_code_smell`
+    /// - `orient`, `codebase.stats`
+    ///
+    /// **Admin** — raw AQL, schema mutation, destructive operations:
+    /// - `db.aql` (arbitrary query injection)
+    /// - `db.insert`, `db.update`, `db.delete`, `db.purge` (unbounded writes)
+    /// - `db.create_collection`, `db.create_index` (schema changes)
+    /// - `db.graph.create`, `db.graph.drop` (graph lifecycle)
+    ///
+    /// **Internal** — system diagnostics, no model relevance:
+    /// - `status`, `db.health`, `db.stats`, `db.collections`, `db.graph.list`
+    pub fn access_tier(&self) -> AccessTier {
+        match self {
+            // ── Agent: bounded reads ──────────────────────────────
+            Self::Orient(_) => AccessTier::Agent,
+            Self::DbQuery { .. } => AccessTier::Agent,
+            Self::DbGet(_) => AccessTier::Agent,
+            Self::DbList(_) => AccessTier::Agent,
+            Self::DbCount(_) => AccessTier::Agent,
+            Self::DbCheck(_) => AccessTier::Agent,
+            Self::DbRecent(_) => AccessTier::Agent,
+
+            // ── Agent: graph traversal ────────────────────────────
+            Self::DbGraphTraverse(_) => AccessTier::Agent,
+            Self::DbGraphShortestPath(_) => AccessTier::Agent,
+            Self::DbGraphNeighbors(_) => AccessTier::Agent,
+
+            // ── Agent: embeddings ─────────────────────────────────
+            Self::EmbedText { .. } => AccessTier::Agent,
+            Self::GraphEmbedEmbed(_) => AccessTier::Agent,
+            Self::GraphEmbedNeighbors(_) => AccessTier::Agent,
+
+            // ── Agent: task management ────────────────────────────
+            Self::TaskList(_) => AccessTier::Agent,
+            Self::TaskShow(_) => AccessTier::Agent,
+            Self::TaskCreate(_) => AccessTier::Agent,
+            Self::TaskUpdate(_) => AccessTier::Agent,
+            Self::TaskClose(_) => AccessTier::Agent,
+            Self::TaskStart(_) => AccessTier::Agent,
+            Self::TaskContext(_) => AccessTier::Agent,
+            Self::TaskReview(_) => AccessTier::Agent,
+            Self::TaskApprove(_) => AccessTier::Agent,
+            Self::TaskBlock(_) => AccessTier::Agent,
+            Self::TaskUnblock(_) => AccessTier::Agent,
+            Self::TaskHandoff(_) => AccessTier::Agent,
+            Self::TaskHandoffShow(_) => AccessTier::Agent,
+            Self::TaskLog(_) => AccessTier::Agent,
+            Self::TaskSessions(_) => AccessTier::Agent,
+            Self::TaskDep(_) => AccessTier::Agent,
+            Self::TaskUsage(_) => AccessTier::Agent,
+            Self::TaskGraphIntegration(_) => AccessTier::Agent,
+
+            // ── Agent: code quality ───────────────────────────────
+            Self::SmellCheck(_) => AccessTier::Agent,
+            Self::SmellVerify(_) => AccessTier::Agent,
+            Self::SmellReport(_) => AccessTier::Agent,
+            Self::LinkCodeSmell(_) => AccessTier::Agent,
+
+            // ── Agent: codebase ───────────────────────────────────
+            Self::CodebaseStats(_) => AccessTier::Agent,
+
+            // ── Admin: raw AQL ────────────────────────────────────
+            Self::DbAql(_) => AccessTier::Admin,
+
+            // ── Admin: unbounded writes ───────────────────────────
+            Self::DbInsert(_) => AccessTier::Admin,
+            Self::DbUpdate(_) => AccessTier::Admin,
+            Self::DbDelete(_) => AccessTier::Admin,
+            Self::DbPurge(_) => AccessTier::Admin,
+
+            // ── Admin: schema mutation ────────────────────────────
+            Self::DbCreateCollection(_) => AccessTier::Admin,
+            Self::DbCreateIndex(_) => AccessTier::Admin,
+            Self::DbGraphCreate(_) => AccessTier::Admin,
+            Self::DbGraphDrop(_) => AccessTier::Admin,
+
+            // ── Internal: system diagnostics ──────────────────────
+            Self::Status(_) => AccessTier::Internal,
+            Self::DbHealth(_) => AccessTier::Internal,
+            Self::DbStats {} => AccessTier::Internal,
+            Self::DbCollections {} => AccessTier::Internal,
+            Self::DbGraphList {} => AccessTier::Internal,
+        }
+    }
+
+    /// Whether this command is safe for model/AI agent invocation.
+    pub fn is_agent_safe(&self) -> bool {
+        self.access_tier() == AccessTier::Agent
+    }
+}
+
 // Serde defaults
 fn default_direction() -> String { "outbound".to_string() }
 fn default_direction_any() -> String { "any".to_string() }
@@ -6111,5 +6244,75 @@ mod tests {
         assert!(keys2.contains(&"my_module-py".into()));
         assert!(keys2.contains(&"my-module".into()));
         assert!(keys2.contains(&"my-module-py".into()));
+    }
+
+    #[test]
+    fn test_access_tier_agent_safe() {
+        // Spot-check representative agent-safe commands.
+        let cmd = DaemonCommand::Orient(OrientParams { collection: None });
+        assert_eq!(cmd.access_tier(), AccessTier::Agent);
+        assert!(cmd.is_agent_safe());
+
+        let cmd = DaemonCommand::DbGet(DbGetParams {
+            collection: "test".into(),
+            key: "k".into(),
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Agent);
+
+        let cmd = DaemonCommand::DbGraphTraverse(DbGraphTraverseParams {
+            start: "c/k".into(),
+            direction: "outbound".into(),
+            min_depth: 1,
+            max_depth: 1,
+            limit: None,
+            graph: None,
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Agent);
+
+        let cmd = DaemonCommand::TaskCreate(TaskCreateParams {
+            title: "test".into(),
+            description: None,
+            task_type: "task".into(),
+            parent: None,
+            priority: "medium".into(),
+            tags: vec![],
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Agent);
+    }
+
+    #[test]
+    fn test_access_tier_admin() {
+        let cmd = DaemonCommand::DbAql(DbAqlParams {
+            aql: "RETURN 1".into(),
+            bind: None,
+            limit: None,
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Admin);
+        assert!(!cmd.is_agent_safe());
+
+        let cmd = DaemonCommand::DbInsert(DbInsertParams {
+            collection: "test".into(),
+            data: serde_json::json!({}),
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Admin);
+
+        let cmd = DaemonCommand::DbGraphDrop(DbGraphDropParams {
+            name: "g".into(),
+            drop_collections: false,
+            force: false,
+        });
+        assert_eq!(cmd.access_tier(), AccessTier::Admin);
+    }
+
+    #[test]
+    fn test_access_tier_internal() {
+        let cmd = DaemonCommand::Status(StatusParams { verbose: false });
+        assert_eq!(cmd.access_tier(), AccessTier::Internal);
+
+        let cmd = DaemonCommand::DbHealth(DbHealthParams { verbose: false });
+        assert_eq!(cmd.access_tier(), AccessTier::Internal);
+
+        let cmd = DaemonCommand::DbStats {};
+        assert_eq!(cmd.access_tier(), AccessTier::Internal);
     }
 }

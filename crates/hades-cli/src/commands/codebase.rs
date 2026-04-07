@@ -28,4 +28,7 @@ pub enum CodebaseCmd {
 
     /// Show code ingestion statistics.
     Stats,
+
+    /// Validate codebase graph invariants (ontology spec §10).
+    Validate,
 }

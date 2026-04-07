@@ -30,6 +30,7 @@ use hades_core::code::rust_imports;
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
+use hades_core::db::query::ExecutionTarget;
 use hades_core::db::ArangoPool;
 use hades_core::persephone::embedding::EmbeddingClient;
 use hades_core::HadesConfig;
@@ -53,6 +54,8 @@ struct FileResult {
     num_symbols: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_chunks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_embeddings: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,9 +121,17 @@ pub async fn run(
     let db = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;
 
-    let embedder = EmbeddingClient::connect_default()
-        .await
-        .context("failed to connect to embedding service")?;
+    // Embedding is optional — ingest proceeds without vectors if the service is unavailable.
+    let embedder = match EmbeddingClient::connect_default().await {
+        Ok(client) => {
+            info!("connected to embedding service");
+            Some(client)
+        }
+        Err(e) => {
+            warn!(error = %e, "embedding service unavailable — ingesting without vectors");
+            None
+        }
+    };
 
     // Ensure codebase collections exist.
     ensure_collections(&db).await?;
@@ -190,7 +201,7 @@ pub async fn run(
 
         let result = ingest_file(
             &db,
-            &embedder,
+            embedder.as_ref(),
             config,
             file_path,
             &rel_path,
@@ -210,6 +221,7 @@ pub async fn run(
                     language: None,
                     num_symbols: None,
                     num_chunks: None,
+                    num_embeddings: None,
                     skipped: None,
                     error: Some(e.to_string()),
                     duration_ms: duration,
@@ -275,11 +287,23 @@ pub async fn run(
     let skipped = results.iter().filter(|r| r.skipped == Some(true)).count();
     let duration_ms = cmd_start.elapsed().as_millis() as u64;
 
+    let files_embedded = results.iter()
+        .filter(|r| r.num_embeddings.is_some_and(|n| n > 0))
+        .count();
+    let total_embeddings: usize = results.iter()
+        .filter_map(|r| r.num_embeddings)
+        .sum();
+
     let result_data = json!({
         "total": total,
         "completed": succeeded,
         "failed": failed,
         "skipped": skipped,
+        "embedding": {
+            "service_connected": embedder.is_some(),
+            "files_embedded": files_embedded,
+            "total_embeddings": total_embeddings,
+        },
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
@@ -382,7 +406,7 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
 /// Ingest a single source file: analyze → chunk → embed → store.
 async fn ingest_file(
     db: &ArangoPool,
-    embedder: &EmbeddingClient,
+    embedder: Option<&EmbeddingClient>,
     config: &HadesConfig,
     file_path: &Path,
     rel_path: &str,
@@ -409,6 +433,7 @@ async fn ingest_file(
                 language: Some(lang.name().to_string()),
                 num_symbols: None,
                 num_chunks: None,
+                num_embeddings: None,
                 skipped: Some(true),
                 error: Some(format!("parse error: {msg}")),
                 duration_ms: 0,
@@ -418,15 +443,18 @@ async fn ingest_file(
     };
 
     // Check for incremental skip via symbol_hash.
+    // Only skip if the code is unchanged AND embeddings aren't needed (either
+    // already present or no embedder available to backfill).
     let fkey = keys::file_key(rel_path);
-    if let Some(true) = check_unchanged(db, &fkey, &analysis.symbol_hash).await? {
-        debug!(path = rel_path, "unchanged (same symbol_hash), skipping");
+    if let Some(true) = check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await? {
+        debug!(path = rel_path, "unchanged (same symbol_hash, embeddings present), skipping");
         return Ok(FileResult {
             path: rel_path.to_string(),
             success: true,
             language: Some(lang.name().to_string()),
             num_symbols: Some(analysis.symbols.len()),
             num_chunks: None,
+            num_embeddings: None,
             skipped: Some(true),
             error: None,
             duration_ms: 0,
@@ -459,19 +487,9 @@ async fn ingest_file(
     let chunker = AstChunking::new(analysis.top_level_defs.clone());
     let chunks = chunker.chunk(&source);
 
-    // Build file document.
-    let file_doc = json!({
-        "_key": fkey,
-        "path": rel_path,
-        "language": lang.name(),
-        "metrics": analysis.metrics,
-        "symbol_hash": analysis.symbol_hash,
-        "symbol_count": analysis.symbols.len(),
-        "chunk_count": chunks.len(),
-        "total_lines": analysis.metrics.total_lines,
-        "status": "PROCESSED",
-        "ingested_at": chrono::Utc::now().to_rfc3339(),
-    });
+    // Build file document (embedding_count populated after embed step below).
+    let num_sym = analysis.symbols.len();
+    let num_chk = chunks.len();
 
     // Build chunk documents.
     let chunk_docs: Vec<Value> = chunks
@@ -534,50 +552,71 @@ async fn ingest_file(
         })
         .collect();
 
-    // Embed chunks.
+    // Remove stale embeddings for this file before (re-)embedding.
+    // This ensures that if embedding is skipped or fails, old vectors
+    // from a previous run (which embed outdated text) don't linger.
+    delete_file_embeddings(db, &fkey).await;
+
+    // Embed chunks (skipped if embedder is unavailable).
     let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-    let embedding_docs = if !chunk_texts.is_empty() {
-        match embedder
-            .embed(
-                &chunk_texts,
-                "retrieval.code",
-                Some(config.embedding.batch.size),
-            )
-            .await
-        {
-            Ok(embed_result) => {
-                embed_result
-                    .embeddings
-                    .iter()
-                    .enumerate()
-                    .map(|(i, vec)| {
-                        let ckey = keys::chunk_key(&fkey, i);
-                        let ekey = keys::embedding_key(&ckey);
-                        json!({
-                            "_key": ekey,
-                            "chunk_key": ckey,
-                            "file_key": fkey,
-                            "embedding": vec,
-                            "model": embed_result.model,
-                            "dimension": embed_result.dimension,
+    let embedding_docs = match embedder {
+        Some(emb) if !chunk_texts.is_empty() => {
+            match emb
+                .embed(
+                    &chunk_texts,
+                    "retrieval.code",
+                    Some(config.embedding.batch.size),
+                )
+                .await
+            {
+                Ok(embed_result) => {
+                    embed_result
+                        .embeddings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vec)| {
+                            let ckey = keys::chunk_key(&fkey, i);
+                            let ekey = keys::embedding_key(&ckey);
+                            json!({
+                                "_key": ekey,
+                                "chunk_key": ckey,
+                                "file_key": fkey,
+                                "embedding": vec,
+                                "model": embed_result.model,
+                                "dimension": embed_result.dimension,
+                            })
                         })
-                    })
-                    .collect::<Vec<Value>>()
-            }
-            Err(e) => {
-                warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
-                Vec::new()
+                        .collect::<Vec<Value>>()
+                }
+                Err(e) => {
+                    warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
+                    Vec::new()
+                }
             }
         }
-    } else {
-        Vec::new()
+        _ => Vec::new(),
     };
+    let num_embeddings_written = embedding_docs.len();
 
-    // Store everything to ArangoDB (overwrite mode for idempotent re-runs).
-    crud::insert_documents(db, CODEBASE.files, &[file_doc], true)
-        .await
-        .context("failed to store file document")?;
+    // Build file document (after embedding so we can record embedding_count).
+    let file_doc = json!({
+        "_key": fkey,
+        "path": rel_path,
+        "language": lang.name(),
+        "metrics": analysis.metrics,
+        "symbol_hash": analysis.symbol_hash,
+        "symbol_count": num_sym,
+        "chunk_count": num_chk,
+        "embedding_count": num_embeddings_written,
+        "total_lines": analysis.metrics.total_lines,
+        "status": "PROCESSED",
+        "ingested_at": chrono::Utc::now().to_rfc3339(),
+    });
 
+    // Store to ArangoDB. Embeddings are persisted BEFORE the file document
+    // so that embedding_count is only recorded once the vectors are durable.
+    // This prevents check_unchanged() from skipping future backfills if
+    // embedding persistence fails partway through.
     if !chunk_docs.is_empty() {
         crud::insert_documents(db, CODEBASE.chunks, &chunk_docs, true)
             .await
@@ -602,8 +641,11 @@ async fn ingest_file(
             .context("failed to store define edges")?;
     }
 
-    let num_symbols = analysis.symbols.len();
-    let num_chunks = chunks.len();
+    // File document stored last — embedding_count is only recorded after
+    // vectors are durable, so check_unchanged() won't wrongly skip backfills.
+    crud::insert_documents(db, CODEBASE.files, &[file_doc], true)
+        .await
+        .context("failed to store file document")?;
 
     // Transfer symbols into the import index (avoids cloning).
     match lang {
@@ -625,8 +667,9 @@ async fn ingest_file(
     info!(
         path = rel_path,
         language = lang.name(),
-        symbols = num_symbols,
-        chunks = num_chunks,
+        symbols = num_sym,
+        chunks = num_chk,
+        embeddings = num_embeddings_written,
         "ingested"
     );
 
@@ -634,29 +677,67 @@ async fn ingest_file(
         path: rel_path.to_string(),
         success: true,
         language: Some(lang.name().to_string()),
-        num_symbols: Some(num_symbols),
-        num_chunks: Some(num_chunks),
+        num_symbols: Some(num_sym),
+        num_chunks: Some(num_chk),
+        num_embeddings: Some(num_embeddings_written),
         skipped: None,
         error: None,
         duration_ms: 0,
     })
 }
 
+// ── Stale embedding cleanup ────────────────────────────────────────────
+
+/// Remove existing embedding documents for a file.
+///
+/// Called before (re-)embedding to ensure stale vectors from a previous
+/// run don't linger when the embedder is unavailable or fails.
+async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
+    let aql = "FOR e IN @@col FILTER e.file_key == @fk REMOVE e IN @@col";
+    let bind = json!({ "@col": CODEBASE.embeddings, "fk": file_key });
+    if let Err(e) = hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer).await {
+        debug!(file_key, error = %e, "failed to clean up old embeddings (non-fatal)");
+    }
+}
+
 // ── Incremental check ───────────────────────────────────────────────────
 
-/// Check if a file's symbol_hash is unchanged in the database.
+/// Check if a file can be skipped during incremental ingest.
 ///
-/// Returns `Some(true)` if the file exists and has the same hash,
-/// `Some(false)` if it exists with a different hash, `None` if not found.
+/// Returns `Some(true)` if the file should be skipped:
+/// - Symbol hash matches AND (embeddings already exist OR no embedder to backfill)
+///
+/// Returns `Some(false)` if re-processing is needed:
+/// - Symbol hash differs, OR
+/// - Symbol hash matches but embeddings are missing and embedder is available
+///
+/// Returns `None` if the file is not in the database (first ingest).
 async fn check_unchanged(
     db: &ArangoPool,
     file_key: &str,
     new_hash: &str,
+    embedder_available: bool,
 ) -> Result<Option<bool>> {
     match crud::get_document(db, CODEBASE.files, file_key).await {
         Ok(doc) => {
             let stored_hash = doc["symbol_hash"].as_str().unwrap_or("");
-            Ok(Some(stored_hash == new_hash))
+            if stored_hash != new_hash {
+                return Ok(Some(false)); // code changed, must re-process
+            }
+            // Code unchanged. Skip only if embeddings aren't needed or already present.
+            if embedder_available {
+                // Files with no chunks have nothing to embed — always skip.
+                let chunk_count = doc["chunk_count"].as_u64().unwrap_or(0);
+                if chunk_count == 0 {
+                    return Ok(Some(true));
+                }
+                let has_embeddings = doc["embedding_count"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0);
+                Ok(Some(has_embeddings)) // skip only if embeddings exist
+            } else {
+                Ok(Some(true)) // no embedder → nothing to backfill → skip
+            }
         }
         Err(e) if e.is_not_found() => Ok(None),
         Err(e) => Err(e.into()),

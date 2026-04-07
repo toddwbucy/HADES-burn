@@ -283,6 +283,11 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::codebase_mgmt::run_stats(&config));
         }
+        Commands::Codebase(CodebaseCmd::Validate) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::codebase_validate::run_validate(&config));
+        }
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

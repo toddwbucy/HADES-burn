@@ -8,6 +8,7 @@ pub mod arxiv_sync;
 pub mod codebase;
 pub mod codebase_ingest;
 pub mod codebase_mgmt;
+pub mod codebase_validate;
 pub mod daemon;
 pub mod db;
 pub mod db_graph;

@@ -1205,7 +1205,8 @@ fn resolve_python_imports(
                                         "_from": format!("{}/{}", CODEBASE.files, source_fkey),
                                         "_to": format!("{}/{}", CODEBASE.symbols, target_skey),
                                         "_key": edge_key,
-                                        "type": "imports",
+                                        "resolved": true,
+                                        "style": "from_import",
                                         "source_path": source_path,
                                         "target_path": target_path,
                                         "symbol_name": original_name,
@@ -1229,7 +1230,8 @@ fn resolve_python_imports(
                                         "_from": format!("{}/{}", CODEBASE.files, source_fkey),
                                         "_to": format!("{}/{}", CODEBASE.files, target_fkey),
                                         "_key": edge_key,
-                                        "type": "imports",
+                                        "resolved": false,
+                                        "style": "from_import",
                                         "source_path": source_path,
                                         "target_path": target_path,
                                         "module_path": module,
@@ -1249,7 +1251,8 @@ fn resolve_python_imports(
                                     "_from": format!("{}/{}", CODEBASE.files, source_fkey),
                                     "_to": format!("{}/{}", CODEBASE.files, target_fkey),
                                     "_key": edge_key,
-                                    "type": "imports",
+                                    "resolved": false,
+                                    "style": "import",
                                     "source_path": source_path,
                                     "target_path": target_path,
                                     "module_path": module,
@@ -1387,7 +1390,8 @@ mod tests {
         let edges = resolve_python_imports(&imports, &file_symbols, &index);
 
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0]["type"], "imports");
+        assert_eq!(edges[0]["resolved"], true);
+        assert_eq!(edges[0]["style"], "from_import");
         assert_eq!(edges[0]["source_path"], "core/models.py");
         assert_eq!(edges[0]["symbol_name"], "helper");
         // Should be file→symbol edge

@@ -752,6 +752,18 @@ async fn run_rust_analyzer_phase(
         });
     }
 
+    // Collect per-file stats before the resolver takes ownership.
+    let file_patches: Vec<(String, usize, String)> = all_extractions
+        .iter()
+        .map(|(rel_path, extraction)| {
+            (
+                rel_path.clone(),
+                extraction.symbols.len(),
+                extraction.analyzed_at.clone(),
+            )
+        })
+        .collect();
+
     // Build rich symbol documents and edges via RustEdgeResolver.
     let resolver = RustEdgeResolver::new(all_extractions);
     let symbol_docs = resolver.build_symbol_documents();
@@ -802,6 +814,27 @@ async fn run_rust_analyzer_phase(
             .await
             .context("failed to store rust-analyzer edges")?;
         info!(count = edge_docs.len(), "stored rust-analyzer edges");
+    }
+
+    // Patch file documents with rust-analyzer metadata.
+    if !file_patches.is_empty() {
+        let patch_docs: Vec<Value> = file_patches
+            .iter()
+            .map(|(rel_path, sym_count, analyzed_at)| {
+                let fkey = keys::file_key(rel_path);
+                json!({
+                    "_key": fkey,
+                    "ra_analyzed": true,
+                    "ra_symbol_count": sym_count,
+                    "ra_analyzed_at": analyzed_at,
+                })
+            })
+            .collect();
+        if let Err(e) = crud::insert_documents(db, CODEBASE.files, &patch_docs, true).await {
+            warn!(error = %e, "failed to patch file documents with rust-analyzer metadata");
+        } else {
+            info!(count = patch_docs.len(), "patched file documents with rust-analyzer metadata");
+        }
     }
 
     Ok(RustAnalyzerStats {

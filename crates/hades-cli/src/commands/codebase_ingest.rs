@@ -24,7 +24,7 @@ use walkdir::WalkDir;
 use hades_core::chunking::ChunkingStrategy;
 use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
 use hades_core::code::rust_analyzer::{
-    RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
+    EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
 };
 use hades_core::code::rust_imports;
 use hades_core::db::collections::CODEBASE;
@@ -239,7 +239,7 @@ pub async fn run(
     );
     if !py_import_edges.is_empty() {
         info!(edge_count = py_import_edges.len(), "resolved Python import edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &py_import_edges, true).await {
+        if let Err(e) = crud::insert_documents(&db, CODEBASE.imports_edges, &py_import_edges, true).await {
             warn!(error = %e, "failed to store Python import edges");
         }
     }
@@ -249,7 +249,7 @@ pub async fn run(
     let rs_import_edges = rust_imports::resolve_rust_imports(&imports.rust_imports, &rust_symbol_index);
     if !rs_import_edges.is_empty() {
         info!(edge_count = rs_import_edges.len(), "resolved Rust import edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.edges, &rs_import_edges, true).await {
+        if let Err(e) = crud::insert_documents(&db, CODEBASE.imports_edges, &rs_import_edges, true).await {
             warn!(error = %e, "failed to store Rust import edges");
         }
     }
@@ -491,10 +491,35 @@ async fn ingest_file(
     let num_sym = analysis.symbols.len();
     let num_chk = chunks.len();
 
-    // Build chunk documents.
+    // Build line→byte offset table for symbol-chunk interval intersection.
+    let line_offsets = build_line_offsets(&source);
+
+    // Build chunk documents with symbol context.
     let chunk_docs: Vec<Value> = chunks
         .iter()
         .map(|c| {
+            // Find symbols whose span overlaps this chunk (interval intersection).
+            let overlapping_symbols: Vec<String> = analysis
+                .symbols
+                .iter()
+                .filter(|s| s.kind.is_primitive())
+                .filter_map(|s| {
+                    let sym_start = line_offsets
+                        .get(s.start_line.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0);
+                    let sym_end = line_offsets
+                        .get(s.end_line)
+                        .copied()
+                        .unwrap_or(source.len());
+                    if c.start_char < sym_end && sym_start < c.end_char {
+                        Some(keys::symbol_key(&fkey, &s.name))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             let ckey = keys::chunk_key(&fkey, c.chunk_index);
             json!({
                 "_key": ckey,
@@ -504,21 +529,26 @@ async fn ingest_file(
                 "text": c.text,
                 "start_char": c.start_char,
                 "end_char": c.end_char,
+                "symbols": overlapping_symbols,
             })
         })
         .collect();
 
-    // Build symbol documents.
+    // Build symbol documents (primitives only — imports and impl blocks are not vertices).
     let symbol_docs: Vec<Value> = analysis
         .symbols
         .iter()
+        .filter(|s| s.kind.is_primitive())
         .map(|s| {
             let skey = keys::symbol_key(&fkey, &s.name);
             json!({
                 "_key": skey,
                 "file_key": fkey,
+                "file_path": rel_path,
                 "name": s.name,
-                "kind": s.kind.to_string(),
+                "qualified_name": s.name,
+                "kind": s.kind.universal_kind().unwrap(),
+                "lang_kind": s.kind.lang_kind(),
                 "start_line": s.start_line,
                 "end_line": s.end_line,
                 "metadata": s.metadata,
@@ -526,26 +556,18 @@ async fn ingest_file(
         })
         .collect();
 
-    // Build defines edges (file → symbol).
+    // Build defines edges (file → symbol) for primitives only.
     let define_edges: Vec<Value> = analysis
         .symbols
         .iter()
-        .filter(|s| matches!(
-            s.kind,
-            hades_core::code::SymbolKind::Function
-            | hades_core::code::SymbolKind::Class
-            | hades_core::code::SymbolKind::Struct
-            | hades_core::code::SymbolKind::Enum
-            | hades_core::code::SymbolKind::Trait
-            | hades_core::code::SymbolKind::Constant
-            | hades_core::code::SymbolKind::Macro
-        ))
+        .filter(|s| s.kind.is_primitive())
         .map(|s| {
             let skey = keys::symbol_key(&fkey, &s.name);
+            let edge_key = keys::edge_key(&fkey, "defines", &skey);
             json!({
+                "_key": edge_key,
                 "_from": format!("{}/{}", CODEBASE.files, fkey),
                 "_to": format!("{}/{}", CODEBASE.symbols, skey),
-                "type": "defines",
                 "file_path": rel_path,
                 "symbol_name": s.name,
             })
@@ -599,13 +621,16 @@ async fn ingest_file(
     let num_embeddings_written = embedding_docs.len();
 
     // Build file document (after embedding so we can record embedding_count).
+    // symbol_count reflects primitives only (no imports, no impl blocks).
+    let primitive_count = analysis.symbols.iter().filter(|s| s.kind.is_primitive()).count();
     let file_doc = json!({
         "_key": fkey,
         "path": rel_path,
+        "kind": "file",
         "language": lang.name(),
         "metrics": analysis.metrics,
         "symbol_hash": analysis.symbol_hash,
-        "symbol_count": num_sym,
+        "symbol_count": primitive_count,
         "chunk_count": num_chk,
         "embedding_count": num_embeddings_written,
         "total_lines": analysis.metrics.total_lines,
@@ -636,7 +661,7 @@ async fn ingest_file(
     }
 
     if !define_edges.is_empty() {
-        crud::insert_documents(db, CODEBASE.edges, &define_edges, true)
+        crud::insert_documents(db, CODEBASE.defines_edges, &define_edges, true)
             .await
             .context("failed to store define edges")?;
     }
@@ -684,6 +709,24 @@ async fn ingest_file(
         error: None,
         duration_ms: 0,
     })
+}
+
+// ── Line-offset table ─────────────────────────────────────────────────
+
+/// Build a byte-offset table for each line in `source`.
+///
+/// `offsets[i]` is the byte position where line `i` starts (0-based line
+/// numbering). An extra sentinel entry for `offsets[line_count]` equals
+/// `source.len()`, so callers can use `offsets[end_line]` to get the byte
+/// position just past the last line of a span without bounds checks.
+fn build_line_offsets(source: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            offsets.push(i + 1);
+        }
+    }
+    offsets
 }
 
 // ── Stale embedding cleanup ────────────────────────────────────────────
@@ -865,12 +908,12 @@ async fn run_rust_analyzer_phase(
         info!(count = docs.len(), "stored rust-analyzer symbol documents");
     }
 
-    // Store edges with deterministic keys for idempotent re-runs.
+    // Store edges grouped by collection (collection-per-relation).
     if !crate_edges.is_empty() {
-        let edge_docs: Vec<Value> = crate_edges
+        // Build edge documents with deterministic keys.
+        let edge_docs: Vec<(EdgeKind, Value)> = crate_edges
             .iter()
             .map(|e| {
-                // Build a deterministic key from from/to/kind to prevent duplicates.
                 let from_suffix = e.from.rsplit('/').next().unwrap_or(&e.from);
                 let to_suffix = e.to.rsplit('/').next().unwrap_or(&e.to);
                 let edge_key = keys::edge_key(from_suffix, e.kind.as_str(), to_suffix);
@@ -878,7 +921,6 @@ async fn run_rust_analyzer_phase(
                     "_key": edge_key,
                     "_from": e.from,
                     "_to": e.to,
-                    "type": e.kind.as_str(),
                 });
                 // Merge edge metadata.
                 if let Value::Object(meta) = &e.metadata
@@ -888,12 +930,24 @@ async fn run_rust_analyzer_phase(
                         obj.insert(k.clone(), v.clone());
                     }
                 }
-                doc
+                (e.kind, doc)
             })
             .collect();
-        crud::insert_documents(db, CODEBASE.edges, &edge_docs, true)
-            .await
-            .context("failed to store rust-analyzer edges")?;
+
+        // Group by edge kind and insert into the appropriate collection.
+        for kind in [EdgeKind::Defines, EdgeKind::Calls, EdgeKind::Implements] {
+            let docs: Vec<Value> = edge_docs
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|(_, d)| d.clone())
+                .collect();
+            if !docs.is_empty() {
+                crud::insert_documents(db, kind.collection(), &docs, true)
+                    .await
+                    .with_context(|| format!("failed to store {} edges", kind.as_str()))?;
+            }
+        }
+
         info!(count = edge_docs.len(), "stored rust-analyzer edges");
     }
 

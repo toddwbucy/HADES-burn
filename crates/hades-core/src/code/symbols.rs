@@ -42,9 +42,41 @@ pub enum SymbolKind {
     Module,
 }
 
-impl std::fmt::Display for SymbolKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl SymbolKind {
+    /// Map to the universal graph semantic primitive.
+    ///
+    /// Five primitives: `file`, `module`, `type`, `callable`, `value`.
+    /// Returns `None` for non-primitive kinds (`Import`, `Impl`) that
+    /// should not be stored as symbol vertices in the graph.
+    ///
+    /// - `Import` → produces edges, not vertices
+    /// - `Impl` → scaffolding; methods extracted individually as `callable`
+    pub fn universal_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::Function => Some("callable"),
+            Self::Macro => Some("callable"),
+            Self::Struct => Some("type"),
+            Self::Enum => Some("type"),
+            Self::Trait => Some("type"),
+            Self::Class => Some("type"),
+            Self::TypeAlias => Some("type"),
+            Self::Constant => Some("value"),
+            Self::Variable => Some("value"),
+            Self::Module => Some("module"),
+            Self::Import => None,
+            Self::Impl => None,
+        }
+    }
+
+    /// Whether this kind represents a graph primitive that should be stored
+    /// as a vertex in `codebase_symbols`.
+    pub fn is_primitive(&self) -> bool {
+        self.universal_kind().is_some()
+    }
+
+    /// The language-specific kind string (stored as `lang_kind` in ArangoDB).
+    pub fn lang_kind(&self) -> &'static str {
+        match self {
             Self::Function => "function",
             Self::Class => "class",
             Self::Struct => "struct",
@@ -57,8 +89,13 @@ impl std::fmt::Display for SymbolKind {
             Self::Macro => "macro",
             Self::Impl => "impl",
             Self::Module => "module",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl std::fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.lang_kind())
     }
 }
 
@@ -192,5 +229,36 @@ mod tests {
         assert_eq!(SymbolKind::Function.to_string(), "function");
         assert_eq!(SymbolKind::Class.to_string(), "class");
         assert_eq!(SymbolKind::Impl.to_string(), "impl");
+    }
+
+    #[test]
+    fn test_universal_kind_mapping() {
+        assert_eq!(SymbolKind::Function.universal_kind(), Some("callable"));
+        assert_eq!(SymbolKind::Macro.universal_kind(), Some("callable"));
+        assert_eq!(SymbolKind::Struct.universal_kind(), Some("type"));
+        assert_eq!(SymbolKind::Enum.universal_kind(), Some("type"));
+        assert_eq!(SymbolKind::Trait.universal_kind(), Some("type"));
+        assert_eq!(SymbolKind::Class.universal_kind(), Some("type"));
+        assert_eq!(SymbolKind::TypeAlias.universal_kind(), Some("type"));
+        assert_eq!(SymbolKind::Constant.universal_kind(), Some("value"));
+        assert_eq!(SymbolKind::Variable.universal_kind(), Some("value"));
+        assert_eq!(SymbolKind::Module.universal_kind(), Some("module"));
+        assert_eq!(SymbolKind::Import.universal_kind(), None);
+        assert_eq!(SymbolKind::Impl.universal_kind(), None);
+    }
+
+    #[test]
+    fn test_is_primitive() {
+        assert!(SymbolKind::Function.is_primitive());
+        assert!(SymbolKind::Struct.is_primitive());
+        assert!(!SymbolKind::Import.is_primitive());
+        assert!(!SymbolKind::Impl.is_primitive());
+    }
+
+    #[test]
+    fn test_lang_kind() {
+        assert_eq!(SymbolKind::Function.lang_kind(), "function");
+        assert_eq!(SymbolKind::Import.lang_kind(), "import");
+        assert_eq!(SymbolKind::Impl.lang_kind(), "impl");
     }
 }

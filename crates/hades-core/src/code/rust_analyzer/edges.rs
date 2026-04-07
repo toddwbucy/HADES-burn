@@ -3,7 +3,7 @@
 //! Materializes symbol nodes and edges from file-level extraction data
 //! for storage in ArangoDB graph collections:
 //! - `codebase_symbols` — per-symbol documents
-//! - `codebase_edges` — defines, calls, implements, imports, pyo3_exposes, ffi_exposes
+//! - `codebase_defines_edges`, `codebase_calls_edges`, `codebase_implements_edges`, `codebase_imports_edges`
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,6 +14,10 @@ use crate::db::keys;
 use super::symbols::FileExtraction;
 
 /// Edge types produced by the resolver.
+///
+/// Each variant maps to a dedicated ArangoDB edge collection.
+/// `Pyo3Exposes` and `FfiExposes` were retired — those are now
+/// boolean attributes on the symbol document (`is_pyo3`, `is_ffi`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
@@ -23,24 +27,28 @@ pub enum EdgeKind {
     Calls,
     /// Symbol implements a trait method.
     Implements,
-    /// Symbol is exposed to Python via PyO3.
-    Pyo3Exposes,
-    /// Symbol is exposed via FFI boundary.
-    FfiExposes,
     /// File imports a symbol from another file.
     Imports,
 }
 
 impl EdgeKind {
-    /// String representation for storage.
+    /// String representation used in `edge_key()` hashing.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Defines => "defines",
             Self::Calls => "calls",
             Self::Implements => "implements",
-            Self::Pyo3Exposes => "pyo3_exposes",
-            Self::FfiExposes => "ffi_exposes",
             Self::Imports => "imports",
+        }
+    }
+
+    /// The ArangoDB edge collection name for this edge kind.
+    pub fn collection(&self) -> &'static str {
+        match self {
+            Self::Defines => "codebase_defines_edges",
+            Self::Calls => "codebase_calls_edges",
+            Self::Implements => "codebase_implements_edges",
+            Self::Imports => "codebase_imports_edges",
         }
     }
 }
@@ -145,7 +153,7 @@ impl RustEdgeResolver {
         documents
     }
 
-    /// Build edges for the `codebase_edges` collection.
+    /// Build edges for the codebase edge collections.
     pub fn build_edges(&self) -> Vec<CrateEdge> {
         let mut edges = Vec::new();
         let mut seen: HashSet<(String, String, &str)> = HashSet::new();
@@ -210,40 +218,7 @@ impl RustEdgeResolver {
                     }
                 }
 
-                // 4. pyo3_exposes: self-edge marker
-                if sym.is_pyo3 {
-                    let vertex = format!("codebase_symbols/{sk}");
-                    let key = (vertex.clone(), vertex.clone(), "pyo3_exposes");
-                    if seen.insert(key) {
-                        edges.push(CrateEdge {
-                            from: vertex.clone(),
-                            to: vertex,
-                            kind: EdgeKind::Pyo3Exposes,
-                            metadata: serde_json::json!({
-                                "symbol_name": sym.qualified_name,
-                                "python_name": sym.python_name
-                                    .as_deref()
-                                    .unwrap_or(&sym.name),
-                            }),
-                        });
-                    }
-                }
-
-                // 5. ffi_exposes: self-edge marker
-                if sym.is_ffi {
-                    let vertex = format!("codebase_symbols/{sk}");
-                    let key = (vertex.clone(), vertex.clone(), "ffi_exposes");
-                    if seen.insert(key) {
-                        edges.push(CrateEdge {
-                            from: vertex.clone(),
-                            to: vertex,
-                            kind: EdgeKind::FfiExposes,
-                            metadata: serde_json::json!({
-                                "symbol_name": sym.qualified_name,
-                            }),
-                        });
-                    }
-                }
+                // PyO3/FFI are symbol attributes, not edges (see ontology spec D5)
             }
         }
 
@@ -429,7 +404,8 @@ mod tests {
     }
 
     #[test]
-    fn test_pyo3_marker_edge() {
+    fn test_pyo3_is_attribute_not_edge() {
+        // PyO3 exposure is a symbol attribute, not an edge (ontology D5).
         let mut file_data = HashMap::new();
         let mut sym = make_symbol("my_func", "function");
         sym.is_pyo3 = true;
@@ -439,9 +415,11 @@ mod tests {
         let resolver = RustEdgeResolver::new(file_data);
         let edges = resolver.build_edges();
 
-        let pyo3: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Pyo3Exposes).collect();
-        assert_eq!(pyo3.len(), 1);
-        assert_eq!(pyo3[0].from, pyo3[0].to); // self-edge
+        // Should only have a "defines" edge, no pyo3 self-edge.
+        assert!(edges.iter().all(|e| e.kind == EdgeKind::Defines));
+        // PyO3 info lives on the symbol document instead.
+        let docs = resolver.build_symbol_documents();
+        assert!(docs[0].is_pyo3);
     }
 
     #[test]
@@ -498,5 +476,13 @@ mod tests {
         // Only one defines edge for Config.
         let defines: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Defines).collect();
         assert_eq!(defines.len(), 1);
+    }
+
+    #[test]
+    fn test_edge_kind_collection_names() {
+        assert_eq!(EdgeKind::Defines.collection(), "codebase_defines_edges");
+        assert_eq!(EdgeKind::Calls.collection(), "codebase_calls_edges");
+        assert_eq!(EdgeKind::Implements.collection(), "codebase_implements_edges");
+        assert_eq!(EdgeKind::Imports.collection(), "codebase_imports_edges");
     }
 }

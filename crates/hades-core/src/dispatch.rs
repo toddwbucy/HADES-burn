@@ -4486,7 +4486,10 @@ mod handlers {
             ("symbols", CODEBASE.symbols),
             ("chunks", CODEBASE.chunks),
             ("embeddings", CODEBASE.embeddings),
-            ("edges", CODEBASE.edges),
+            ("defines_edges", CODEBASE.defines_edges),
+            ("calls_edges", CODEBASE.calls_edges),
+            ("implements_edges", CODEBASE.implements_edges),
+            ("imports_edges", CODEBASE.imports_edges),
         ];
 
         let mut counts = serde_json::Map::new();

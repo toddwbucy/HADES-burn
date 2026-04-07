@@ -136,6 +136,17 @@ pub fn edge_key(from: &str, kind: &str, to: &str) -> String {
     format!("{from_prefix}__{kind}__{to_prefix}__{hash8}")
 }
 
+/// Compute a deterministic hash of a model identifier for stale-embedding detection.
+///
+/// Returns the full hex-encoded SHA-256 of the model string. When the model
+/// name or version changes, the hash changes, triggering re-embedding.
+pub fn model_hash(model_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model_id.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// First 8 hex chars of a SHA-256 digest.
 fn hex8(digest: &[u8]) -> String {
     // 4 bytes = 8 hex chars

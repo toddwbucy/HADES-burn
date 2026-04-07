@@ -203,7 +203,7 @@ pub fn resolve_rust_imports(
                         continue;
                     }
 
-                    let edge_key = format!("{source_fkey}_imports_{target_skey}");
+                    let edge_key = keys::edge_key(&source_fkey, "imports", target_skey);
                     if !seen.insert(edge_key.clone()) {
                         continue; // already emitted
                     }

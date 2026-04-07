@@ -69,8 +69,8 @@ static CODEBASE_PROFILE: CollectionProfile = CollectionProfile {
 /// Extended collection set for codebase ingestion.
 ///
 /// Beyond the standard metadata/chunks/embeddings triple, codebase
-/// analysis produces symbol-level metadata and graph edges (imports,
-/// defines, calls, implements).
+/// analysis produces symbol-level metadata and typed graph edges.
+/// Each edge type has its own collection (collection-per-relation).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CodebaseCollections {
     /// File-level metadata (language, metrics, symbol_hash).
@@ -81,9 +81,14 @@ pub struct CodebaseCollections {
     pub embeddings: &'static str,
     /// Symbol-level metadata (name, kind, span, parent file).
     pub symbols: &'static str,
-    /// Graph edges (imports, defines, calls, implements).
-    /// This is an **edge** collection (type 3) in ArangoDB.
-    pub edges: &'static str,
+    /// Edge collection: file defines symbol.
+    pub defines_edges: &'static str,
+    /// Edge collection: symbol calls symbol.
+    pub calls_edges: &'static str,
+    /// Edge collection: symbol implements trait method.
+    pub implements_edges: &'static str,
+    /// Edge collection: file imports symbol or file.
+    pub imports_edges: &'static str,
 }
 
 /// The singleton codebase collection set.
@@ -92,21 +97,37 @@ pub static CODEBASE: CodebaseCollections = CodebaseCollections {
     chunks: "codebase_chunks",
     embeddings: "codebase_embeddings",
     symbols: "codebase_symbols",
-    edges: "codebase_edges",
+    defines_edges: "codebase_defines_edges",
+    calls_edges: "codebase_calls_edges",
+    implements_edges: "codebase_implements_edges",
+    imports_edges: "codebase_imports_edges",
 };
 
 impl CodebaseCollections {
     /// All collection names, in order suitable for creation.
     ///
     /// Returns `(name, collection_type)` pairs where type 2 = document,
-    /// 3 = edge.
-    pub fn all_collections(&self) -> [(&str, u32); 5] {
+    /// 3 = edge. Document collections first, then edge collections.
+    pub fn all_collections(&self) -> [(&str, u32); 8] {
         [
             (self.files, 2),
             (self.chunks, 2),
             (self.embeddings, 2),
             (self.symbols, 2),
-            (self.edges, 3),
+            (self.defines_edges, 3),
+            (self.calls_edges, 3),
+            (self.implements_edges, 3),
+            (self.imports_edges, 3),
+        ]
+    }
+
+    /// All edge collection names.
+    pub fn edge_collections(&self) -> [&str; 4] {
+        [
+            self.defines_edges,
+            self.calls_edges,
+            self.implements_edges,
+            self.imports_edges,
         ]
     }
 }
@@ -223,11 +244,25 @@ mod tests {
     #[test]
     fn test_codebase_collections() {
         let cols = CODEBASE.all_collections();
-        assert_eq!(cols.len(), 5);
+        assert_eq!(cols.len(), 8);
         // First 4 are document collections (type 2).
         assert!(cols[..4].iter().all(|(_, t)| *t == 2));
-        // Last one (edges) is an edge collection (type 3).
-        assert_eq!(cols[4], ("codebase_edges", 3));
+        // Last 4 are edge collections (type 3).
+        assert!(cols[4..].iter().all(|(_, t)| *t == 3));
+        assert_eq!(cols[4].0, "codebase_defines_edges");
+        assert_eq!(cols[5].0, "codebase_calls_edges");
+        assert_eq!(cols[6].0, "codebase_implements_edges");
+        assert_eq!(cols[7].0, "codebase_imports_edges");
+    }
+
+    #[test]
+    fn test_codebase_edge_collections() {
+        let edges = CODEBASE.edge_collections();
+        assert_eq!(edges.len(), 4);
+        assert!(edges.contains(&"codebase_defines_edges"));
+        assert!(edges.contains(&"codebase_calls_edges"));
+        assert!(edges.contains(&"codebase_implements_edges"));
+        assert!(edges.contains(&"codebase_imports_edges"));
     }
 
     #[test]

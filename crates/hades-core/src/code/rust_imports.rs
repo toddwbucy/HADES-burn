@@ -212,7 +212,8 @@ pub fn resolve_rust_imports(
                         "_from": format!("{}/{}", CODEBASE.files, source_fkey),
                         "_to": format!("{}/{}", CODEBASE.symbols, target_skey),
                         "_key": edge_key,
-                        "type": "imports",
+                        "resolved": true,
+                        "style": "use",
                         "source_path": source_path,
                         "target_path": target_path,
                         "symbol_name": leaf,
@@ -411,7 +412,8 @@ mod tests {
 
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0]["type"], "imports");
+        assert_eq!(edges[0]["resolved"], true);
+        assert_eq!(edges[0]["style"], "use");
         assert_eq!(edges[0]["source_path"], "src/main.rs");
         assert_eq!(edges[0]["target_path"], "src/config.rs");
         assert_eq!(edges[0]["symbol_name"], "Config");

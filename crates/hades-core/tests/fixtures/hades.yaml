@@ -1,0 +1,64 @@
+# Test fixture — mirrors the structure and values of the production hades.yaml.
+# Used by config_integration.rs to verify parsing without a path dependency
+# on the Python HADES checkout.
+
+database:
+  host: localhost
+  port: 8529
+  database: NestedLearning
+  username: root
+  sockets:
+    readonly: /run/hades/readonly/arangod.sock
+    readwrite: /run/hades/readwrite/arangod.sock
+
+embedding:
+  service:
+    socket: /run/hades/embedder.sock
+    fallback_to_local: true
+    timeout_ms: 30000
+    idle_timeout: 0
+  model:
+    name: jinaai/jina-embeddings-v4
+    dimension: 2048
+    max_tokens: 32768
+    use_fp16: true
+    normalize: true
+  batch:
+    size: 48
+    size_small: 8
+  chunking:
+    size_tokens: 500
+    overlap_tokens: 200
+
+gpu:
+  device: "cuda:2"
+  enabled: true
+
+vector_index:
+  default_n_probe: 10
+  metric: cosine
+  auto_n_lists: true
+
+search:
+  limit: 10
+  max_limit: 100
+  hybrid:
+    vector_weight: 0.7
+    keyword_weight: 0.3
+
+rocchio:
+  alpha: 1.0
+  beta: 0.75
+  gamma: 0.15
+
+sync:
+  default_lookback_days: 7
+  batch_size: 8
+  max_results: 1000
+
+arxiv:
+  pdf_base_path: /bulk-store/arxiv-data/pdf
+  latex_base_path: /bulk-store/arxiv-data/src
+
+logging:
+  level: INFO

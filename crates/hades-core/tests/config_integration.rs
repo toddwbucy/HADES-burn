@@ -1,26 +1,28 @@
-//! Integration test: load the actual production hades.yaml
+//! Integration test: load hades.yaml test fixture
 //! and verify it parses correctly with matching values.
 
 use std::path::PathBuf;
 
-/// Resolve the path to production hades.yaml.
+/// Resolve the path to the hades.yaml test fixture.
 ///
-/// Uses HADES_TEST_CONFIG env var if set, otherwise falls back to
-/// the known location relative to the HADES repo.
-fn production_yaml_path() -> PathBuf {
+/// Uses HADES_TEST_CONFIG env var if set, otherwise uses the
+/// fixture checked into the repo at tests/fixtures/hades.yaml.
+fn fixture_yaml_path() -> PathBuf {
     if let Ok(p) = std::env::var("HADES_TEST_CONFIG") {
         return PathBuf::from(p);
     }
-    // Default: known location on this machine
-    PathBuf::from("/home/todd/git/HADES/core/config/hades.yaml")
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set — must run via cargo test");
+    PathBuf::from(manifest_dir)
+        .join("tests/fixtures/hades.yaml")
 }
 
 #[test]
-fn load_production_hades_yaml() {
-    let path = production_yaml_path();
+fn load_fixture_hades_yaml() {
+    let path = fixture_yaml_path();
     assert!(
         path.exists(),
-        "production hades.yaml not found at {path:?}. \
+        "hades.yaml fixture not found at {path:?}. \
          Set HADES_TEST_CONFIG env var to override the path."
     );
 
@@ -103,11 +105,11 @@ fn load_production_hades_yaml() {
 }
 
 #[test]
-fn load_production_yaml_then_apply_overrides() {
-    let path = production_yaml_path();
+fn load_fixture_yaml_then_apply_overrides() {
+    let path = fixture_yaml_path();
     assert!(
         path.exists(),
-        "production hades.yaml not found at {path:?}. \
+        "hades.yaml fixture not found at {path:?}. \
          Set HADES_TEST_CONFIG env var to override the path."
     );
 

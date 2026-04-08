@@ -5,7 +5,7 @@
 //! statics in `schema.rs` for all runtime operations (materialize, graph
 //! creation, RGCN training).
 //!
-//! The compile-time statics remain as **seeds** — written to `_schema` by
+//! The compile-time statics remain as **seeds** — written to `hades_schema` by
 //! `db schema init --seed nl`. They are never read in the hot path.
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ pub enum SchemaError {
     #[error("schema metadata document missing (expected _key: \"meta\")")]
     NoMetaDocument,
 
-    #[error("failed to query _schema: {0}")]
+    #[error("failed to query hades_schema: {0}")]
     Query(String),
 
     #[error("failed to deserialize schema document: {0}")]
@@ -38,7 +38,7 @@ pub enum SchemaError {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime types (owned strings, loaded from `_schema`)
+// Runtime types (owned strings, loaded from `hades_schema`)
 // ---------------------------------------------------------------------------
 
 /// Runtime edge collection definition.
@@ -138,12 +138,12 @@ pub struct RuntimeSchema {
 }
 
 impl RuntimeSchema {
-    /// Load schema from the `_schema` collection.
+    /// Load schema from the `hades_schema` collection.
     ///
     /// If the collection does not exist, falls back to compile-time NL statics
     /// for backward compatibility with databases that predate runtime schema.
     pub async fn load(pool: &ArangoPool) -> Result<Self, SchemaError> {
-        // Check if _schema collection exists.
+        // Check if hades_schema collection exists.
         let collections = crate::db::crud::list_collections(pool, false)
             .await
             .map_err(|e| SchemaError::Query(e.to_string()))?;
@@ -153,7 +153,7 @@ impl RuntimeSchema {
             return Self::from_nl_statics();
         }
 
-        // Load all documents from _schema.
+        // Load all documents from hades_schema.
         let aql = "FOR d IN hades_schema RETURN d";
         let result = crate::db::query::query(
             pool,
@@ -168,12 +168,16 @@ impl RuntimeSchema {
         let docs = result.results;
 
         if docs.is_empty() {
-            return Self::from_nl_statics();
+            return Err(SchemaError::Validation(
+                "hades_schema collection exists but contains no documents — \
+                 re-run `db schema init` to seed it"
+                    .into(),
+            ));
         }
 
         let mut meta: Option<SchemaMeta> = None;
-        let mut edge_defs = Vec::new();
-        let mut named_graphs = Vec::new();
+        let mut edge_defs: Vec<RuntimeEdgeDef> = Vec::new();
+        let mut named_graphs: Vec<RuntimeNamedGraph> = Vec::new();
 
         for doc in &docs {
             let schema_type: &str = doc
@@ -206,6 +210,35 @@ impl RuntimeSchema {
 
         let meta = meta.ok_or(SchemaError::NoMetaDocument)?;
 
+        // Validate loaded schema integrity.
+        if meta.num_relations != meta.relation_order.len() {
+            return Err(SchemaError::Validation(format!(
+                "num_relations ({}) does not match relation_order length ({})",
+                meta.num_relations,
+                meta.relation_order.len()
+            )));
+        }
+
+        let expected_checksum = compute_checksum(&meta.relation_order);
+        if !meta.schema_checksum.is_empty() && meta.schema_checksum != expected_checksum {
+            return Err(SchemaError::Validation(format!(
+                "schema_checksum mismatch: stored={}, computed={}",
+                meta.schema_checksum, expected_checksum
+            )));
+        }
+
+        // Check named graphs don't reference missing edge definitions.
+        for ng in &named_graphs {
+            for edge_name in &ng.edge_definitions {
+                if !edge_defs.iter().any(|e| &e.name == edge_name) {
+                    return Err(SchemaError::Validation(format!(
+                        "named graph '{}' references edge definition '{}' which is not in schema",
+                        ng.name, edge_name
+                    )));
+                }
+            }
+        }
+
         Ok(Self {
             meta,
             edge_definitions: edge_defs,
@@ -216,7 +249,7 @@ impl RuntimeSchema {
 
     /// Construct a RuntimeSchema from the compile-time NL statics.
     ///
-    /// Used as a fallback when `_schema` collection doesn't exist.
+    /// Used as a fallback when `hades_schema` collection doesn't exist.
     fn from_nl_statics() -> Result<Self, SchemaError> {
         use super::schema::{ALL_EDGE_COLLECTIONS, ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM};
 
@@ -336,9 +369,9 @@ impl RuntimeSchema {
 // Seed generation
 // ---------------------------------------------------------------------------
 
-/// Generate `_schema` documents from the compile-time NL statics.
+/// Generate `hades_schema` documents from the compile-time NL statics.
 ///
-/// Returns a list of JSON documents ready for bulk insert into `_schema`.
+/// Returns a list of JSON documents ready for bulk insert into `hades_schema`.
 pub fn nl_seed_documents() -> Vec<Value> {
     use super::schema::{ALL_EDGE_COLLECTIONS, ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM};
 

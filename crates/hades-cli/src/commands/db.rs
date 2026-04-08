@@ -377,7 +377,7 @@ pub enum DbGraphCmd {
 
     /// Materialize edges from implicit cross-reference fields.
     Materialize {
-        /// Filter to a single edge collection name.
+        /// Filter to a single edge definition name.
         #[arg(short = 'e', long)]
         edge: Option<String>,
 
@@ -395,7 +395,7 @@ pub enum DbGraphCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum DbSchemaCmd {
-    /// Initialize the _schema collection with a seed ontology.
+    /// Initialize the hades_schema collection with a seed ontology.
     Init {
         /// Seed name: "nl" (Nested Learning) or "empty" (blank for new domains).
         #[arg(short = 's', long)]

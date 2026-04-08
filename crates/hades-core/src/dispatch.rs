@@ -2797,15 +2797,15 @@ mod handlers {
                 };
 
                 for to_id in refs {
-                    // Validate target collection exists.
-                    let to_coll = match to_id.split('/').next() {
-                        Some(c) if existing.contains(c) => c,
+                    // Validate target collection exists and is declared in schema.
+                    match to_id.split('/').next() {
+                        Some(c) if existing.contains(c)
+                            && edef.to_collections.iter().any(|tc| tc == c) => {}
                         _ => {
                             stats.edges_skipped += 1;
                             continue;
                         }
-                    };
-                    let _ = to_coll; // used for validation above
+                    }
 
                     let mut edge = json!({
                         "_from": from_id,
@@ -4439,7 +4439,10 @@ mod handlers {
             .await
             .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
 
-        let embedding = &result.embeddings[0];
+        let embedding = result.embeddings.first()
+            .ok_or_else(|| HandlerError::ServiceError(
+                "embedder returned empty embeddings array".into(),
+            ))?;
         let preview_len = 10.min(embedding.len());
         let text_preview: String = if text.chars().count() > 100 {
             let mut s: String = text.chars().take(100).collect();
@@ -5174,7 +5177,7 @@ mod handlers {
 
     // ── Schema management handlers ──────────────────────────────────────
 
-    /// Initialize the `_schema` collection with a seed.
+    /// Initialize the `hades_schema` collection with a seed.
     pub async fn schema_init(
         pool: &ArangoPool,
         seed: &str,
@@ -5194,7 +5197,7 @@ mod handlers {
             }
         };
 
-        // Create _schema collection if not exists.
+        // Create hades_schema collection if not exists.
         let collections = crud::list_collections(pool, false)
             .await
             .map_err(|e| HandlerError::Query {
@@ -5206,23 +5209,40 @@ mod handlers {
             crud::create_collection(pool, "hades_schema", None)
                 .await
                 .map_err(|e| HandlerError::Query {
-                    context: "create _schema collection".into(),
+                    context: "create hades_schema collection".into(),
                     source: e,
                 })?;
         }
 
         // Truncate existing schema so init is a clean reset.
         let truncate_path = "collection/hades_schema/truncate";
-        let _ = pool.writer().put(truncate_path, &json!({}))
-            .await; // Ignore errors (collection may be empty/new).
+        pool.writer().put(truncate_path, &json!({}))
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "truncate hades_schema before seed".into(),
+                source: e,
+            })?;
 
         // Insert seed documents.
         let result = crud::upsert_documents(pool, "hades_schema", &docs)
             .await
             .map_err(|e| HandlerError::Query {
-                context: "seed _schema documents".into(),
+                context: "seed hades_schema documents".into(),
                 source: e,
             })?;
+
+        if result.errors > 0 {
+            return Err(HandlerError::Query {
+                context: format!(
+                    "seed hades_schema: {}/{} documents failed",
+                    result.errors,
+                    docs.len()
+                ),
+                source: crate::db::ArangoError::Request(
+                    "partial import failure during schema init".into(),
+                ),
+            });
+        }
 
         Ok(json!({
             "command": "db.schema.init",
@@ -5232,7 +5252,7 @@ mod handlers {
         }))
     }
 
-    /// List all edge definitions and named graphs in `_schema`.
+    /// List all edge definitions and named graphs in `hades_schema`.
     pub async fn schema_list(
         pool: &ArangoPool,
     ) -> Result<Value, HandlerError> {
@@ -5294,12 +5314,19 @@ mod handlers {
             }
         })?;
 
-        // Try edge definition first, then named graph.
-        if let Some(edef) = schema.get_edge_def(name) {
+        // Collect all matching edge definitions (there can be multiple with
+        // the same name but different source_field, e.g. nl_hecate_trace_edges).
+        let matching_edges: Vec<&crate::graph::runtime_schema::RuntimeEdgeDef> = schema
+            .edge_definitions
+            .iter()
+            .filter(|e| e.name == name)
+            .collect();
+
+        if !matching_edges.is_empty() {
             return Ok(json!({
                 "command": "db.schema.show",
                 "type": "edge_definition",
-                "definition": edef,
+                "definitions": matching_edges,
             }));
         }
 

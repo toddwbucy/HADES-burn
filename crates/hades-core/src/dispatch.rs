@@ -2650,6 +2650,12 @@ mod handlers {
                     match crud::upsert_documents(pool, &edef.name, chunk).await {
                         Ok(result) => {
                             stats.edges_created += result.created + result.updated;
+                            if result.errors > 0 {
+                                stats.errors.push(format!(
+                                    "import {}: {} of {} documents failed",
+                                    edef.name, result.errors, chunk.len()
+                                ));
+                            }
                         }
                         Err(e) => {
                             stats.errors.push(format!("import {}: {e}", edef.name));
@@ -2881,32 +2887,18 @@ mod handlers {
                     Some(arr) => arr.iter().filter_map(resolve_ref).collect(),
                     None => continue,
                 };
-                if chain.len() < 2 {
-                    continue;
-                }
-
-                // Sequential edges: chain[i] → chain[i+1]
-                for i in 0..chain.len() - 1 {
-                    let mut edge = json!({
-                        "_from": chain[i],
-                        "_to": chain[i + 1],
-                        "_key": format!("{lineage_key}__step_{i}"),
-                        "source_field": "chain",
-                        "lineage_doc": lineage_id,
-                        "chain_position": i,
-                    });
-                    for attr in attrs {
-                        if let Some(val) = doc.get(attr.as_str())
-                            && !val.is_null()
-                        {
-                            edge[attr.as_str()] = val.clone();
+                // Membership edges: lineage_doc → each chain member.
+                // Validates each member's collection against edef.to_collections.
+                for (i, &member) in chain.iter().enumerate() {
+                    // Validate target collection is declared in schema.
+                    match member.split('/').next() {
+                        Some(c) if edef.to_collections.iter().any(|tc| tc == c) => {}
+                        _ => {
+                            stats.edges_skipped += 1;
+                            continue;
                         }
                     }
-                    edges.push(edge);
-                }
 
-                // Membership edges: lineage_doc → each chain member
-                for (i, &member) in chain.iter().enumerate() {
                     let mut edge = json!({
                         "_from": lineage_id,
                         "_to": member,
@@ -2971,6 +2963,16 @@ mod handlers {
                     continue;
                 }
             };
+
+            // Validate from/to collections are declared in the schema.
+            let from_ok = from_node.split('/').next()
+                .is_some_and(|c| edef.from_collections.iter().any(|fc| fc == c));
+            let to_ok = to_node.split('/').next()
+                .is_some_and(|c| edef.to_collections.iter().any(|tc| tc == c));
+            if !from_ok || !to_ok {
+                stats.edges_skipped += 1;
+                continue;
+            }
             let doc_key = match doc["_key"].as_str() {
                 Some(k) => k,
                 None => continue,

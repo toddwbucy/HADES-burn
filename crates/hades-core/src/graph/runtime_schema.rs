@@ -64,7 +64,7 @@ pub struct RuntimeEdgeDef {
     /// Additional fields to copy from the source doc onto edges.
     #[serde(default)]
     pub edge_attributes: Vec<String>,
-    /// Materialization strategy: "standard", "lineage", "cross_paper", "paired_fields".
+    /// Materialization strategy: "standard", "lineage", "cross_paper".
     #[serde(default = "default_strategy")]
     pub materialize_strategy: String,
     /// Stable RGCN relation index (position in `relation_order`).

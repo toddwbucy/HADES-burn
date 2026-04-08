@@ -2707,9 +2707,15 @@ mod handlers {
         }
 
         // 4. Register named graphs if requested.
+        // When --edge is set, only register graphs containing that edge definition.
         let mut graphs_registered = Vec::new();
         if register && !dry_run {
             for ng in &schema.named_graphs {
+                if let Some(filter) = edge_filter
+                    && !ng.edge_definitions.iter().any(|e| e == filter)
+                {
+                    continue;
+                }
                 if let Some(payload) = schema.to_gharial_payload(&ng.name) {
                     match pool.writer().post("gharial", &payload).await {
                         Ok(_) => graphs_registered.push(ng.name.clone()),

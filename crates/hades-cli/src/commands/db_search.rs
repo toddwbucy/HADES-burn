@@ -1,7 +1,7 @@
 //! Native Rust handler for `hades db query` — semantic search.
 //!
 //! Implements a two-phase vector search pipeline:
-//! 1. Embed query text via the embedder HTTP service
+//! 1. Embed query text via the embedder gRPC service
 //! 2. Fetch stored embeddings from ArangoDB (no vector index required)
 //! 3. Brute-force cosine similarity in Rust, select top-K
 //! 4. Batch-fetch chunk text + metadata for top-K results
@@ -22,7 +22,7 @@ use hades_core::config::HadesConfig;
 use hades_core::db::collections::CollectionProfile;
 use hades_core::db::query::{self, ExecutionTarget};
 use hades_core::db::ArangoPool;
-use hades_core::persephone::embedder_http::EmbedderHttpClient;
+use hades_core::persephone::embedding::EmbeddingClient;
 
 use super::output::{self, OutputFormat};
 
@@ -59,13 +59,15 @@ pub async fn run_query(
     })?;
 
     // 2. Embed the query text.
-    let client = EmbedderHttpClient::new(&config.embedding.service.socket);
-    let embed_result = client
-        .embed_text(search_text, "retrieval.query")
+    let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
         .await
-        .context("failed to embed query text — is the embedder service running?")?;
+        .context("failed to connect to embedding service — is it running?")?;
+    let embed_result = client
+        .embed(&[search_text.to_string()], "retrieval.query", None)
+        .await
+        .context("failed to embed query text")?;
 
-    let query_vec = &embed_result.embedding;
+    let query_vec = &embed_result.embeddings[0];
     info!(
         dimension = embed_result.dimension,
         model = %embed_result.model,

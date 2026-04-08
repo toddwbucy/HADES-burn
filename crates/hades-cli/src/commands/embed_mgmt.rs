@@ -1,6 +1,6 @@
 //! Native Rust handlers for `hades embed` and `hades extract` commands.
 //!
-//! All commands are CLI-only — they call the embedder HTTP service, systemctl,
+//! All commands are CLI-only — they call the embedder gRPC service, systemctl,
 //! nvidia-smi, or read files directly.  `embed text` also has a dispatch arm
 //! for daemon socket clients, but the CLI adapter calls the embedder directly
 //! to avoid requiring an ArangoDB connection.
@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use hades_core::config::HadesConfig;
-use hades_core::persephone::embedder_http::EmbedderHttpClient;
+use hades_core::persephone::embedding::EmbeddingClient;
 
 use super::output::{self, OutputFormat};
 
@@ -20,20 +20,24 @@ use super::output::{self, OutputFormat};
 
 /// `hades embed text TEXT [--format F]`
 pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> Result<()> {
-    let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+    let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+        .await
+        .context("failed to connect to embedding service")?;
     let result = client
-        .embed_text(text, "retrieval.passage")
+        .embed(&[text.to_string()], "retrieval.passage", None)
         .await
         .context("embedding service error")?;
 
+    let embedding = &result.embeddings[0];
+
     if format == "raw" {
         // Output just the embedding vector for piping.
-        println!("{}", serde_json::to_string(&result.embedding)?);
+        println!("{}", serde_json::to_string(embedding)?);
         return Ok(());
     }
 
     let fmt = OutputFormat::parse(format)?;
-    let preview_len = 10.min(result.embedding.len());
+    let preview_len = 10.min(embedding.len());
     let text_preview: String = if text.chars().count() > 100 {
         let mut s: String = text.chars().take(100).collect();
         s.push_str("...");
@@ -47,9 +51,9 @@ pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> R
             "text": text_preview,
             "dimension": result.dimension,
             "model": result.model,
-            "embedding": result.embedding,
-            "embedding_preview": &result.embedding[..preview_len],
-            "embedding_truncated": result.embedding.len() > preview_len,
+            "embedding": embedding,
+            "embedding_preview": &embedding[..preview_len],
+            "embedding_truncated": embedding.len() > preview_len,
             "duration_ms": result.duration_ms,
         }),
         &fmt,
@@ -62,24 +66,39 @@ pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> R
 /// `hades embed service status`
 pub async fn run_service_status(config: &HadesConfig) -> Result<()> {
     let socket = &config.embedding.service.socket;
-    let client = EmbedderHttpClient::new(socket);
 
-    match client.health().await {
-        Ok(health) => {
-            output::print_output(
-                "embed.service.status",
-                json!({
-                    "service": "hades-embedder",
-                    "status": health.status,
-                    "model_loaded": health.model_loaded,
-                    "device": health.device,
-                    "model_name": health.model_name,
-                    "uptime_seconds": health.uptime_seconds,
-                    "socket_path": socket,
-                }),
-                &OutputFormat::Json,
-            );
-        }
+    match EmbeddingClient::connect_unix_at(socket).await {
+        Ok(client) => match client.info().await {
+            Ok(info) => {
+                let status = if info.model_loaded { "ok" } else { "idle" };
+                output::print_output(
+                    "embed.service.status",
+                    json!({
+                        "service": "hades-embedder",
+                        "status": status,
+                        "model_loaded": info.model_loaded,
+                        "device": info.device,
+                        "model_name": info.model_name,
+                        "dimension": info.dimension,
+                        "socket_path": socket,
+                    }),
+                    &OutputFormat::Json,
+                );
+            }
+            Err(e) => {
+                output::print_output(
+                    "embed.service.status",
+                    json!({
+                        "service": "hades-embedder",
+                        "status": "error",
+                        "model_loaded": false,
+                        "socket_path": socket,
+                        "error": e.to_string(),
+                    }),
+                    &OutputFormat::Json,
+                );
+            }
+        },
         Err(_) => {
             output::print_output(
                 "embed.service.status",
@@ -117,8 +136,10 @@ pub async fn run_service_start(config: &HadesConfig, foreground: bool) -> Result
 
     // Wait briefly for the service to initialize, then probe health
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let client = EmbedderHttpClient::new(&config.embedding.service.socket);
-    let available = client.health().await.is_ok();
+    let available = match EmbeddingClient::connect_unix_at(&config.embedding.service.socket).await {
+        Ok(client) => client.health_check().await,
+        Err(_) => false,
+    };
 
     output::print_output(
         "embed.service.start",
@@ -165,13 +186,11 @@ pub async fn run_service_stop() -> Result<()> {
 pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
     let gpus = parse_nvidia_smi_output(&run_nvidia_smi()?);
 
-    // Try to get embedder device from service health
-    let client = EmbedderHttpClient::new(&config.embedding.service.socket);
-    let embedder_device = client
-        .health()
-        .await
-        .ok()
-        .map(|h| h.device);
+    // Try to get embedder device from service info
+    let embedder_device = match EmbeddingClient::connect_unix_at(&config.embedding.service.socket).await {
+        Ok(client) => client.info().await.ok().map(|info| info.device),
+        Err(_) => None,
+    };
 
     output::print_output(
         "embed.gpu.status",

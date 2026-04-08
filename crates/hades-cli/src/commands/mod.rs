@@ -12,6 +12,7 @@ pub mod codebase_validate;
 pub mod daemon;
 pub mod db;
 pub mod db_graph;
+pub mod db_schema;
 pub mod db_read;
 pub mod db_search;
 pub mod db_write;

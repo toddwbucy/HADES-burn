@@ -269,6 +269,10 @@ pub enum DbCmd {
     /// Graph operations.
     #[command(subcommand)]
     Graph(DbGraphCmd),
+
+    /// Schema management — define and inspect database ontologies.
+    #[command(subcommand)]
+    Schema(DbSchemaCmd),
 }
 
 // ── db graph ───────────────────────────────────────────────────────
@@ -371,14 +375,42 @@ pub enum DbGraphCmd {
         format: String,
     },
 
-    /// Materialize edges from implicit relationships.
+    /// Materialize edges from implicit cross-reference fields.
     Materialize {
-        /// Edge collection name.
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
+        /// Filter to a single edge definition name.
+        #[arg(short = 'e', long)]
+        edge: Option<String>,
 
-        /// Preview mode.
+        /// Preview mode — count edges without inserting.
         #[arg(long)]
         dry_run: bool,
+
+        /// Also create named graphs via the Gharial API.
+        #[arg(short = 'r', long)]
+        register: bool,
     },
+}
+
+// ── db schema ─────────────────────────────────────────────────────
+
+#[derive(Debug, Subcommand)]
+pub enum DbSchemaCmd {
+    /// Initialize the hades_schema collection with a seed ontology.
+    Init {
+        /// Seed name: "nl" (Nested Learning) or "empty" (blank for new domains).
+        #[arg(short = 's', long)]
+        seed: String,
+    },
+
+    /// List all edge definitions and named graphs in the schema.
+    List {},
+
+    /// Show a single edge definition or named graph by name.
+    Show {
+        /// Name of the edge definition or named graph.
+        name: String,
+    },
+
+    /// Show schema version, checksum, and metadata.
+    Version {},
 }

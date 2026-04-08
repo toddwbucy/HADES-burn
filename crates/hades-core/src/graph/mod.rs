@@ -6,11 +6,13 @@
 
 pub mod export;
 pub mod loader;
+pub mod runtime_schema;
 pub mod schema;
 pub mod types;
 
 pub use export::{ExportConfig, ExportError, ExportResult, decode_f32_embeddings, export_embeddings};
 pub use loader::{GraphLoaderError, load};
+pub use runtime_schema::{RuntimeEdgeDef, RuntimeNamedGraph, RuntimeSchema, SchemaMeta, SchemaError};
 pub use schema::{
     EdgeCollectionDef, NamedGraphDef, NlGraphSchema, ALL_EDGE_COLLECTIONS,
     ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM, NL_GRAPH_SCHEMA, NUM_RELATIONS,

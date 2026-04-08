@@ -33,6 +33,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.venv/
 services/generated/
 
 # OS

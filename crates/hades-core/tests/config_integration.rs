@@ -1,32 +1,37 @@
-//! Integration test: load the actual production hades.yaml
+//! Integration test: load hades.yaml test fixture
 //! and verify it parses correctly with matching values.
 
 use std::path::PathBuf;
 
-/// Resolve the path to production hades.yaml.
+/// Resolve the path to the hades.yaml test fixture.
 ///
-/// Uses HADES_TEST_CONFIG env var if set, otherwise falls back to
-/// the known location relative to the HADES repo.
-fn production_yaml_path() -> PathBuf {
+/// Uses HADES_TEST_CONFIG env var if set, otherwise uses the
+/// fixture checked into the repo at tests/fixtures/hades.yaml.
+fn fixture_yaml_path() -> PathBuf {
     if let Ok(p) = std::env::var("HADES_TEST_CONFIG") {
         return PathBuf::from(p);
     }
-    // Default: known location on this machine
-    PathBuf::from("/home/todd/git/HADES/core/config/hades.yaml")
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set — must run via cargo test");
+    PathBuf::from(manifest_dir)
+        .join("tests/fixtures/hades.yaml")
+}
+
+/// Load and parse the test fixture into a HadesConfig.
+fn load_fixture_config() -> hades_core::config::HadesConfig {
+    let path = fixture_yaml_path();
+    assert!(
+        path.exists(),
+        "hades.yaml fixture not found at {path:?}. \
+         Set HADES_TEST_CONFIG env var to override the path."
+    );
+    let contents = std::fs::read_to_string(&path).expect("failed to read hades.yaml");
+    serde_yaml::from_str(&contents).expect("failed to parse hades.yaml")
 }
 
 #[test]
-fn load_production_hades_yaml() {
-    let path = production_yaml_path();
-    assert!(
-        path.exists(),
-        "production hades.yaml not found at {path:?}. \
-         Set HADES_TEST_CONFIG env var to override the path."
-    );
-
-    let contents = std::fs::read_to_string(&path).expect("failed to read hades.yaml");
-    let config: hades_core::config::HadesConfig =
-        serde_yaml::from_str(&contents).expect("failed to parse hades.yaml");
+fn load_fixture_hades_yaml() {
+    let config = load_fixture_config();
 
     // Database
     assert_eq!(config.database.host, "localhost");
@@ -98,22 +103,19 @@ fn load_production_hades_yaml() {
         "/bulk-store/arxiv-data/src"
     );
 
+    // Batch processing
+    assert_eq!(config.batch_processing.concurrency, 1);
+    assert_eq!(config.batch_processing.progress_interval_secs, 1.0);
+    assert_eq!(config.batch_processing.rate_limit_rps, 0.0);
+    assert_eq!(config.batch_processing.rate_limit_retries, 3);
+
     // Logging
     assert_eq!(config.logging.level, "INFO");
 }
 
 #[test]
-fn load_production_yaml_then_apply_overrides() {
-    let path = production_yaml_path();
-    assert!(
-        path.exists(),
-        "production hades.yaml not found at {path:?}. \
-         Set HADES_TEST_CONFIG env var to override the path."
-    );
-
-    let contents = std::fs::read_to_string(&path).unwrap();
-    let mut config: hades_core::config::HadesConfig =
-        serde_yaml::from_str(&contents).unwrap();
+fn load_fixture_yaml_then_apply_overrides() {
+    let mut config = load_fixture_config();
 
     // Simulate --db bident_burn
     config.apply_cli_overrides(Some("bident_burn"), None);

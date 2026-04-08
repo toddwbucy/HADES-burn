@@ -1,21 +1,30 @@
+use std::path::PathBuf;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_root = "../../proto";
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR not set");
+    let proto_root = PathBuf::from(manifest_dir)
+        .join("../../proto")
+        .canonicalize()
+        .expect("proto/ directory not found — expected at workspace root");
+
+    let protos: Vec<PathBuf> = [
+        "persephone/common/common.proto",
+        "persephone/embedding/embedding.proto",
+        "persephone/extraction/extraction.proto",
+        "persephone/training/training.proto",
+    ]
+    .iter()
+    .map(|p| proto_root.join(p))
+    .collect();
 
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(
-            &[
-                format!("{proto_root}/persephone/common/common.proto"),
-                format!("{proto_root}/persephone/embedding/embedding.proto"),
-                format!("{proto_root}/persephone/extraction/extraction.proto"),
-                format!("{proto_root}/persephone/training/training.proto"),
-            ],
-            &[proto_root],
-        )?;
+        .compile_protos(&protos, &[&proto_root])?;
 
     // Re-run if any proto file changes
-    println!("cargo:rerun-if-changed={proto_root}/");
+    println!("cargo:rerun-if-changed={}", proto_root.display());
 
     Ok(())
 }

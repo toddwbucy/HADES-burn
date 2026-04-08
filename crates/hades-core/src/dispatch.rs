@@ -322,6 +322,37 @@ pub struct DbGraphDropParams {
     pub force: bool,
 }
 
+/// Params for `db.schema.init`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbSchemaInitParams {
+    /// Seed name: "nl" or "empty".
+    pub seed: String,
+}
+
+/// Params for `db.schema.show`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbSchemaShowParams {
+    /// Name of the edge definition or named graph to show.
+    pub name: String,
+}
+
+/// Params for `db.graph.materialize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DbGraphMaterializeParams {
+    /// Filter to a single edge collection name.
+    #[serde(default)]
+    pub edge: Option<String>,
+    /// Preview mode — count edges without inserting.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Also create named graphs via the Gharial API.
+    #[serde(default)]
+    pub register: bool,
+}
+
 /// Params for `status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -634,6 +665,22 @@ pub enum DaemonCommand {
     #[serde(rename = "db.graph.drop")]
     DbGraphDrop(DbGraphDropParams),
 
+    #[serde(rename = "db.graph.materialize")]
+    DbGraphMaterialize(DbGraphMaterializeParams),
+
+    // ── Schema management ──────────────────────────────────────────
+    #[serde(rename = "db.schema.init")]
+    DbSchemaInit(DbSchemaInitParams),
+
+    #[serde(rename = "db.schema.list")]
+    DbSchemaList {},
+
+    #[serde(rename = "db.schema.show")]
+    DbSchemaShow(DbSchemaShowParams),
+
+    #[serde(rename = "db.schema.version")]
+    DbSchemaVersion {},
+
     // ── Embeddings ──────────────────────────────────────────────────
     #[serde(rename = "embed.text")]
     EmbedText {
@@ -836,6 +883,8 @@ impl DaemonCommand {
             Self::DbCreateIndex(_) => AccessTier::Admin,
             Self::DbGraphCreate(_) => AccessTier::Admin,
             Self::DbGraphDrop(_) => AccessTier::Admin,
+            Self::DbGraphMaterialize(_) => AccessTier::Admin,
+            Self::DbSchemaInit(_) => AccessTier::Admin,
 
             // ── Internal: system diagnostics ──────────────────────
             Self::Status(_) => AccessTier::Internal,
@@ -843,6 +892,9 @@ impl DaemonCommand {
             Self::DbStats {} => AccessTier::Internal,
             Self::DbCollections {} => AccessTier::Internal,
             Self::DbGraphList {} => AccessTier::Internal,
+            Self::DbSchemaList {} => AccessTier::Internal,
+            Self::DbSchemaShow(_) => AccessTier::Internal,
+            Self::DbSchemaVersion {} => AccessTier::Internal,
         }
     }
 
@@ -1063,6 +1115,36 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
 
+        DaemonCommand::DbGraphMaterialize(params) => {
+            require_writable(config)?;
+            handlers::graph_materialize(pool, params.edge.as_deref(), params.dry_run, params.register)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
+        // ── Schema management ───────────────────────────────────────
+        DaemonCommand::DbSchemaInit(params) => {
+            require_writable(config)?;
+            handlers::schema_init(pool, &params.seed)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbSchemaList {} => {
+            handlers::schema_list(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbSchemaShow(params) => {
+            handlers::schema_show(pool, &params.name)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+        DaemonCommand::DbSchemaVersion {} => {
+            handlers::schema_version(pool)
+                .await
+                .map_err(DispatchError::Handler)
+        }
+
         // ── System commands ─────────────────────────────────────────
         DaemonCommand::Status(params) => {
             handlers::status(pool, config, params.verbose)
@@ -1252,7 +1334,6 @@ mod handlers {
     use crate::db::crud::{self, list_collections, count_collection, CollectionInfo};
     use crate::db::index;
     use crate::db::query::{self, ExecutionTarget};
-    use crate::graph::NL_GRAPH_SCHEMA;
     use crate::db::ArangoPool;
 
     // ── Database read handlers ──────────────────────────────────────
@@ -2421,19 +2502,33 @@ mod handlers {
                 "name": name,
                 "edgeDefinitions": defs,
             })
-        } else if let Some(graph_def) = NL_GRAPH_SCHEMA.get_named_graph(name) {
-            graph_def.to_gharial_payload()
         } else {
-            return Err(HandlerError::InvalidParameter {
-                name: "name".into(),
-                reason: format!(
-                    "unknown graph '{name}' and no --edge-definitions provided — \
-                     known graphs: {}",
-                    NL_GRAPH_SCHEMA
-                        .all_named_graph_names()
-                        .join(", ")
-                ),
-            });
+            // Look up graph definition from the runtime schema.
+            let schema = crate::graph::runtime_schema::RuntimeSchema::load(pool)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "load runtime schema for graph creation".into(),
+                    source: crate::db::ArangoError::Request(e.to_string()),
+                })?;
+
+            match schema.to_gharial_payload(name) {
+                Some(payload) => payload,
+                None => {
+                    let known: Vec<&str> = schema
+                        .named_graphs
+                        .iter()
+                        .map(|g| g.name.as_str())
+                        .collect();
+                    return Err(HandlerError::InvalidParameter {
+                        name: "name".into(),
+                        reason: format!(
+                            "unknown graph '{name}' and no --edge-definitions provided — \
+                             known graphs: {}",
+                            known.join(", ")
+                        ),
+                    });
+                }
+            }
         };
 
         let edge_defs = body.get("edgeDefinitions").cloned().unwrap_or(json!([]));
@@ -2475,6 +2570,432 @@ mod handlers {
             "dropped": true,
             "collections_dropped": drop_collections,
         }))
+    }
+
+    // ── Graph materialization ─────────────────────────────────────
+
+    /// Materialize edges from implicit cross-reference fields.
+    ///
+    /// Loads edge definitions from the database's `hades_schema` collection
+    /// (falling back to compile-time NL statics if absent), then scans
+    /// source collections for non-null reference fields and creates explicit
+    /// edge documents.
+    pub async fn graph_materialize(
+        pool: &ArangoPool,
+        edge_filter: Option<&str>,
+        dry_run: bool,
+        register: bool,
+    ) -> Result<Value, HandlerError> {
+        use std::collections::HashSet;
+        use crate::db::crud;
+        use crate::graph::runtime_schema::RuntimeSchema;
+
+        // 1. Load schema from hades_schema (or NL statics fallback).
+        let schema = RuntimeSchema::load(pool).await.map_err(|e| HandlerError::Query {
+            context: "load runtime schema for materialization".into(),
+            source: crate::db::ArangoError::Request(e.to_string()),
+        })?;
+
+        // 2. Fetch existing collections once.
+        let existing: HashSet<String> = crud::list_collections(pool, true)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "list collections for materialization".into(),
+                source: e,
+            })?
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        let mut definitions_output = json!({});
+        let mut totals = MaterializeStats::default();
+        let start = std::time::Instant::now();
+
+        // 3. Process each edge definition from the runtime schema.
+        for edef in &schema.edge_definitions {
+            // Apply --edge filter.
+            if let Some(filter) = edge_filter
+                && edef.name != filter
+            {
+                continue;
+            }
+
+            let def_key = format!("{}:{}", edef.name, edef.source_field);
+            tracing::info!(definition = %def_key, "materializing");
+
+            let mut stats = MaterializeStats::default();
+
+            // Determine strategy from schema metadata.
+            let edges = match edef.materialize_strategy.as_str() {
+                "lineage" => materialize_lineage(pool, edef, &existing, &mut stats).await,
+                "cross_paper" => materialize_cross_paper(pool, edef, &existing, &mut stats).await,
+                _ => materialize_standard(pool, edef, &existing, &mut stats).await,
+            };
+
+            // Insert or count.
+            if !dry_run && !edges.is_empty() {
+                // Ensure edge collection exists.
+                if !existing.contains(&edef.name)
+                    && let Err(e) = crud::create_collection(pool, &edef.name, Some(3)).await
+                {
+                    // 1207 = duplicate name (created concurrently) — not an error.
+                    let is_dup = matches!(&e, crate::db::ArangoError::Api { error_num: 1207, .. });
+                    if !is_dup {
+                        stats.errors.push(format!("create collection {}: {e}", edef.name));
+                    }
+                }
+
+                // Bulk upsert in chunks.
+                for chunk in edges.chunks(5000) {
+                    match crud::upsert_documents(pool, &edef.name, chunk).await {
+                        Ok(result) => {
+                            stats.edges_created += result.created + result.updated;
+                        }
+                        Err(e) => {
+                            stats.errors.push(format!("import {}: {e}", edef.name));
+                        }
+                    }
+                }
+            } else {
+                stats.edges_created = edges.len() as u64;
+            }
+
+            definitions_output[&def_key] = json!({
+                "edges_created": stats.edges_created,
+                "edges_skipped": stats.edges_skipped,
+                "collections_scanned": stats.collections_scanned,
+                "collections_missing": stats.collections_missing,
+                "errors": stats.errors,
+            });
+
+            totals.edges_created += stats.edges_created;
+            totals.edges_skipped += stats.edges_skipped;
+            totals.collections_scanned += stats.collections_scanned;
+            totals.collections_missing += stats.collections_missing;
+            totals.errors.extend(stats.errors);
+        }
+
+        // 4. Register named graphs if requested.
+        let mut graphs_registered = Vec::new();
+        if register && !dry_run {
+            for ng in &schema.named_graphs {
+                if let Some(payload) = schema.to_gharial_payload(&ng.name) {
+                    match pool.writer().post("gharial", &payload).await {
+                        Ok(_) => graphs_registered.push(ng.name.clone()),
+                        Err(e) => {
+                            // 1925 = graph already exists.
+                            let is_exists = matches!(&e, crate::db::ArangoError::Api { error_num: 1925, .. });
+                            if is_exists {
+                                graphs_registered.push(ng.name.clone());
+                            } else {
+                                totals.errors.push(format!("create graph {}: {e}", ng.name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(json!({
+            "definitions": definitions_output,
+            "totals": {
+                "edges_created": totals.edges_created,
+                "edges_skipped": totals.edges_skipped,
+                "collections_scanned": totals.collections_scanned,
+                "collections_missing": totals.collections_missing,
+                "errors": totals.errors,
+                "duration_ms": duration_ms,
+            },
+            "dry_run": dry_run,
+            "schema_source": if schema.from_database { "hades_schema" } else { "nl_statics_fallback" },
+            "named_graphs_registered": graphs_registered,
+        }))
+    }
+
+    /// Stats accumulated during materialization of one edge definition.
+    #[derive(Default)]
+    struct MaterializeStats {
+        edges_created: u64,
+        edges_skipped: u64,
+        collections_scanned: u64,
+        collections_missing: u64,
+        errors: Vec<String>,
+    }
+
+    /// Resolve a reference string to a valid `collection/key` ID.
+    /// Returns `None` for bare keys, empty strings, or non-string values.
+    fn resolve_ref(val: &Value) -> Option<&str> {
+        let s = val.as_str()?;
+        if s.is_empty() || !s.contains('/') {
+            return None;
+        }
+        Some(s)
+    }
+
+    /// Build an edge `_key` from `_from` and `_to` IDs.
+    fn edge_key(from_id: &str, to_id: &str) -> String {
+        format!(
+            "{}__{}",
+            from_id.replace('/', "_"),
+            to_id.replace('/', "_"),
+        )
+    }
+
+    /// Strategy A: Standard references (single or array field).
+    async fn materialize_standard(
+        pool: &ArangoPool,
+        edef: &crate::graph::runtime_schema::RuntimeEdgeDef,
+        existing: &std::collections::HashSet<String>,
+        stats: &mut MaterializeStats,
+    ) -> Vec<Value> {
+        use crate::db::query::{self, ExecutionTarget};
+
+        let mut edges = Vec::new();
+        let field = &edef.source_field;
+
+        for from_coll in &edef.from_collections {
+            if !existing.contains(from_coll.as_str()) {
+                stats.collections_missing += 1;
+                continue;
+            }
+            stats.collections_scanned += 1;
+
+            // Scan for documents with the source field set.
+            let aql = format!(
+                "FOR d IN `{from_coll}` FILTER d.`{field}` != null RETURN {{ _id: d._id, _key: d._key, ref: d.`{field}` }}"
+            );
+
+            let docs = match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
+                Ok(r) => r.results,
+                Err(e) => {
+                    stats.errors.push(format!("{from_coll}: {e}"));
+                    continue;
+                }
+            };
+
+            for doc in &docs {
+                let from_id = match doc["_id"].as_str() {
+                    Some(id) => id,
+                    None => continue,
+                };
+
+                let refs: Vec<&str> = if edef.is_array {
+                    doc["ref"]
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(resolve_ref).collect())
+                        .unwrap_or_default()
+                } else {
+                    match resolve_ref(&doc["ref"]) {
+                        Some(r) => vec![r],
+                        None => {
+                            stats.edges_skipped += 1;
+                            continue;
+                        }
+                    }
+                };
+
+                for to_id in refs {
+                    // Validate target collection exists.
+                    let to_coll = match to_id.split('/').next() {
+                        Some(c) if existing.contains(c) => c,
+                        _ => {
+                            stats.edges_skipped += 1;
+                            continue;
+                        }
+                    };
+                    let _ = to_coll; // used for validation above
+
+                    let mut edge = json!({
+                        "_from": from_id,
+                        "_to": to_id,
+                        "_key": edge_key(from_id, to_id),
+                        "source_field": field,
+                    });
+
+                    // Copy edge_attributes from source doc.
+                    for attr in &edef.edge_attributes {
+                        if let Some(val) = doc.get(attr.as_str())
+                            && !val.is_null()
+                        {
+                            edge[attr.as_str()] = val.clone();
+                        }
+                    }
+
+                    edges.push(edge);
+                }
+            }
+        }
+
+        edges
+    }
+
+    /// Strategy B: Lineage chains (sequential + membership edges).
+    async fn materialize_lineage(
+        pool: &ArangoPool,
+        edef: &crate::graph::runtime_schema::RuntimeEdgeDef,
+        existing: &std::collections::HashSet<String>,
+        stats: &mut MaterializeStats,
+    ) -> Vec<Value> {
+        use crate::db::query::{self, ExecutionTarget};
+
+        let mut edges = Vec::new();
+        let attrs = &edef.edge_attributes;
+
+        for from_coll in &edef.from_collections {
+            if !existing.contains(from_coll.as_str()) {
+                stats.collections_missing += 1;
+                continue;
+            }
+            stats.collections_scanned += 1;
+
+            // Build RETURN clause with edge_attributes.
+            let attr_fields: String = attrs
+                .iter()
+                .map(|a| format!(", {a}: d.`{a}`"))
+                .collect();
+            let aql = format!(
+                "FOR d IN `{from_coll}` FILTER d.chain != null AND LENGTH(d.chain) >= 2 \
+                 RETURN {{ _id: d._id, _key: d._key, chain: d.chain{attr_fields} }}"
+            );
+
+            let docs = match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
+                Ok(r) => r.results,
+                Err(e) => {
+                    stats.errors.push(format!("{from_coll}: {e}"));
+                    continue;
+                }
+            };
+
+            for doc in &docs {
+                let lineage_id = match doc["_id"].as_str() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let lineage_key = match doc["_key"].as_str() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let chain: Vec<&str> = match doc["chain"].as_array() {
+                    Some(arr) => arr.iter().filter_map(resolve_ref).collect(),
+                    None => continue,
+                };
+                if chain.len() < 2 {
+                    continue;
+                }
+
+                // Sequential edges: chain[i] → chain[i+1]
+                for i in 0..chain.len() - 1 {
+                    let mut edge = json!({
+                        "_from": chain[i],
+                        "_to": chain[i + 1],
+                        "_key": format!("{lineage_key}__step_{i}"),
+                        "source_field": "chain",
+                        "lineage_doc": lineage_id,
+                        "chain_position": i,
+                    });
+                    for attr in attrs {
+                        if let Some(val) = doc.get(attr.as_str())
+                            && !val.is_null()
+                        {
+                            edge[attr.as_str()] = val.clone();
+                        }
+                    }
+                    edges.push(edge);
+                }
+
+                // Membership edges: lineage_doc → each chain member
+                for (i, &member) in chain.iter().enumerate() {
+                    let mut edge = json!({
+                        "_from": lineage_id,
+                        "_to": member,
+                        "_key": format!("{lineage_key}__member_{i}"),
+                        "source_field": "chain",
+                        "chain_position": i,
+                    });
+                    for attr in attrs {
+                        if let Some(val) = doc.get(attr.as_str())
+                            && !val.is_null()
+                        {
+                            edge[attr.as_str()] = val.clone();
+                        }
+                    }
+                    edges.push(edge);
+                }
+            }
+        }
+
+        edges
+    }
+
+    /// Strategy C: Cross-paper edges (paired from_node/to_node fields).
+    async fn materialize_cross_paper(
+        pool: &ArangoPool,
+        edef: &crate::graph::runtime_schema::RuntimeEdgeDef,
+        existing: &std::collections::HashSet<String>,
+        stats: &mut MaterializeStats,
+    ) -> Vec<Value> {
+        use crate::db::query::{self, ExecutionTarget};
+
+        let mut edges = Vec::new();
+
+        if !existing.contains("paper_edges") {
+            stats.collections_missing += 1;
+            return edges;
+        }
+        stats.collections_scanned += 1;
+
+        let aql = "FOR d IN paper_edges FILTER d.from_node != null AND d.to_node != null RETURN d";
+
+        let docs = match query::query(pool, aql, None, None, false, ExecutionTarget::Reader).await {
+            Ok(r) => r.results,
+            Err(e) => {
+                stats.errors.push(format!("paper_edges: {e}"));
+                return edges;
+            }
+        };
+
+        for doc in &docs {
+            let from_node = match doc["from_node"].as_str() {
+                Some(s) if s.contains('/') => s,
+                _ => {
+                    stats.edges_skipped += 1;
+                    continue;
+                }
+            };
+            let to_node = match doc["to_node"].as_str() {
+                Some(s) if s.contains('/') => s,
+                _ => {
+                    stats.edges_skipped += 1;
+                    continue;
+                }
+            };
+            let doc_key = match doc["_key"].as_str() {
+                Some(k) => k,
+                None => continue,
+            };
+
+            let mut edge = json!({
+                "_from": from_node,
+                "_to": to_node,
+                "_key": doc_key,
+                "source_field": "from_node/to_node",
+            });
+
+            // Copy edge_attributes.
+            for attr in &edef.edge_attributes {
+                if let Some(val) = doc.get(attr.as_str())
+                    && !val.is_null()
+                {
+                    edge[attr.as_str()] = val.clone();
+                }
+            }
+
+            edges.push(edge);
+        }
+
+        edges
     }
 
     // ── System handlers ────────────────────────────────────────────
@@ -3903,20 +4424,23 @@ mod handlers {
 
     // ── Embedding handlers ────────────────────────────────────────────
 
-    /// Embed a single text via the HTTP embedder service.
+    /// Embed a single text via the gRPC embedding service.
     pub async fn embed_text(
         config: &crate::config::HadesConfig,
         text: &str,
     ) -> Result<Value, HandlerError> {
-        use crate::persephone::embedder_http::EmbedderHttpClient;
+        use crate::persephone::embedding::EmbeddingClient;
 
-        let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+        let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+            .await
+            .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
         let result = client
-            .embed_text(text, "retrieval.passage")
+            .embed(&[text.to_string()], "retrieval.passage", None)
             .await
             .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
 
-        let preview_len = 10.min(result.embedding.len());
+        let embedding = &result.embeddings[0];
+        let preview_len = 10.min(embedding.len());
         let text_preview: String = if text.chars().count() > 100 {
             let mut s: String = text.chars().take(100).collect();
             s.push_str("...");
@@ -3929,9 +4453,9 @@ mod handlers {
             "text": text_preview,
             "dimension": result.dimension,
             "model": result.model,
-            "embedding": result.embedding,
-            "embedding_preview": &result.embedding[..preview_len],
-            "embedding_truncated": result.embedding.len() > preview_len,
+            "embedding": embedding,
+            "embedding_preview": &embedding[..preview_len],
+            "embedding_truncated": embedding.len() > preview_len,
             "duration_ms": result.duration_ms,
         }))
     }
@@ -4387,14 +4911,16 @@ mod handlers {
         config: &crate::config::HadesConfig,
         path: &str,
     ) -> Result<Value, HandlerError> {
-        use crate::persephone::embedder_http::EmbedderHttpClient;
+        use crate::persephone::embedding::EmbeddingClient;
 
         // Run check and verify.
         let check_result = smell_check(pool, path, true).await?;
         let verify_result = smell_verify(pool, path, &[]).await?;
 
         // Embedding probe for each verified ref.
-        let client = EmbedderHttpClient::new(&config.embedding.service.socket);
+        let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+            .await
+            .map_err(|e| HandlerError::ServiceError(format!("embedding connect: {e}")))?;
         let mut probes = Vec::new();
 
         if let Some(verified) = verify_result["verified_refs"].as_array() {
@@ -4426,11 +4952,11 @@ mod handlers {
 
                 // Embed both file text and smell name.
                 match (
-                    client.embed_text(&file_text, "retrieval.passage").await,
-                    client.embed_text(smell_name, "retrieval.query").await,
+                    client.embed_one(&file_text, "retrieval.passage").await,
+                    client.embed_one(smell_name, "retrieval.query").await,
                 ) {
                     (Ok(file_emb), Ok(smell_emb)) => {
-                        let sim = cosine_similarity(&file_emb.embedding, &smell_emb.embedding);
+                        let sim = cosine_similarity(&file_emb, &smell_emb);
                         probes.push(json!({
                             "cs_id": cs_id,
                             "smell_name": smell_name,
@@ -4643,6 +5169,174 @@ mod handlers {
         Ok(json!({
             "command": "codebase stats",
             "collections": counts,
+        }))
+    }
+
+    // ── Schema management handlers ──────────────────────────────────────
+
+    /// Initialize the `_schema` collection with a seed.
+    pub async fn schema_init(
+        pool: &ArangoPool,
+        seed: &str,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::crud;
+        use crate::graph::runtime_schema;
+
+        // Validate seed name.
+        let docs = match seed {
+            "nl" => runtime_schema::nl_seed_documents(),
+            "empty" => runtime_schema::empty_seed_documents(),
+            other => {
+                return Err(HandlerError::InvalidParameter {
+                    name: "seed".to_string(),
+                    reason: format!("unknown seed \"{other}\"; expected \"nl\" or \"empty\""),
+                });
+            }
+        };
+
+        // Create _schema collection if not exists.
+        let collections = crud::list_collections(pool, false)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "list collections for schema init".into(),
+                source: e,
+            })?;
+
+        if !collections.iter().any(|c| c.name == "hades_schema") {
+            crud::create_collection(pool, "hades_schema", None)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "create _schema collection".into(),
+                    source: e,
+                })?;
+        }
+
+        // Truncate existing schema so init is a clean reset.
+        let truncate_path = "collection/hades_schema/truncate";
+        let _ = pool.writer().put(truncate_path, &json!({}))
+            .await; // Ignore errors (collection may be empty/new).
+
+        // Insert seed documents.
+        let result = crud::upsert_documents(pool, "hades_schema", &docs)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "seed _schema documents".into(),
+                source: e,
+            })?;
+
+        Ok(json!({
+            "command": "db.schema.init",
+            "seed": seed,
+            "documents_written": result.created + result.updated,
+            "errors": result.errors,
+        }))
+    }
+
+    /// List all edge definitions and named graphs in `_schema`.
+    pub async fn schema_list(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        use crate::graph::runtime_schema::RuntimeSchema;
+
+        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
+            HandlerError::Query {
+                context: "load runtime schema".into(),
+                source: crate::db::ArangoError::Request(e.to_string()),
+            }
+        })?;
+
+        let edge_defs: Vec<Value> = schema
+            .edge_definitions
+            .iter()
+            .map(|e| {
+                json!({
+                    "name": e.name,
+                    "source_field": e.source_field,
+                    "strategy": e.materialize_strategy,
+                    "is_array": e.is_array,
+                    "from_count": e.from_collections.len(),
+                    "to_count": e.to_collections.len(),
+                })
+            })
+            .collect();
+
+        let graphs: Vec<Value> = schema
+            .named_graphs
+            .iter()
+            .map(|g| {
+                json!({
+                    "name": g.name,
+                    "edge_count": g.edge_definitions.len(),
+                    "description": g.description,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "command": "db.schema.list",
+            "edge_definitions": edge_defs,
+            "named_graphs": graphs,
+            "source": if schema.from_database { "database" } else { "fallback" },
+        }))
+    }
+
+    /// Show a single edge definition or named graph by name.
+    pub async fn schema_show(
+        pool: &ArangoPool,
+        name: &str,
+    ) -> Result<Value, HandlerError> {
+        use crate::graph::runtime_schema::RuntimeSchema;
+
+        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
+            HandlerError::Query {
+                context: "load runtime schema".into(),
+                source: crate::db::ArangoError::Request(e.to_string()),
+            }
+        })?;
+
+        // Try edge definition first, then named graph.
+        if let Some(edef) = schema.get_edge_def(name) {
+            return Ok(json!({
+                "command": "db.schema.show",
+                "type": "edge_definition",
+                "definition": edef,
+            }));
+        }
+
+        if let Some(ng) = schema.get_named_graph(name) {
+            return Ok(json!({
+                "command": "db.schema.show",
+                "type": "named_graph",
+                "definition": ng,
+            }));
+        }
+
+        Err(HandlerError::InvalidParameter {
+            name: "name".to_string(),
+            reason: format!("no edge definition or named graph \"{name}\" found in schema"),
+        })
+    }
+
+    /// Show schema version and checksum.
+    pub async fn schema_version(
+        pool: &ArangoPool,
+    ) -> Result<Value, HandlerError> {
+        use crate::graph::runtime_schema::RuntimeSchema;
+
+        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
+            HandlerError::Query {
+                context: "load runtime schema".into(),
+                source: crate::db::ArangoError::Request(e.to_string()),
+            }
+        })?;
+
+        Ok(json!({
+            "command": "db.schema.version",
+            "schema_version": schema.meta.schema_version,
+            "schema_checksum": schema.meta.schema_checksum,
+            "seed_name": schema.meta.seed_name,
+            "num_relations": schema.meta.num_relations,
+            "feature_dim": schema.meta.feature_dim,
         }))
     }
 }

@@ -257,6 +257,54 @@ pub async fn bulk_insert(
     Ok(total)
 }
 
+/// Upsert documents using `onDuplicate=replace`.
+///
+/// Unlike [`insert_documents`] (which uses `overwrite`), this preserves
+/// existing documents whose `_key` is not in the batch.  Essential for
+/// shared edge collections (e.g. `nl_hecate_trace_edges`) that receive
+/// edges from multiple materialization definitions.
+///
+/// Uses `complete=false` so partial success is allowed — matching the
+/// Python materializer behaviour.
+#[instrument(skip(pool, docs), fields(db = %pool.database(), count = docs.len()))]
+pub async fn upsert_documents(
+    pool: &ArangoPool,
+    collection: &str,
+    docs: &[Value],
+) -> Result<ImportResult, ArangoError> {
+    if docs.is_empty() {
+        return Ok(ImportResult::empty());
+    }
+
+    let path = format!(
+        "import?collection={collection}&type=documents&complete=false&onDuplicate=replace"
+    );
+
+    let mut ndjson = String::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if i > 0 {
+            ndjson.push('\n');
+        }
+        ndjson.push_str(&serde_json::to_string(doc)?);
+    }
+
+    debug!(collection, doc_count = docs.len(), "upserting documents");
+
+    let resp = pool
+        .writer()
+        .post_raw(&path, &ndjson, "application/x-ndjson")
+        .await?;
+
+    let result = ImportResult::from_response(&resp);
+    debug!(
+        created = result.created,
+        updated = result.updated,
+        errors = result.errors,
+        "upsert complete"
+    );
+    Ok(result)
+}
+
 // ---------------------------------------------------------------------------
 // Collection operations
 // ---------------------------------------------------------------------------

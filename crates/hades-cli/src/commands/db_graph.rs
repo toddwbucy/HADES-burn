@@ -113,6 +113,27 @@ pub async fn run_create(
     .await
 }
 
+/// `hades db graph materialize [--edge E] [--dry-run] [--register]`
+pub async fn run_materialize(
+    config: &HadesConfig,
+    edge: Option<&str>,
+    dry_run: bool,
+    register: bool,
+) -> Result<()> {
+    config.require_writable_database()?;
+
+    dispatch_and_print(
+        config,
+        DaemonCommand::DbGraphMaterialize(dispatch::DbGraphMaterializeParams {
+            edge: edge.map(String::from),
+            dry_run,
+            register,
+        }),
+        "db.graph.materialize",
+    )
+    .await
+}
+
 /// `hades db graph drop NAME [--drop-collections] [--force]`
 pub async fn run_drop(
     config: &HadesConfig,

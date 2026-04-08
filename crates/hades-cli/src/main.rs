@@ -550,6 +550,36 @@ fn main() -> anyhow::Result<()> {
                 &config, &name, drop_collections, force,
             ));
         }
+        Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Materialize {
+            edge, dry_run, register,
+        })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_graph::run_materialize(
+                &config, edge.as_deref(), dry_run, register,
+            ));
+        }
+        // ── Native DB schema commands ────────────────────────────────
+        Commands::Db(commands::db::DbCmd::Schema(commands::db::DbSchemaCmd::Init { seed })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_schema::run_init(&config, &seed));
+        }
+        Commands::Db(commands::db::DbCmd::Schema(commands::db::DbSchemaCmd::List {})) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_schema::run_list(&config));
+        }
+        Commands::Db(commands::db::DbCmd::Schema(commands::db::DbSchemaCmd::Show { name })) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_schema::run_show(&config, &name));
+        }
+        Commands::Db(commands::db::DbCmd::Schema(commands::db::DbSchemaCmd::Version {})) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(commands::db_schema::run_version(&config));
+        }
         // ── Native system commands ────────────────────────────────────
         Commands::Status { format, verbose } => {
             init_tracing();

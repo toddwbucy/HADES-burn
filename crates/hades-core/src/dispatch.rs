@@ -2607,6 +2607,24 @@ mod handlers {
             .map(|c| c.name)
             .collect();
 
+        // Validate --edge filter matches a known definition.
+        if let Some(filter) = edge_filter
+            && !schema.edge_definitions.iter().any(|e| e.name == filter)
+        {
+            let known: Vec<&str> = schema
+                .edge_definitions
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
+            return Err(HandlerError::InvalidParameter {
+                name: "edge".into(),
+                reason: format!(
+                    "unknown edge definition '{filter}' — known: {}",
+                    known.join(", ")
+                ),
+            });
+        }
+
         let mut definitions_output = json!({});
         let mut totals = MaterializeStats::default();
         let start = std::time::Instant::now();
@@ -2902,11 +2920,11 @@ mod handlers {
                     None => continue,
                 };
                 // Membership edges: lineage_doc → each chain member.
-                // Validates each member's collection against edef.to_collections.
+                // Validates each member's collection exists and is in edef.to_collections.
                 for (i, &member) in chain.iter().enumerate() {
-                    // Validate target collection is declared in schema.
                     match member.split('/').next() {
-                        Some(c) if edef.to_collections.iter().any(|tc| tc == c) => {}
+                        Some(c) if existing.contains(c)
+                            && edef.to_collections.iter().any(|tc| tc == c) => {}
                         _ => {
                             stats.edges_skipped += 1;
                             continue;
@@ -2963,27 +2981,30 @@ mod handlers {
         };
 
         for doc in &docs {
-            let from_node = match doc["from_node"].as_str() {
-                Some(s) if s.contains('/') => s,
-                _ => {
-                    stats.edges_skipped += 1;
-                    continue;
-                }
+            // Validate document handles (reject empty parts, multi-slash).
+            let from_node = match doc["from_node"].as_str().and_then(|s| {
+                let (col, key) = s.split_once('/')?;
+                if col.is_empty() || key.is_empty() || key.contains('/') { None } else { Some((s, col)) }
+            }) {
+                Some((s, _)) => s,
+                None => { stats.edges_skipped += 1; continue; }
             };
-            let to_node = match doc["to_node"].as_str() {
-                Some(s) if s.contains('/') => s,
-                _ => {
-                    stats.edges_skipped += 1;
-                    continue;
-                }
+            let to_node = match doc["to_node"].as_str().and_then(|s| {
+                let (col, key) = s.split_once('/')?;
+                if col.is_empty() || key.is_empty() || key.contains('/') { None } else { Some((s, col)) }
+            }) {
+                Some((s, _)) => s,
+                None => { stats.edges_skipped += 1; continue; }
             };
 
-            // Validate from/to collections are declared in the schema.
-            let from_ok = from_node.split('/').next()
-                .is_some_and(|c| edef.from_collections.iter().any(|fc| fc == c));
-            let to_ok = to_node.split('/').next()
-                .is_some_and(|c| edef.to_collections.iter().any(|tc| tc == c));
-            if !from_ok || !to_ok {
+            // Validate collections exist and are declared in the schema.
+            let from_coll = from_node.split_once('/').unwrap().0;
+            let to_coll = to_node.split_once('/').unwrap().0;
+            if !existing.contains(from_coll)
+                || !edef.from_collections.iter().any(|fc| fc == from_coll)
+                || !existing.contains(to_coll)
+                || !edef.to_collections.iter().any(|tc| tc == to_coll)
+            {
                 stats.edges_skipped += 1;
                 continue;
             }

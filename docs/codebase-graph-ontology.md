@@ -1,6 +1,6 @@
 # Codebase Graph Ontology Specification
 
-**Status:** DRAFT v2 — revised after committee review
+**Status:** v2.0 — implemented
 **Date:** 2026-04-06
 **Scope:** ArangoDB schema for `codebase ingest` — collections, document contracts, edge definitions, named graph, indices
 **Relates to:** task_149770 (Codebase schema ontology)

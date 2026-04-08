@@ -36,6 +36,9 @@ __pycache__/
 .venv/
 services/generated/
 
+# Papers / large binaries
+*.pdf
+
 # OS
 .DS_Store
 Thumbs.db

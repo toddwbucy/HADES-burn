@@ -1,32 +1,31 @@
 # HADES Daemon Protocol Specification
 
-**Version:** 1.0-draft
-**Status:** P6.1 deliverable
-**Socket:** `/run/hades/hades.sock` (Unix domain socket)
+**Version:** 2.0  
+**Updated:** 2026-04-08  
+**Socket:** `/run/hades/hades.sock` (Unix domain socket, configurable)
 
 ## Overview
 
-The HADES daemon exposes the CLI's query and CRUD surface over a persistent
-Unix domain socket.  Local agents (weaver-tools, Persephone sessions) connect
-once and issue commands without fork-per-call overhead.
+The HADES daemon exposes the CLI's query, CRUD, and management surface over a
+persistent Unix domain socket. Local agents (weaver-tools, Persephone sessions)
+connect once and issue commands without fork-per-call overhead.
 
-**In scope:** fast, read-heavy operations and single-document writes.
-**Out of scope:** batch ingest, training, arxiv sync, service lifecycle,
-DDL (collection/database/index/graph creation and deletion).
+**44 commands** across 8 logical groups, gated by a three-tier access model.
 
 ## Wire Format
 
-Length-prefixed JSON framing.  Every message (request and response) is:
+Length-prefixed JSON framing. Every message (request and response) is:
 
 ```text
 [4 bytes: big-endian u32 payload length][JSON payload]
 ```
 
-- **Maximum payload:** 16 MiB (16,777,216 bytes).  Messages exceeding this
+- **Maximum payload:** 16 MiB (16,777,216 bytes). Messages exceeding this
   limit are rejected with error code `PAYLOAD_TOO_LARGE` without parsing.
-- **Encoding:** UTF-8 JSON.  No trailing newline inside the payload.
+- **Encoding:** UTF-8 JSON. No trailing newline inside the payload.
 - **Connection model:** one request, one response, serial per connection.
   Pipelining is reserved for a future version (see `request_id`).
+- **Strict validation:** All param structs enforce `deny_unknown_fields`.
 
 ### Example (hex)
 
@@ -41,13 +40,17 @@ JSON payload that follows.
 
 ```jsonc
 {
-  // Optional, echoed in response.  Reserved for future pipelining.
+  // Optional, echoed in response. Reserved for future pipelining.
   "request_id": "abc-123",
 
-  // Required.  One of the command names defined below.
+  // Optional. Session type: "admin" (default) or "agent".
+  // Controls which commands are accessible.
+  "session": "agent",
+
+  // Required. One of the command names defined below.
   "command": "db.query",
 
-  // Required.  Command-specific parameters (may be empty object).
+  // Required. Command-specific parameters (may be empty object).
   "params": {
     "text": "attention mechanism",
     "limit": 10
@@ -55,727 +58,643 @@ JSON payload that follows.
 }
 ```
 
-| Field        | Type              | Required | Description                               |
-|--------------|-------------------|----------|-------------------------------------------|
-| `request_id` | `string \| null`  | no       | Echoed in response; for client correlation |
-| `command`    | `string`          | yes      | Command name (dotted namespace)            |
-| `params`     | `object`          | yes      | Command-specific parameters                |
+| Field        | Type             | Required | Description                               |
+|--------------|------------------|----------|-------------------------------------------|
+| `request_id` | `string \| null` | no       | Echoed in response; for client correlation |
+| `session`    | `string \| null` | no       | `"admin"` (default) or `"agent"`           |
+| `command`    | `string`         | yes      | Command name (dotted namespace)            |
+| `params`     | `object`         | yes      | Command-specific parameters                |
 
 ## Response Schema
 
 ```jsonc
 {
-  // Echoed from request (null if not provided).
   "request_id": "abc-123",
-
-  // True if the command completed without error.
   "success": true,
-
-  // Command-specific result payload (null on error).
   "data": { ... },
-
-  // Human-readable error message (null on success).
   "error": null,
-
-  // Machine-readable error code (null on success).
   "error_code": null
 }
 ```
 
-| Field        | Type             | Present  | Description                          |
-|--------------|------------------|----------|--------------------------------------|
-| `request_id` | `string \| null` | always   | Echoed from request                  |
-| `success`    | `bool`           | always   | Whether the command succeeded         |
-| `data`       | `object \| null` | always   | Result payload (null on error)        |
-| `error`      | `string \| null` | always   | Error message (null on success)       |
-| `error_code` | `string \| null` | always   | Machine-readable code (null on success) |
+| Field        | Type             | Present | Description                           |
+|--------------|------------------|---------|---------------------------------------|
+| `request_id` | `string \| null` | always  | Echoed from request                   |
+| `success`    | `bool`           | always  | Whether the command succeeded          |
+| `data`       | `object \| null` | always  | Result payload (null on error)         |
+| `error`      | `string \| null` | always  | Error message (null on success)        |
+| `error_code` | `string \| null` | always  | Machine-readable code (null on success)|
+
+## Sessions and Access Tiers
+
+The daemon implements a three-tier access model. Each command is classified
+into exactly one tier. Session type determines the ceiling.
+
+| Session    | Can Execute         | Use Case                    |
+|------------|---------------------|-----------------------------|
+| `"admin"`  | Agent + Internal + Admin | Human operator, CLI, harness |
+| `"agent"`  | Agent only          | AI model agents              |
+
+If omitted, session defaults to `"admin"`.
+
+### Access Tiers
+
+| Tier       | Description                                              |
+|------------|----------------------------------------------------------|
+| **Agent**  | Safe, bounded reads and task management. No DDL, no raw AQL. |
+| **Internal** | System diagnostics and schema introspection.            |
+| **Admin**  | Unbounded writes, DDL, raw AQL, schema mutation.         |
+
+An `"agent"` session attempting an Internal or Admin command receives
+error code `ACCESS_DENIED`.
 
 ## Error Codes
 
-| Code                  | Meaning                                             |
-|-----------------------|-----------------------------------------------------|
-| `UNKNOWN_COMMAND`     | `command` field not recognized                       |
-| `INVALID_PARAMS`      | Missing or malformed `params` for the command        |
-| `MALFORMED_JSON`      | Payload is not valid JSON                            |
-| `PAYLOAD_TOO_LARGE`   | Payload exceeds 16 MiB limit                         |
-| `NOT_FOUND`           | Requested document/collection/node does not exist    |
-| `QUERY_FAILED`        | ArangoDB query execution error                       |
-| `EMBEDDING_FAILED`    | Embedding service error                              |
-| `INTERNAL`            | Unexpected server-side error                         |
-| `READ_ONLY`           | Write attempted on read-only database                |
-
-## Commands
-
-Commands use dotted namespaces matching the CLI subcommand structure.
-Each entry documents the `params` schema and the `data` response shape.
+| Code                | Meaning                                             |
+|---------------------|-----------------------------------------------------|
+| `UNKNOWN_COMMAND`   | `command` field not recognized                       |
+| `INVALID_PARAMS`    | Missing, malformed, or out-of-range params           |
+| `INVALID_SESSION`   | `session` field is not `"admin"` or `"agent"`        |
+| `ACCESS_DENIED`     | Agent session attempted Admin/Internal command        |
+| `MALFORMED_JSON`    | Payload is not valid JSON                            |
+| `PAYLOAD_TOO_LARGE` | Payload exceeds 16 MiB limit                         |
+| `NOT_FOUND`         | Requested document/collection/node does not exist    |
+| `QUERY_FAILED`      | ArangoDB query execution error or missing embedding  |
+| `SERVICE_ERROR`     | External service error (embedder, etc.)              |
+| `READ_ONLY`         | Write attempted on read-only database                |
+| `INTERNAL`          | Unexpected server-side error or request timeout      |
 
 ---
 
-### `orient`
+## Commands — System
+
+### `orient` (Agent)
 
 Metadata-first context orientation for a database.
 
-**Params:**
-
-| Field        | Type     | Default | Description               |
-|--------------|----------|---------|---------------------------|
+| Param        | Type     | Default | Description                |
+|--------------|----------|---------|----------------------------|
 | `collection` | `string` | null    | Focus on specific collection |
 
-**Response `data`:**
-Matches current CLI JSON output: `{ database, profiles, total_collections,
-total_documents, persephone }`.
+### `status` (Internal)
 
-**Maps to:** `Commands::Orient` (Python passthrough, then native)
+System status — ArangoDB, embedder, sync, config.
 
----
-
-### `status`
-
-System status and workspace discovery.
-
-**Params:**
-
-| Field     | Type   | Default | Description     |
+| Param     | Type   | Default | Description     |
 |-----------|--------|---------|-----------------|
 | `verbose` | `bool` | false   | Extended output |
 
-**Response `data`:**
-Matches current CLI JSON output.
-
-**Maps to:** `Commands::Status` (Python passthrough)
-
 ---
 
-### `db.query`
+## Commands — Database Read
+
+### `db.query` (Agent)
 
 Semantic search over documents (vector similarity + optional hybrid).
 
-**Params:**
+| Param        | Type     | Default | Description                        |
+|--------------|----------|---------|------------------------------------|
+| `text`       | `string` | required | Search query text                 |
+| `limit`      | `int`    | 10      | Max results (max 1000)            |
+| `collection` | `string` | null    | Restrict to collection profile    |
+| `hybrid`     | `bool`   | false   | Enable hybrid BM25 + vector search|
+| `rerank`     | `bool`   | false   | Enable cross-encoder reranking    |
+| `structural` | `bool`   | false   | Include structural embeddings     |
 
-| Field        | Type     | Default   | Description                        |
-|--------------|----------|-----------|------------------------------------|
-| `text`       | `string` | required  | Search query text                  |
-| `limit`      | `int`    | 10        | Max results                        |
-| `collection` | `string` | null      | Restrict to collection profile     |
-| `hybrid`     | `bool`   | false     | Enable hybrid BM25 + vector search |
-| `rerank`     | `bool`   | false     | Enable reranking                   |
-| `structural` | `bool`   | false     | Include structural embeddings      |
-
-**Response `data`:**
-```jsonc
-{
-  "results": [
-    {
-      "paper_key": "2501_12345",
-      "title": "Attention Is All You Need",
-      "text": "chunk text...",
-      "score": 0.95,
-      "chunk_index": 2,
-      "total_chunks": 15
-    }
-  ],
-  "count": 10
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Query { .. })`
-
----
-
-### `db.aql`
-
-Execute raw AQL query.
-
-**Params:**
-
-| Field   | Type     | Default  | Description                     |
-|---------|----------|----------|---------------------------------|
-| `aql`   | `string` | required | AQL query string                |
-| `bind`  | `object` | `{}`     | Bind variables                  |
-| `limit` | `int`    | null     | Override result limit           |
-
-**Response `data`:**
-```jsonc
-{
-  "results": [ ... ],
-  "count": 42
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Aql { .. })`
-
----
-
-### `db.get`
+### `db.get` (Agent)
 
 Fetch a single document by collection and key.
 
-**Params:**
-
-| Field        | Type     | Default  | Description     |
+| Param        | Type     | Default  | Description     |
 |--------------|----------|----------|-----------------|
 | `collection` | `string` | required | Collection name |
 | `key`        | `string` | required | Document `_key` |
 
-**Response `data`:** The full document object.
-
-**Maps to:** `Commands::Db(DbCmd::Get { .. })`
-
----
-
-### `db.list`
+### `db.list` (Agent)
 
 List documents in a collection.
 
-**Params:**
+| Param        | Type     | Default | Description                |
+|--------------|----------|---------|----------------------------|
+| `collection` | `string` | null    | Collection name            |
+| `limit`      | `int`    | 20      | Max results (max 1000)     |
+| `paper`      | `string` | null    | Filter by paper_key        |
 
-| Field        | Type     | Default  | Description                      |
-|--------------|----------|----------|----------------------------------|
-| `collection` | `string` | null     | Collection name                  |
-| `limit`      | `int`    | 20       | Max results                      |
-| `paper`      | `string` | null     | Filter by paper_key              |
-
-**Response `data`:**
-```jsonc
-{
-  "documents": [ ... ],
-  "count": 20
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::List { .. })`
-
----
-
-### `db.insert`
-
-Insert a document into a collection.
-
-**Params:**
-
-| Field        | Type     | Default  | Description          |
-|--------------|----------|----------|----------------------|
-| `collection` | `string` | required | Target collection    |
-| `data`       | `object` | required | Document body        |
-
-**Response `data`:**
-```jsonc
-{ "_key": "new_key", "_id": "collection/new_key", "_rev": "..." }
-```
-
-**Maps to:** `Commands::Db(DbCmd::Insert { .. })`
-
----
-
-### `db.update`
-
-Update fields on an existing document.
-
-**Params:**
-
-| Field        | Type     | Default  | Description          |
-|--------------|----------|----------|----------------------|
-| `collection` | `string` | required | Collection name      |
-| `key`        | `string` | required | Document `_key`      |
-| `data`       | `object` | required | Fields to merge      |
-
-**Response `data`:**
-```jsonc
-{ "_key": "key", "_id": "collection/key", "_rev": "..." }
-```
-
-**Maps to:** `Commands::Db(DbCmd::Update { .. })`
-
----
-
-### `db.delete`
-
-Delete a single document.
-
-**Params:**
-
-| Field        | Type     | Default  | Description          |
-|--------------|----------|----------|----------------------|
-| `collection` | `string` | required | Collection name      |
-| `key`        | `string` | required | Document `_key`      |
-
-**Response `data`:**
-```jsonc
-{ "deleted": true, "_key": "key" }
-```
-
-**Maps to:** `Commands::Db(DbCmd::Delete { .. })`
-
----
-
-### `db.count`
+### `db.count` (Agent)
 
 Get document count for a collection.
 
-**Params:**
-
-| Field        | Type     | Default  | Description     |
+| Param        | Type     | Default  | Description     |
 |--------------|----------|----------|-----------------|
 | `collection` | `string` | required | Collection name |
 
-**Response `data`:**
-```jsonc
-{ "collection": "hope_axioms", "count": 1234 }
-```
+### `db.check` (Agent)
 
-**Maps to:** `Commands::Db(DbCmd::Count { .. })`
+Check a specific document's integrity.
+
+| Param         | Type     | Default  | Description       |
+|---------------|----------|----------|-------------------|
+| `document_id` | `string` | required | Full `_id` string |
+
+### `db.recent` (Agent)
+
+Recently modified documents.
+
+| Param   | Type  | Default | Description         |
+|---------|-------|---------|---------------------|
+| `limit` | `int` | 10      | Max results (max 1000) |
+
+### `db.aql` (Admin)
+
+Execute raw AQL query.
+
+| Param   | Type     | Default  | Description           |
+|---------|----------|----------|-----------------------|
+| `aql`   | `string` | required | AQL query string      |
+| `bind`  | `object` | `{}`     | Bind variables        |
+| `limit` | `int`    | null     | Override result limit |
 
 ---
 
-### `db.collections`
+## Commands — Database Write
+
+All write commands are **Admin** tier.
+
+### `db.insert` (Admin)
+
+Insert a document into a collection.
+
+| Param        | Type     | Default  | Description       |
+|--------------|----------|----------|-------------------|
+| `collection` | `string` | required | Target collection |
+| `data`       | `object` | required | Document body     |
+
+### `db.update` (Admin)
+
+Update fields on an existing document.
+
+| Param        | Type     | Default  | Description     |
+|--------------|----------|----------|-----------------|
+| `collection` | `string` | required | Collection name |
+| `key`        | `string` | required | Document `_key` |
+| `data`       | `object` | required | Fields to merge |
+
+### `db.delete` (Admin)
+
+Delete a single document.
+
+| Param        | Type     | Default  | Description     |
+|--------------|----------|----------|-----------------|
+| `collection` | `string` | required | Collection name |
+| `key`        | `string` | required | Document `_key` |
+
+### `db.purge` (Admin)
+
+Delete a document and all connected edges.
+
+| Param         | Type     | Default  | Description       |
+|---------------|----------|----------|-------------------|
+| `document_id` | `string` | required | Full `_id` string |
+
+---
+
+## Commands — Database Infrastructure
+
+### `db.collections` (Internal)
 
 List all collections in the database.
 
 **Params:** `{}` (none)
 
-**Response `data`:**
-```jsonc
-{
-  "collections": [
-    { "name": "hope_axioms", "type": 2, "count": 1234 },
-    { "name": "nl_links", "type": 3, "count": 5678 }
-  ]
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Collections { .. })`
-
----
-
-### `db.stats`
+### `db.stats` (Internal)
 
 Database-level statistics.
 
 **Params:** `{}` (none)
 
-**Response `data`:** Matches current CLI JSON output.
-
-**Maps to:** `Commands::Db(DbCmd::Stats { .. })`
-
----
-
-### `db.health`
+### `db.health` (Internal)
 
 Database health check.
 
-**Params:**
-
-| Field     | Type   | Default | Description     |
+| Param     | Type   | Default | Description     |
 |-----------|--------|---------|-----------------|
 | `verbose` | `bool` | false   | Extended output |
 
-**Response `data`:**
-```jsonc
-{ "status": "ok", "version": "3.12.x", "engine": "rocksdb" }
-```
+### `db.create_collection` (Admin)
 
-**Maps to:** `Commands::Db(DbCmd::Health { .. })`
+Create a new collection.
 
----
+| Param             | Type     | Default | Description                          |
+|-------------------|----------|---------|--------------------------------------|
+| `name`            | `string` | required | Collection name                     |
+| `collection_type` | `string` | null    | `"document"` (2) or `"edge"` (3)    |
 
-### `db.check`
+### `db.create_index` (Admin)
 
-Check a specific document's integrity.
+Create a vector similarity index.
 
-**Params:**
-
-| Field         | Type     | Default  | Description       |
-|---------------|----------|----------|-------------------|
-| `document_id` | `string` | required | Full `_id` string |
-
-**Response `data`:** Document integrity report.
-
-**Maps to:** `Commands::Db(DbCmd::Check { .. })`
+| Param        | Type     | Default    | Description          |
+|--------------|----------|------------|----------------------|
+| `collection` | `string` | required   | Collection name      |
+| `dimension`  | `int`    | required   | Vector dimension     |
+| `metric`     | `string` | `"cosine"` | Distance metric      |
 
 ---
 
-### `db.recent`
+## Commands — Graph
 
-Recently modified documents.
-
-**Params:**
-
-| Field   | Type  | Default | Description |
-|---------|-------|---------|-------------|
-| `limit` | `int` | 10      | Max results |
-
-**Response `data`:**
-```jsonc
-{ "documents": [ ... ], "count": 10 }
-```
-
-**Maps to:** `Commands::Db(DbCmd::Recent { .. })`
-
----
-
-### `db.graph.traverse`
+### `db.graph.traverse` (Agent)
 
 Graph traversal from a starting vertex.
 
-**Params:**
+| Param       | Type     | Default      | Description                         |
+|-------------|----------|--------------|-------------------------------------|
+| `start`     | `string` | required     | Starting vertex `_id`               |
+| `direction` | `string` | `"outbound"` | `outbound`, `inbound`, or `any`     |
+| `min_depth` | `int`    | 1            | Minimum traversal depth             |
+| `max_depth` | `int`    | 1            | Maximum traversal depth             |
+| `limit`     | `int`    | null         | Max results (max 1000)              |
+| `graph`     | `string` | null         | Named graph to traverse             |
 
-| Field       | Type     | Default    | Description                     |
-|-------------|----------|------------|---------------------------------|
-| `start`     | `string` | required   | Starting vertex `_id`           |
-| `direction` | `string` | `"outbound"` | `outbound`, `inbound`, or `any` |
-| `min_depth` | `int`    | 1          | Minimum traversal depth         |
-| `max_depth` | `int`    | 1          | Maximum traversal depth         |
-| `graph`     | `string` | null       | Named graph to traverse         |
-
-**Response `data`:**
-```jsonc
-{
-  "vertices": [ ... ],
-  "paths": [ ... ]
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Graph(DbGraphCmd::Traverse { .. }))`
-
----
-
-### `db.graph.shortest_path`
+### `db.graph.shortest_path` (Agent)
 
 Find shortest path between two vertices.
 
-**Params:**
+| Param       | Type     | Default | Description           |
+|-------------|----------|---------|-----------------------|
+| `source`    | `string` | required | Source vertex `_id`  |
+| `target`    | `string` | required | Target vertex `_id`  |
+| `direction` | `string` | `"any"` | Direction constraint  |
+| `graph`     | `string` | null    | Named graph           |
 
-| Field    | Type     | Default  | Description          |
-|----------|----------|----------|----------------------|
-| `source` | `string` | required | Source vertex `_id`   |
-| `target` | `string` | required | Target vertex `_id`   |
-| `graph`  | `string` | null     | Named graph           |
-
-**Response `data`:**
-```jsonc
-{
-  "vertices": [ ... ],
-  "edges": [ ... ],
-  "length": 3
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Graph(DbGraphCmd::ShortestPath { .. }))`
-
----
-
-### `db.graph.neighbors`
+### `db.graph.neighbors` (Agent)
 
 Direct neighbors of a vertex.
 
-**Params:**
+| Param       | Type     | Default | Description                     |
+|-------------|----------|---------|---------------------------------|
+| `vertex`    | `string` | required | Vertex `_id`                   |
+| `direction` | `string` | `"any"` | `outbound`, `inbound`, or `any` |
+| `limit`     | `int`    | null    | Max neighbors (max 1000)        |
+| `graph`     | `string` | null    | Named graph                     |
 
-| Field       | Type     | Default    | Description                     |
-|-------------|----------|------------|---------------------------------|
-| `vertex`    | `string` | required   | Vertex `_id`                    |
-| `direction` | `string` | `"any"`    | `outbound`, `inbound`, or `any` |
-| `limit`     | `int`    | 100        | Max neighbors                   |
-
-**Response `data`:**
-```jsonc
-{
-  "neighbors": [
-    { "_id": "...", "_key": "...", "title": "..." }
-  ],
-  "count": 42
-}
-```
-
-**Maps to:** `Commands::Db(DbCmd::Graph(DbGraphCmd::Neighbors { .. }))`
-
----
-
-### `db.graph.list`
+### `db.graph.list` (Internal)
 
 List named graphs.
 
 **Params:** `{}` (none)
 
-**Response `data`:**
-```jsonc
-{ "graphs": [ { "name": "nl_core", "edge_definitions": [ ... ] } ] }
-```
+### `db.graph.create` (Admin)
 
-**Maps to:** `Commands::Db(DbCmd::Graph(DbGraphCmd::List { .. }))`
+Create a named graph via the Gharial API.
+
+| Param              | Type     | Default | Description                              |
+|--------------------|----------|---------|------------------------------------------|
+| `name`             | `string` | required | Graph name                              |
+| `edge_definitions` | `array`  | null    | Custom edge defs; falls back to schema   |
+
+### `db.graph.drop` (Admin)
+
+Drop a named graph.
+
+| Param              | Type   | Default | Description                           |
+|--------------------|--------|---------|---------------------------------------|
+| `name`             | `string` | required | Graph name                          |
+| `drop_collections` | `bool` | false   | Also drop edge/vertex collections     |
+| `force`            | `bool` | false   | Confirmation flag                     |
+
+### `db.graph.materialize` (Admin)
+
+Materialize edges from implicit cross-reference fields. Reads edge
+definitions from `hades_schema` (or NL statics fallback).
+
+| Param      | Type     | Default | Description                                  |
+|------------|----------|---------|----------------------------------------------|
+| `edge`     | `string` | null    | Filter to single edge definition name        |
+| `dry_run`  | `bool`   | false   | Preview mode — count without inserting        |
+| `register` | `bool`   | false   | Also create named graphs via Gharial API      |
 
 ---
 
-### `embed.text`
+## Commands — Schema
 
-Generate embedding for a text string.
+Runtime ontology management. Schema definitions are stored per-database
+in the `hades_schema` collection.
 
-**Params:**
+### `db.schema.init` (Admin)
 
-| Field  | Type     | Default  | Description        |
-|--------|----------|----------|--------------------|
-| `text` | `string` | required | Text to embed      |
+Initialize or reset the `hades_schema` collection with a seed ontology.
+Truncates existing schema before writing.
 
-**Response `data`:**
-```jsonc
-{
-  "embedding": [0.123, -0.456, ...],
-  "dimension": 2048,
-  "model": "jina-embeddings-v4"
-}
-```
+| Param  | Type     | Default  | Description                                     |
+|--------|----------|----------|-------------------------------------------------|
+| `seed` | `string` | required | `"nl"` (Nested Learning) or `"empty"` (blank)   |
 
-**Maps to:** `Commands::Embed(EmbedCmd::Text { .. })`
+### `db.schema.list` (Internal)
+
+List all edge definitions and named graphs in the schema.
+
+**Params:** `{}` (none)
+
+### `db.schema.show` (Internal)
+
+Show edge definition(s) or named graph by name. Returns all matching
+edge definitions when multiple share a name (e.g., `nl_hecate_trace_edges`
+has three definitions with different `source_field` values).
+
+| Param  | Type     | Default  | Description                              |
+|--------|----------|----------|------------------------------------------|
+| `name` | `string` | required | Edge definition or named graph name      |
+
+### `db.schema.version` (Internal)
+
+Show schema metadata: version, checksum, relation count, feature dimension.
+
+**Params:** `{}` (none)
 
 ---
 
-### `graph_embed.embed`
+## Commands — Embedding
+
+### `embed.text` (Agent)
+
+Generate embedding for a text string via the Jina V4 gRPC service.
+
+| Param  | Type     | Default  | Description   |
+|--------|----------|----------|---------------|
+| `text` | `string` | required | Text to embed |
+
+### `graph_embed.embed` (Agent)
 
 Look up pre-computed structural embedding for a node.
 
-**Params:**
+| Param     | Type     | Default  | Description                   |
+|-----------|----------|----------|-------------------------------|
+| `node_id` | `string` | required | Node `_id` (`collection/key`) |
 
-| Field     | Type     | Default  | Description                      |
-|-----------|----------|----------|----------------------------------|
-| `node_id` | `string` | required | Node `_id` (`collection/key`)    |
-
-**Response `data`:**
-```jsonc
-{
-  "node_id": "hope_axioms/ax_001",
-  "label": "Axiom of Choice",
-  "embedding_dim": 128,
-  "embedding": [0.12, -0.34, ...]
-}
-```
-
-**Maps to:** `Commands::GraphEmbed(GraphEmbedCmd::Embed { .. })`
-
----
-
-### `graph_embed.neighbors`
+### `graph_embed.neighbors` (Agent)
 
 Find k-nearest structural neighbors of a node.
 
-**Params:**
-
-| Field     | Type     | Default  | Description                     |
-|-----------|----------|----------|---------------------------------|
-| `node_id` | `string` | required | Node `_id` (`collection/key`)   |
-| `limit`   | `int`    | 10       | Number of neighbors             |
-
-**Response `data`:**
-```jsonc
-{
-  "query_node": "hope_axioms/ax_001",
-  "k": 10,
-  "neighbors": [
-    { "id": "...", "label": "...", "collection": "...", "similarity": 0.89 }
-  ]
-}
-```
-
-**Maps to:** `Commands::GraphEmbed(GraphEmbedCmd::Neighbors { .. })`
+| Param     | Type     | Default  | Description                   |
+|-----------|----------|----------|-------------------------------|
+| `node_id` | `string` | required | Node `_id` (`collection/key`) |
+| `limit`   | `int`    | 10       | Number of neighbors           |
 
 ---
 
-### `task.list`
+## Commands — Task Management
 
-List Persephone tasks.
+All task commands are **Agent** tier. They operate on the Persephone
+kanban system in the configured database.
 
-**Params:**
+### `task.list` (Agent)
 
-| Field    | Type     | Default  | Description                    |
-|----------|----------|----------|--------------------------------|
-| `status` | `string` | `"open"` | Filter: `open`, `closed`, `all` |
-| `type`   | `string` | null     | Filter: `task`, `epic`          |
-| `parent` | `string` | null     | Parent task key                 |
-| `limit`  | `int`    | 50       | Max results                     |
+| Param       | Type     | Default  | Description                     |
+|-------------|----------|----------|---------------------------------|
+| `status`    | `string` | `"open"` | `open`, `closed`, or `all`      |
+| `task_type` | `string` | null     | `task` or `epic`                |
+| `parent`    | `string` | null     | Parent task key                 |
+| `limit`     | `int`    | 50       | Max results                     |
 
-**Response `data`:**
-```jsonc
-{ "tasks": [ ... ], "count": 12 }
-```
+### `task.show` (Agent)
 
-**Maps to:** `Commands::Task(TaskCmd::List { .. })`
-
----
-
-### `task.show`
-
-Get details of a single task.
-
-**Params:**
-
-| Field | Type     | Default  | Description |
+| Param | Type     | Default  | Description |
 |-------|----------|----------|-------------|
 | `key` | `string` | required | Task `_key` |
 
-**Response `data`:** Full task object.
+### `task.create` (Agent)
 
-**Maps to:** `Commands::Task(TaskCmd::Show { .. })`
+| Param         | Type       | Default    | Description      |
+|---------------|------------|------------|------------------|
+| `title`       | `string`   | required   | Task title       |
+| `description` | `string`   | null       | Task description |
+| `task_type`   | `string`   | `"task"`   | `task` or `epic` |
+| `parent`      | `string`   | null       | Parent task key  |
+| `priority`    | `string`   | `"medium"` | Priority level   |
+| `tags`        | `string[]` | `[]`       | Labels           |
 
----
+### `task.update` (Agent)
 
-### `task.create`
+| Param         | Type       | Default  | Description       |
+|---------------|------------|----------|-------------------|
+| `key`         | `string`   | required | Task `_key`       |
+| `title`       | `string`   | null     | New title         |
+| `description` | `string`   | null     | New description   |
+| `priority`    | `string`   | null     | New priority      |
+| `status`      | `string`   | null     | New status        |
+| `add_tags`    | `string[]` | `[]`     | Tags to add       |
+| `remove_tags` | `string[]` | `[]`     | Tags to remove    |
 
-Create a new task.
+### `task.close` (Agent)
 
-**Params:**
+| Param     | Type     | Default  | Description     |
+|-----------|----------|----------|-----------------|
+| `key`     | `string` | required | Task `_key`     |
+| `message` | `string` | null     | Closing message |
 
-| Field         | Type       | Default    | Description        |
-|---------------|------------|------------|--------------------|
-| `title`       | `string`   | required   | Task title         |
-| `description` | `string`   | null       | Task description   |
-| `type`        | `string`   | `"task"`   | `task` or `epic`   |
-| `parent`      | `string`   | null       | Parent task key    |
-| `priority`    | `string`   | `"medium"` | Priority level     |
-| `tags`        | `string[]` | `[]`       | Labels             |
+### `task.start` (Agent)
 
-**Response `data`:** Created task object.
+| Param | Type     | Default  | Description |
+|-------|----------|----------|-------------|
+| `key` | `string` | required | Task `_key` |
 
-**Maps to:** `Commands::Task(TaskCmd::Create { .. })`
+### `task.review` (Agent)
 
----
+| Param     | Type     | Default  | Description      |
+|-----------|----------|----------|------------------|
+| `key`     | `string` | required | Task `_key`      |
+| `message` | `string` | null     | Review message   |
 
-### `task.update`
+### `task.approve` (Agent)
 
-Update task fields.
+| Param   | Type     | Default  | Description               |
+|---------|----------|----------|---------------------------|
+| `key`   | `string` | required | Task `_key`               |
+| `human` | `bool`   | false    | Human approval flag       |
 
-**Params:**
+### `task.block` (Agent)
 
-| Field         | Type       | Default  | Description         |
-|---------------|------------|----------|---------------------|
-| `key`         | `string`   | required | Task `_key`         |
-| `title`       | `string`   | null     | New title           |
-| `description` | `string`   | null     | New description     |
-| `priority`    | `string`   | null     | New priority        |
-| `add_tags`    | `string[]` | `[]`     | Tags to add         |
-| `remove_tags` | `string[]` | `[]`     | Tags to remove      |
-
-**Response `data`:** Updated task object.
-
-**Maps to:** `Commands::Task(TaskCmd::Update { .. })`
-
----
-
-### `task.close`
-
-Close a task.
-
-**Params:**
-
-| Field     | Type     | Default  | Description        |
+| Param     | Type     | Default  | Description        |
 |-----------|----------|----------|--------------------|
 | `key`     | `string` | required | Task `_key`        |
-| `message` | `string` | null     | Closing message    |
+| `message` | `string` | null     | Block reason       |
+| `blocker` | `string` | null     | Blocking task key  |
 
-**Response `data`:** Updated task object with `status: "closed"`.
+### `task.unblock` (Agent)
 
-**Maps to:** `Commands::Task(TaskCmd::Close { .. })`
-
----
-
-### `task.context`
-
-Get task context (dependencies, history, related).
-
-**Params:**
-
-| Field | Type     | Default  | Description |
+| Param | Type     | Default  | Description |
 |-------|----------|----------|-------------|
 | `key` | `string` | required | Task `_key` |
 
-**Response `data`:** Context object (task + dependencies + logs).
+### `task.handoff` (Agent)
 
-**Maps to:** `Commands::Task(TaskCmd::Context { .. })`
+| Param     | Type     | Default  | Description      |
+|-----------|----------|----------|------------------|
+| `key`     | `string` | required | Task `_key`      |
+| `message` | `string` | null     | Handoff message  |
+
+### `task.handoff_show` (Agent)
+
+| Param | Type     | Default  | Description |
+|-------|----------|----------|-------------|
+| `key` | `string` | required | Task `_key` |
+
+### `task.context` (Agent)
+
+| Param | Type     | Default  | Description |
+|-------|----------|----------|-------------|
+| `key` | `string` | required | Task `_key` |
+
+### `task.log` (Agent)
+
+| Param   | Type     | Default  | Description |
+|---------|----------|----------|-------------|
+| `key`   | `string` | required | Task `_key` |
+| `limit` | `int`    | null     | Max entries |
+
+### `task.sessions` (Agent)
+
+| Param | Type     | Default  | Description |
+|-------|----------|----------|-------------|
+| `key` | `string` | required | Task `_key` |
+
+### `task.dep` (Agent)
+
+| Param    | Type     | Default | Description              |
+|----------|----------|---------|--------------------------|
+| `key`    | `string` | required | Task `_key`             |
+| `add`    | `string` | null    | Dependency key to add    |
+| `remove` | `string` | null    | Dependency key to remove |
+| `graph`  | `bool`   | false   | Show dependency graph    |
+
+### `task.usage` (Agent)
+
+**Params:** `{}` (none)
+
+### `task.graph_integration` (Agent)
+
+**Params:** `{}` (none)
 
 ---
 
-### `smell.check`
+## Commands — Code Quality
+
+### `smell.check` (Agent)
 
 Run code smell / compliance check on a file.
 
-**Params:**
-
-| Field     | Type     | Default  | Description               |
+| Param     | Type     | Default  | Description               |
 |-----------|----------|----------|---------------------------|
 | `path`    | `string` | required | File path to check        |
 | `verbose` | `bool`   | false    | Include detailed findings |
 
-**Response `data`:**
-```jsonc
-{
-  "path": "/path/to/file.py",
-  "smells": [ { "code": "CS-01", "message": "...", "line": 42 } ],
-  "clean": false
-}
-```
+### `smell.verify` (Agent)
 
-**Maps to:** `Commands::Smell(SmellCmd::Check { .. })`
+Verify specific compliance claims.
+
+| Param    | Type       | Default  | Description            |
+|----------|------------|----------|------------------------|
+| `path`   | `string`   | required | File path to verify    |
+| `claims` | `string[]` | `[]`     | Claims to verify       |
+
+### `smell.report` (Agent)
+
+Generate a compliance report.
+
+| Param  | Type     | Default  | Description        |
+|--------|----------|----------|--------------------|
+| `path` | `string` | required | File path to check |
+
+### `link_code_smell` (Agent)
+
+Link a code smell to a source node.
+
+| Param         | Type       | Default  | Description            |
+|---------------|------------|----------|------------------------|
+| `source_id`   | `string`   | required | Source node `_id`      |
+| `smell_id`    | `string`   | required | Smell node `_id`       |
+| `enforcement` | `string`   | required | Enforcement level      |
+| `methods`     | `string[]` | `[]`     | Enforcement methods    |
+| `summary`     | `string`   | null     | Summary text           |
 
 ---
 
-## Commands Excluded from Daemon
+## Commands — Codebase
 
-These commands are **intentionally not exposed** over the socket:
+### `codebase.stats` (Agent)
 
-| Command                | Reason                                  |
-|------------------------|-----------------------------------------|
-| `ingest`               | Batch pipeline, long-running            |
-| `arxiv sync`           | Batch API fetch, long-running           |
-| `codebase ingest`      | Batch AST parse, long-running           |
-| `codebase update`      | Batch update, long-running              |
-| `graph-embed train`    | GPU training, minutes to hours          |
-| `graph-embed update`   | Batch re-embed                          |
-| `extract`              | File I/O, not a query                   |
-| `link`                 | Interactive confirmation                |
-| `db purge`             | Destructive bulk delete                 |
-| `db create`            | DDL (collection creation)               |
-| `db create-database`   | DDL (database creation)                 |
-| `db create-index`      | DDL (index creation)                    |
-| `db graph create/drop` | DDL (graph definition)                  |
-| `db graph materialize` | Batch materialization                   |
-| `db export`            | Batch export to file                    |
-| `db backfill-text`     | Batch backfill                          |
-| `embed service *`      | Service lifecycle management            |
-| `embed gpu *`          | Hardware query (not frequently needed)  |
+Codebase ingestion statistics.
+
+**Params:** `{}` (none)
+
+---
+
+## Commands Not Exposed via Daemon
+
+These commands are CLI-only. They are long-running batch operations,
+service lifecycle management, or hardware queries that don't suit the
+request-response socket model.
+
+| Command                    | Reason                               |
+|----------------------------|--------------------------------------|
+| `ingest`                   | Batch pipeline, long-running         |
+| `arxiv sync`               | Batch API fetch, long-running        |
+| `codebase ingest`          | Batch AST parse, long-running        |
+| `codebase update`          | Batch update, long-running           |
+| `codebase validate`        | Batch validation                     |
+| `graph-embed train`        | GPU training, minutes to hours       |
+| `graph-embed update`       | Batch re-embed                       |
+| `extract`                  | File I/O, not a query                |
+| `link`                     | Interactive confirmation             |
+| `db export`                | Batch export to file                 |
+| `db backfill-text`         | Batch backfill                       |
+| `db create-database`       | Infrastructure DDL (rare)            |
+| `db databases`             | Multi-database query (rare)          |
+| `db index-status`          | Index diagnostics (rare)             |
+| `db search`                | Use `db.query` via daemon instead    |
+| `embed service start/stop` | Service lifecycle management         |
+| `embed gpu status/list`    | Hardware query                       |
 
 ## Connection Lifecycle
 
 1. Client opens Unix stream to `/run/hades/hades.sock`.
 2. Client writes a length-prefixed request.
-3. Server reads the request, dispatches to the handler, writes a
-   length-prefixed response.
-4. Client reads the response.
+3. Server reads the request, validates session and access tier.
+4. Server dispatches to the handler, writes a length-prefixed response.
 5. Steps 2-4 repeat for subsequent requests on the same connection.
 6. Either side may close the connection at any time.
 
 **Timeouts:**
-- Server: 30s idle timeout per connection (no request received).
-- Server: 60s per-request execution timeout.
-- Client: should set a read timeout appropriate to the expected
-  command latency (recommend 10s for queries, 30s for writes).
+
+| Timeout          | Duration | Scope          |
+|------------------|----------|----------------|
+| Idle timeout     | 30s      | Per-connection |
+| Request timeout  | 60s      | Per-request    |
+| Client default   | 10s      | Connect + read |
 
 **Concurrency:**
 - Each connection is serial: one request at a time, one response.
-- The daemon accepts multiple concurrent connections.
+- The daemon accepts multiple concurrent connections (tokio task per connection).
 - All connections share a single `ArangoPool`.
-- No cross-connection state or sessions.
 
-## Shared State
+**Client reconnection:**
+- Automatic single-retry on `BrokenPipe` or `ConnectionReset`.
+- No retry for JSON errors, payload size violations, or other I/O errors.
 
-The daemon holds:
-- `ArangoPool` — persistent ArangoDB connection pool (reader + writer sockets).
-- `HadesConfig` — loaded once at startup.
-- No per-connection state, no caches (ArangoDB is the source of truth).
+**Socket lifecycle:**
+- Daemon removes any stale socket file before binding (checks for live listener).
+- Socket cleaned up on graceful shutdown (SIGTERM/SIGINT).
+- Parent directory (`/run/hades/`) created if missing.
 
 ## Future Considerations
 
 - **Pipelining:** `request_id` is reserved for a future version where
   multiple requests can be in-flight on a single connection.
-- **Streaming:** Large result sets (e.g., traversals) may benefit from
-  chunked streaming responses.  Not in v1.
-- **Authentication:** v1 relies on Unix socket file permissions
-  (owner/group).  Future versions may add token-based auth.
-- **Notifications:** Server-push events (e.g., task status changes)
-  are out of scope for v1.
+- **Streaming:** Large result sets may benefit from chunked streaming
+  responses. Not in v2.
+- **Memory database bootstrap:** Agents may read their system prompt and
+  memory context via daemon queries at session start (see
+  `design-agent-memory-and-system-prompt.md`).
+- **`--seed memory`:** A memory ontology seed for agent memory databases,
+  following the same `hades_schema` pattern as `--seed nl`.

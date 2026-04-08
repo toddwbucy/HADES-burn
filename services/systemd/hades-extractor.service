@@ -1,0 +1,44 @@
+[Unit]
+Description=HADES Document Extraction Service (Docling gRPC)
+Documentation=https://github.com/r3d91ll/HADES-Burn
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=todd
+Group=todd
+
+# Create runtime directory for socket
+RuntimeDirectory=hades
+RuntimeDirectoryMode=0755
+
+WorkingDirectory=/home/todd/olympus/HADES-Burn/services
+ExecStart=/home/todd/olympus/HADES-Burn/services/.venv/bin/python -m extraction.server
+
+# Environment from config file
+EnvironmentFile=/etc/hades/extractor.conf
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/run/hades /var/cache/hades
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hades-extractor
+
+[Install]
+WantedBy=multi-user.target

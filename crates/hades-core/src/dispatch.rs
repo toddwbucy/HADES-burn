@@ -2627,9 +2627,16 @@ mod handlers {
 
             // Determine strategy from schema metadata.
             let edges = match edef.materialize_strategy.as_str() {
+                "standard" => materialize_standard(pool, edef, &existing, &mut stats).await,
                 "lineage" => materialize_lineage(pool, edef, &existing, &mut stats).await,
                 "cross_paper" => materialize_cross_paper(pool, edef, &existing, &mut stats).await,
-                _ => materialize_standard(pool, edef, &existing, &mut stats).await,
+                other => {
+                    stats.errors.push(format!(
+                        "{}: unknown materialize_strategy '{other}'",
+                        edef.name
+                    ));
+                    Vec::new()
+                }
             };
 
             // Insert or count.
@@ -2730,11 +2737,13 @@ mod handlers {
         errors: Vec<String>,
     }
 
-    /// Resolve a reference string to a valid `collection/key` ID.
-    /// Returns `None` for bare keys, empty strings, or non-string values.
+    /// Resolve a reference string to a valid `collection/key` document handle.
+    /// Returns `None` for empty strings, bare keys, or malformed handles
+    /// (empty collection, empty key, multiple slashes).
     fn resolve_ref(val: &Value) -> Option<&str> {
         let s = val.as_str()?;
-        if s.is_empty() || !s.contains('/') {
+        let (col, key) = s.split_once('/')?;
+        if col.is_empty() || key.is_empty() || key.contains('/') {
             return None;
         }
         Some(s)
@@ -2769,8 +2778,13 @@ mod handlers {
             stats.collections_scanned += 1;
 
             // Scan for documents with the source field set.
+            // Include edge_attributes in the projection so they can be copied onto edges.
+            let attr_fields: String = edef.edge_attributes
+                .iter()
+                .map(|a| format!(", `{a}`: d.`{a}`"))
+                .collect();
             let aql = format!(
-                "FOR d IN `{from_coll}` FILTER d.`{field}` != null RETURN {{ _id: d._id, _key: d._key, ref: d.`{field}` }}"
+                "FOR d IN `{from_coll}` FILTER d.`{field}` != null RETURN {{ _id: d._id, _key: d._key, ref: d.`{field}`{attr_fields} }}"
             );
 
             let docs = match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
@@ -2862,7 +2876,7 @@ mod handlers {
                 .map(|a| format!(", {a}: d.`{a}`"))
                 .collect();
             let aql = format!(
-                "FOR d IN `{from_coll}` FILTER d.chain != null AND LENGTH(d.chain) >= 2 \
+                "FOR d IN `{from_coll}` FILTER d.chain != null AND LENGTH(d.chain) >= 1 \
                  RETURN {{ _id: d._id, _key: d._key, chain: d.chain{attr_fields} }}"
             );
 

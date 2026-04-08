@@ -60,5 +60,11 @@ arxiv:
   pdf_base_path: /bulk-store/arxiv-data/pdf
   latex_base_path: /bulk-store/arxiv-data/src
 
+batch_processing:
+  concurrency: 1
+  progress_interval_secs: 1.0
+  rate_limit_rps: 0.0
+  rate_limit_retries: 3
+
 logging:
   level: INFO

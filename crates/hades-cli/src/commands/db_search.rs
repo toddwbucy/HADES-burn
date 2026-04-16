@@ -26,13 +26,14 @@ use hades_core::persephone::embedding::EmbeddingClient;
 
 use super::output::{self, OutputFormat};
 
-/// `hades db query TEXT [--limit N] [--collection C] [--hybrid] [--format F]`
+/// `hades db query TEXT [--limit N] [--collection C] [--hybrid] [--structural] [--format F]`
 pub async fn run_query(
     config: &HadesConfig,
     search_text: &str,
     limit: u32,
     collection: Option<&str>,
     hybrid: bool,
+    structural: bool,
     format: &str,
 ) -> Result<()> {
     let fmt = OutputFormat::parse(format)?;
@@ -181,7 +182,12 @@ pub async fn run_query(
         results = hybrid_rerank(search_text, results);
     }
 
-    // 6. Output.
+    // 6. (Optional) Structural graph fusion.
+    if structural && !results.is_empty() {
+        results = structural_rerank(&pool, profile.metadata, &results).await?;
+    }
+
+    // 7. Output.
     let data = json!({
         "query": search_text,
         "collection": profile_name,
@@ -206,6 +212,154 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (mag_a * mag_b)
+}
+
+// ── Structural graph fusion ────────────────────────────────────────────
+
+/// Blend search scores with RGCN structural embedding similarity.
+///
+/// Algorithm (matches Python `structural_fusion.py:structural_rerank`):
+/// 1. Collect document keys from results
+/// 2. Batch-fetch `structural_embedding` from the metadata collection
+/// 3. Compute centroid from top-3 results' structural embeddings
+/// 4. Compute cosine similarity of each result's embedding to centroid
+/// 5. Blend: `fused = 0.7 * current_score + 0.3 * structural_cosine`
+/// 6. Re-sort by fused score
+async fn structural_rerank(
+    pool: &ArangoPool,
+    metadata_col: &str,
+    results: &[Value],
+) -> Result<Vec<Value>> {
+    // Collect parent keys from results.
+    let parent_keys: Vec<&str> = results
+        .iter()
+        .filter_map(|r| {
+            r.get("arxiv_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))
+        })
+        .collect();
+
+    if parent_keys.is_empty() {
+        return Ok(results.to_vec());
+    }
+
+    // Batch-fetch structural embeddings from metadata collection.
+    let aql = "FOR key IN @keys \
+               LET doc = DOCUMENT(CONCAT(@col, '/', key)) \
+               RETURN { _key: key, structural_embedding: doc.structural_embedding }";
+    let bind = json!({ "keys": parent_keys, "col": metadata_col });
+
+    let emb_result = query::query(
+        pool,
+        aql,
+        Some(&bind),
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await
+    .context("failed to fetch structural embeddings")?;
+
+    // Build a map of key → structural embedding.
+    let mut emb_map: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+    for doc in &emb_result.results {
+        let key = doc["_key"].as_str().unwrap_or("");
+        if let Some(arr) = doc["structural_embedding"].as_array() {
+            let vec: Vec<f32> = arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+            if !vec.is_empty() {
+                emb_map.insert(key.to_string(), vec);
+            }
+        }
+    }
+
+    if emb_map.is_empty() {
+        info!("no structural embeddings found, skipping structural fusion");
+        return Ok(results.to_vec());
+    }
+
+    // Compute centroid from top-3 results that have structural embeddings.
+    let top_vecs: Vec<&Vec<f32>> = results
+        .iter()
+        .filter_map(|r| {
+            let key = r.get("arxiv_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))?;
+            emb_map.get(key)
+        })
+        .take(3)
+        .collect();
+
+    if top_vecs.is_empty() {
+        return Ok(results.to_vec());
+    }
+
+    let centroid = compute_centroid(&top_vecs);
+
+    // Blend scores.
+    let mut fused: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            let current_score = r["score"].as_f64().unwrap_or(0.0);
+            let key = r.get("arxiv_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))
+                .unwrap_or("");
+
+            let structural_sim = emb_map
+                .get(key)
+                .map(|emb| cosine_similarity_f32(&centroid, emb) as f64)
+                .unwrap_or(0.0);
+
+            let fused_score = 0.7 * current_score + 0.3 * structural_sim;
+            r["structural_score"] = json!(structural_sim);
+            r["score"] = json!(fused_score);
+            r
+        })
+        .collect();
+
+    // Re-sort by fused score descending.
+    fused.sort_by(|a, b| {
+        let sa = a["score"].as_f64().unwrap_or(0.0);
+        let sb = b["score"].as_f64().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    info!(
+        structural_embeddings = emb_map.len(),
+        centroid_sources = top_vecs.len(),
+        "structural fusion applied"
+    );
+
+    Ok(fused)
+}
+
+/// Compute the element-wise mean of a set of vectors.
+fn compute_centroid(vecs: &[&Vec<f32>]) -> Vec<f32> {
+    if vecs.is_empty() {
+        return Vec::new();
+    }
+    let dim = vecs[0].len();
+    let n = vecs.len() as f32;
+    let mut centroid = vec![0.0f32; dim];
+    for v in vecs {
+        for (i, val) in v.iter().enumerate() {
+            if i < dim {
+                centroid[i] += val;
+            }
+        }
+    }
+    for c in &mut centroid {
+        *c /= n;
+    }
+    centroid
+}
+
+/// Cosine similarity between two f32 vectors (same as `cosine_similarity` but
+/// takes `&[f32]` for ergonomics with the structural embedding code).
+fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
+    cosine_similarity(a, b)
 }
 
 // ── Hybrid keyword reranking ────────────────────────────────────────────
@@ -334,5 +488,47 @@ mod tests {
         // Should have vector_score and keyword_score fields
         assert!(reranked[0].get("vector_score").is_some());
         assert!(reranked[0].get("keyword_score").is_some());
+    }
+
+    // ── Structural fusion unit tests ───────────────────────────────────
+
+    #[test]
+    fn test_compute_centroid_single_vec() {
+        let v = vec![1.0, 2.0, 3.0];
+        let centroid = compute_centroid(&[&v]);
+        assert_eq!(centroid, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_compute_centroid_multiple_vecs() {
+        let v1 = vec![1.0, 0.0, 0.0];
+        let v2 = vec![0.0, 1.0, 0.0];
+        let v3 = vec![0.0, 0.0, 1.0];
+        let centroid = compute_centroid(&[&v1, &v2, &v3]);
+        let expected = 1.0 / 3.0;
+        for c in &centroid {
+            assert!((c - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_compute_centroid_empty() {
+        let centroid = compute_centroid(&[]);
+        assert!(centroid.is_empty());
+    }
+
+    #[test]
+    fn test_cosine_similarity_f32_identical() {
+        let a = vec![1.0, 2.0, 3.0];
+        let sim = cosine_similarity_f32(&a, &a);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_f32_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let sim = cosine_similarity_f32(&a, &b);
+        assert!(sim.abs() < 1e-6);
     }
 }

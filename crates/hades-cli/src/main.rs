@@ -346,19 +346,18 @@ fn main() -> anyhow::Result<()> {
                 socket.as_deref(),
             ));
         }
-        // ── Native DB search (basic vector + optional hybrid) ───────────
-        // Only handle the subset we support natively; rerank/structural
-        // fall through to Python.
+        // ── Native DB search (vector + optional hybrid + optional structural)
+        // Rerank (cross-encoder) still falls through to Python.
         Commands::Db(commands::db::DbCmd::Query {
             search_text: Some(ref text),
-            limit, ref collection, hybrid,
-            rerank: false, structural: false,
+            limit, ref collection, hybrid, structural,
+            rerank: false,
             ref format, ..
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             return rt.block_on(commands::db_search::run_query(
-                &config, text, limit, collection.as_deref(), hybrid, format,
+                &config, text, limit, collection.as_deref(), hybrid, structural, format,
             ));
         }
         // ── Native DB read commands ─────────────────────────────────────

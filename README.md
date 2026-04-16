@@ -132,20 +132,19 @@ HADES-Burn reads configuration from `~/.config/hades/config.yaml` with environme
 
 ## Project Status
 
+**v0.3.0 — Production.** The Python CLI has been fully replaced. All commands are native Rust.
+
 | Metric | Value |
 |--------|-------|
-| Rust source files | 101 |
+| Rust source files | 100 |
 | Lines of Rust | ~36,000 |
 | Tests | ~350 |
-| PRs merged | 57 |
-| Commits | 231 |
+| PRs merged | 66 |
+| Commits | 248 |
 | CLI subcommands | ~85 (all native Rust) |
 
-**Still falling through to Python** (2 remaining):
-- Cross-encoder reranking in `db query`
-- Structural graph fusion in `db query`
-
-Once these are native, the Python CLI dependency drops entirely.
+**Not yet ported** (clean error returned):
+- `--rerank` (cross-encoder model required — deferred until ONNX runtime integration)
 
 ## License
 

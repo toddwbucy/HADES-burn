@@ -4,7 +4,7 @@
 //! reader client and writes to the writer client.
 
 use serde_json::Value;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use super::error::ArangoError;
 use super::pool::ArangoPool;
@@ -248,12 +248,22 @@ pub async fn bulk_insert(
         }
     }
 
-    debug!(
-        created = total.created,
-        errors = total.errors,
-        chunks = docs.len().div_ceil(chunk_size),
-        "bulk insert complete"
-    );
+    if total.errors > 0 {
+        warn!(
+            collection,
+            created = total.created,
+            errors = total.errors,
+            chunks = docs.len().div_ceil(chunk_size),
+            "bulk insert partial failure — some documents were not written"
+        );
+    } else {
+        debug!(
+            collection,
+            created = total.created,
+            chunks = docs.len().div_ceil(chunk_size),
+            "bulk insert complete"
+        );
+    }
     Ok(total)
 }
 
@@ -296,12 +306,22 @@ pub async fn upsert_documents(
         .await?;
 
     let result = ImportResult::from_response(&resp);
-    debug!(
-        created = result.created,
-        updated = result.updated,
-        errors = result.errors,
-        "upsert complete"
-    );
+    if result.errors > 0 {
+        warn!(
+            collection,
+            created = result.created,
+            updated = result.updated,
+            errors = result.errors,
+            "upsert partial failure — some documents were not written"
+        );
+    } else {
+        debug!(
+            collection,
+            created = result.created,
+            updated = result.updated,
+            "upsert complete"
+        );
+    }
     Ok(result)
 }
 

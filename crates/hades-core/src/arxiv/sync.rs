@@ -31,6 +31,10 @@ pub enum SyncError {
     /// Embedding service error.
     #[error("embedding error: {0}")]
     Embedding(#[from] EmbeddingError),
+
+    /// Configuration error (missing profile, invalid date).
+    #[error("config error: {0}")]
+    Config(String),
 }
 
 /// Maximum results per month query to avoid arXiv pagination ceiling.
@@ -73,7 +77,7 @@ pub async fn run_sync(
     config: &SyncConfig,
 ) -> Result<SyncResult, SyncError> {
     let profile = CollectionProfile::get("sync")
-        .expect("sync profile must exist");
+        .ok_or_else(|| SyncError::Config("sync collection profile not found".into()))?;
 
     // Phase 1: Fetch papers month by month.
     info!(
@@ -134,14 +138,14 @@ pub async fn run_sync(
 async fn fetch_recent_papers(
     client: &ArxivClient,
     config: &SyncConfig,
-) -> Result<Vec<ArxivPaper>, crate::arxiv::ArxivError> {
+) -> Result<Vec<ArxivPaper>, SyncError> {
     let today = Utc::now().date_naive();
     let mut all_papers = Vec::new();
     let mut current = config.start_date;
 
     while current <= today && (all_papers.len() as u32) < config.max_results {
         // End of this month or today, whichever comes first.
-        let month_end = end_of_month(current).min(today);
+        let month_end = end_of_month(current)?.min(today);
         let remaining = config.max_results - all_papers.len() as u32;
         let month_max = remaining.min(MAX_PER_MONTH);
 
@@ -219,16 +223,17 @@ async fn fetch_month_papers(
 }
 
 /// Get the last day of the month containing `date`.
-fn end_of_month(date: NaiveDate) -> NaiveDate {
+fn end_of_month(date: NaiveDate) -> Result<NaiveDate, SyncError> {
     let (y, m) = if date.month() == 12 {
         (date.year() + 1, 1)
     } else {
         (date.year(), date.month() + 1)
     };
     NaiveDate::from_ymd_opt(y, m, 1)
-        .expect("from_ymd_opt produced None for first-of-next-month in end_of_month")
-        .pred_opt()
-        .expect("pred_opt produced None when computing last day of month in end_of_month")
+        .and_then(|d| d.pred_opt())
+        .ok_or_else(|| SyncError::Config(
+            format!("failed to compute end of month for {date}")
+        ))
 }
 
 // ── Phase 2: Deduplication ──────────────────────────────────────────────
@@ -426,15 +431,15 @@ mod tests {
     #[test]
     fn test_end_of_month() {
         assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2025, 1, 15).unwrap()),
+            end_of_month(NaiveDate::from_ymd_opt(2025, 1, 15).unwrap()).unwrap(),
             NaiveDate::from_ymd_opt(2025, 1, 31).unwrap()
         );
         assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()),
+            end_of_month(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()).unwrap(),
             NaiveDate::from_ymd_opt(2024, 2, 29).unwrap() // leap year
         );
         assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()),
+            end_of_month(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()).unwrap(),
             NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()
         );
     }

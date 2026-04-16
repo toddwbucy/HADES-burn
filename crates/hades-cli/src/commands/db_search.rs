@@ -148,6 +148,7 @@ pub async fn run_query(
                  LET chunk = DOCUMENT(CONCAT(@chunks_col, '/', item.chunk_key)) \
                  LET meta = DOCUMENT(CONCAT(@metadata_col, '/', item.parent_key)) \
                  RETURN {{ \
+                     parent_key: item.parent_key, \
                      {fk}: item.parent_key, \
                      text: chunk.text, \
                      chunk_index: chunk.chunk_index, \
@@ -231,12 +232,13 @@ async fn structural_rerank(
     results: &[Value],
 ) -> Result<Vec<Value>> {
     // Collect parent keys from results.
+    // Prefer `parent_key` (always present in detail results) over `arxiv_id`.
     let parent_keys: Vec<&str> = results
         .iter()
         .filter_map(|r| {
-            r.get("arxiv_id")
+            r.get("parent_key")
                 .and_then(|v| v.as_str())
-                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))
+                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))
         })
         .collect();
 
@@ -282,9 +284,9 @@ async fn structural_rerank(
     let top_vecs: Vec<&Vec<f32>> = results
         .iter()
         .filter_map(|r| {
-            let key = r.get("arxiv_id")
+            let key = r.get("parent_key")
                 .and_then(|v| v.as_str())
-                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))?;
+                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))?;
             emb_map.get(key)
         })
         .take(3)
@@ -302,9 +304,9 @@ async fn structural_rerank(
         .map(|r| {
             let mut r = r.clone();
             let current_score = r["score"].as_f64().unwrap_or(0.0);
-            let key = r.get("arxiv_id")
+            let key = r.get("parent_key")
                 .and_then(|v| v.as_str())
-                .or_else(|| r.get("parent_key").and_then(|v| v.as_str()))
+                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))
                 .unwrap_or("");
 
             let structural_sim = emb_map

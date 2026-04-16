@@ -1,0 +1,98 @@
+# HADES Configuration
+# ===================
+# Override priority (highest wins):
+#   1. CLI arguments (--db, --gpu)
+#   2. Environment variables (ARANGO_*, HADES_*)
+#   3. This config file
+#   4. Compiled-in defaults
+
+# -----------------------------------------------------------------------------
+# Database Configuration
+# -----------------------------------------------------------------------------
+database:
+  host: localhost
+  port: 8529
+  database: NestedLearning
+  username: root
+  # password: always from ARANGO_PASSWORD env var
+
+  sockets:
+    readonly: /run/metis/readonly/arangod.sock
+    readwrite: /run/metis/readwrite/arangod.sock
+
+# -----------------------------------------------------------------------------
+# Embedding Service Configuration
+# -----------------------------------------------------------------------------
+embedding:
+  service:
+    socket: /run/hades/embedder.sock
+    fallback_to_local: true
+    timeout_ms: 30000
+    idle_timeout: 0
+
+  model:
+    name: jinaai/jina-embeddings-v4
+    dimension: 2048
+    max_tokens: 32768
+    use_fp16: true
+    normalize: true
+
+  batch:
+    size: 48          # tuned for A6000 49GB VRAM; reduce to 8 on 16GB GPUs
+    size_small: 8     # conservative fallback for smaller GPUs
+
+  chunking:
+    size_tokens: 500
+    overlap_tokens: 200  # 40% overlap — high for late-chunking recall with Jina V4
+
+# -----------------------------------------------------------------------------
+# GPU Configuration
+# -----------------------------------------------------------------------------
+gpu:
+  # cuda:2 = RTX 2000 Ada 16GB (dedicated inference GPU)
+  # cuda:0 + cuda:1 = A6000 pair reserved for training
+  # Override with: --gpu N or CUDA_VISIBLE_DEVICES
+  device: cuda:2
+  enabled: true
+
+# -----------------------------------------------------------------------------
+# Vector Index Settings
+# -----------------------------------------------------------------------------
+vector_index:
+  default_n_probe: 10
+  metric: cosine
+  auto_n_lists: true
+
+# -----------------------------------------------------------------------------
+# Search Defaults
+# -----------------------------------------------------------------------------
+search:
+  limit: 10
+  max_limit: 100
+  hybrid:
+    vector_weight: 0.7
+    keyword_weight: 0.3
+
+# -----------------------------------------------------------------------------
+# Relevance Feedback (Rocchio Algorithm)
+# -----------------------------------------------------------------------------
+rocchio:
+  alpha: 1.0
+  beta: 0.75
+  gamma: 0.15
+
+# -----------------------------------------------------------------------------
+# Sync Settings
+# -----------------------------------------------------------------------------
+sync:
+  default_lookback_days: 7
+  batch_size: 8
+  max_results: 1000
+
+# -----------------------------------------------------------------------------
+# ArXiv Data Paths
+# -----------------------------------------------------------------------------
+arxiv:
+  # Environment-specific — override with HADES_PDF_PATH / HADES_LATEX_PATH
+  pdf_base_path: /bulk-store/arxiv-data/pdf
+  latex_base_path: /bulk-store/arxiv-data/src

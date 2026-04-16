@@ -296,6 +296,13 @@ async fn structural_rerank(
         return Ok(results.to_vec());
     }
 
+    // Guard against mixed embedding dimensions.
+    let expected_dim = top_vecs[0].len();
+    if top_vecs.iter().any(|v| v.len() != expected_dim) {
+        info!("mismatched structural embedding dimensions, skipping fusion");
+        return Ok(results.to_vec());
+    }
+
     let centroid = compute_centroid(&top_vecs);
 
     // Blend scores.
@@ -311,6 +318,7 @@ async fn structural_rerank(
 
             let structural_sim = emb_map
                 .get(key)
+                .filter(|emb| emb.len() == expected_dim)
                 .map(|emb| cosine_similarity_f32(&centroid, emb) as f64)
                 .unwrap_or(0.0);
 

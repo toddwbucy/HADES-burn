@@ -38,17 +38,20 @@ embedding:
     normalize: true
 
   batch:
-    size: 48
-    size_small: 8
+    size: 48          # tuned for A6000 49GB VRAM; reduce to 8 on 16GB GPUs
+    size_small: 8     # conservative fallback for smaller GPUs
 
   chunking:
     size_tokens: 500
-    overlap_tokens: 200
+    overlap_tokens: 200  # 40% overlap — high for late-chunking recall with Jina V4
 
 # -----------------------------------------------------------------------------
 # GPU Configuration
 # -----------------------------------------------------------------------------
 gpu:
+  # cuda:2 = RTX 2000 Ada 16GB (dedicated inference GPU)
+  # cuda:0 + cuda:1 = A6000 pair reserved for training
+  # Override with: --gpu N or CUDA_VISIBLE_DEVICES
   device: cuda:2
   enabled: true
 
@@ -90,5 +93,6 @@ sync:
 # ArXiv Data Paths
 # -----------------------------------------------------------------------------
 arxiv:
+  # Environment-specific — override with HADES_PDF_PATH / HADES_LATEX_PATH
   pdf_base_path: /bulk-store/arxiv-data/pdf
   latex_base_path: /bulk-store/arxiv-data/src

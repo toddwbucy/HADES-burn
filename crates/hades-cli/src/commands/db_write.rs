@@ -167,21 +167,17 @@ pub async fn run_create_collection(
 ///
 /// CLI-only — creates a separate ArangoClient targeting `_system` because
 /// ArangoDB's `POST /_api/database` requires the system database context.
+///
+/// Uses `ArangoClient::from_config` with the database overridden to `_system`
+/// so that socket/TCP fallback and auth behavior match all other commands.
 pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()> {
     config.require_writable_database()?;
     use hades_core::db::ArangoClient;
 
-    let socket_path = config
-        .effective_socket(false)
-        .context("no ArangoDB socket configured for write operations")?;
-
-    let password = config.database.password.as_deref().unwrap_or("");
-    let client = ArangoClient::with_socket(
-        socket_path.into(),
-        "_system",
-        &config.database.username,
-        password,
-    );
+    let mut system_config = config.clone();
+    system_config.database.name = "_system".to_string();
+    let client = ArangoClient::from_config(&system_config, false)
+        .context("failed to connect to ArangoDB for database creation")?;
 
     let body = json!({ "name": name });
     let resp = client

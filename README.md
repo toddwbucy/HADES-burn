@@ -6,7 +6,7 @@ Rust rewrite of the [HADES](https://github.com/toddwbucy) knowledge graph system
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                  hades-burn (CLI)                     │
+│                  hades (CLI)                     │
 │          14 top-level commands, ~85 subcommands       │
 └──────────────┬───────────────────────┬───────────────┘
                │                       │
@@ -41,7 +41,7 @@ cargo test               # ~350 tests
 cargo clippy             # lint
 ```
 
-Binary: `target/debug/hades-burn` (or `target/release/hades-burn`)
+Binary: `target/debug/hades` (or `target/release/hades`)
 
 Requires Rust edition 2024 (nightly or stable 1.85+).
 
@@ -49,32 +49,32 @@ Requires Rust edition 2024 (nightly or stable 1.85+).
 
 ```bash
 # Target a database (all commands)
-hades-burn --db NestedLearning db query "attention mechanism" -n 5
+hades --db NestedLearning db query "attention mechanism" -n 5
 
 # Semantic search (vector + hybrid)
-hades-burn --db mydb db query "graph neural networks" --hybrid -n 10
+hades --db mydb db query "graph neural networks" --hybrid -n 10
 
 # Get a document
-hades-burn --db mydb db get papers arxiv_2501_00663
+hades --db mydb db get papers arxiv_2501_00663
 
 # Graph traversal
-hades-burn --db mydb db graph traverse "papers/arxiv_2501_00663" -d outbound --max-depth 3
+hades --db mydb db graph traverse "papers/arxiv_2501_00663" -d outbound --max-depth 3
 
 # Ingest a codebase (AST analysis + optional embedding)
-hades-burn --db mydb codebase ingest /path/to/project --lang rust
+hades --db mydb codebase ingest /path/to/project --lang rust
 
 # Initialize a database schema
-hades-burn --db mydb db schema init --seed nl
+hades --db mydb db schema init --seed nl
 
 # Materialize typed edges from cross-reference fields
-hades-burn --db mydb db graph materialize --dry-run
+hades --db mydb db graph materialize --dry-run
 
 # Task management
-hades-burn --db bident_burn task list
-hades-burn --db bident_burn task create --title "New feature" --priority high
+hades --db bident_burn task list
+hades --db bident_burn task create --title "New feature" --priority high
 
 # Start the daemon (Unix socket query server)
-hades-burn daemon
+hades daemon
 ```
 
 All output is JSON to stdout. Progress and logs go to stderr.

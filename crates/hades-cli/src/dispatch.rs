@@ -8,18 +8,37 @@ use std::process::{Command, ExitStatus};
 
 use anyhow::{Context, Result};
 
-/// Build and execute a `hades` subprocess with the given arguments.
+/// Resolve the path to the Python HADES CLI.
+///
+/// Checks `HADES_PYTHON_BIN` env var first, then falls back to the
+/// known production venv path.  This avoids recursion now that the
+/// Rust binary is also named `hades`.
+fn python_hades_path() -> Result<std::path::PathBuf> {
+    if let Some(bin) = std::env::var_os("HADES_PYTHON_BIN") {
+        return Ok(std::path::PathBuf::from(bin));
+    }
+    let home = std::env::var_os("HOME")
+        .context("HOME is not set; set HADES_PYTHON_BIN to the Python hades path")?;
+    Ok(std::path::PathBuf::from(home).join(".local/share/hades-stable/venv/bin/hades"))
+}
+
+/// Build and execute a Python `hades` subprocess with the given arguments.
 ///
 /// Inherits stdin/stdout/stderr so the user sees output directly.
 /// Returns the child's exit status so the caller can propagate it.
 pub fn dispatch(args: &[&str]) -> Result<ExitStatus> {
-    let status = Command::new("hades")
+    let bin = python_hades_path()?;
+    let status = Command::new(&bin)
         .args(args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .context("failed to execute `hades` — is the Python HADES CLI installed?")?;
+        .with_context(|| format!(
+            "failed to execute Python HADES CLI at {:?} — \
+             set HADES_PYTHON_BIN to override",
+            bin,
+        ))?;
     Ok(status)
 }
 

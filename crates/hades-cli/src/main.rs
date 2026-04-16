@@ -23,7 +23,7 @@ use commands::{
 /// HADES-Burn — AI model interface for semantic search over academic papers,
 /// backed by ArangoDB with vector similarity and graph traversal.
 #[derive(Parser)]
-#[command(name = "hades-burn", version, about)]
+#[command(name = "hades", version, about)]
 struct Cli {
     /// Target ArangoDB database name (overrides config/env).
     #[arg(long = "database", alias = "db", global = true)]

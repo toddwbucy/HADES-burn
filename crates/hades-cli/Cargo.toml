@@ -7,7 +7,7 @@ license.workspace = true
 description = "CLI entry point for HADES-Burn"
 
 [[bin]]
-name = "hades-burn"
+name = "hades"
 path = "src/main.rs"
 
 [dependencies]

@@ -60,7 +60,7 @@ pub struct IngestFailure {
 /// Run the ingest command.
 ///
 /// This is the entry point called from `main.rs` when the user runs
-/// `hades-burn ingest ...`.
+/// `hades ingest ...`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: &HadesConfig,

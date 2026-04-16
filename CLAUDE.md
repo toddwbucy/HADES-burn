@@ -13,11 +13,11 @@ cargo test               # run all tests
 cargo clippy             # lint
 ```
 
-Binary: `target/debug/hades-burn` (or `target/release/hades-burn`)
+Binary: `target/debug/hades` (or `target/release/hades`)
 
 ## Workspace Crates
 
-- **hades-cli** — Binary entry point (`hades-burn`). CLI parsing (clap), dispatch.
+- **hades-cli** — Binary entry point (`hades`). CLI parsing (clap), dispatch.
 - **hades-core** — Library. Config, ArangoDB client, graph engine, pipeline logic.
 - **hades-proto** — Library. gRPC/protobuf definitions for Persephone provider protocol.
 - **hades-prefetch** — Library. Async graph-aware batch prefetcher for training.

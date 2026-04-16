@@ -13,14 +13,13 @@ use anyhow::{Context, Result};
 /// Checks `HADES_PYTHON_BIN` env var first, then falls back to the
 /// known production venv path.  This avoids recursion now that the
 /// Rust binary is also named `hades`.
-fn python_hades_path() -> std::ffi::OsString {
-    std::env::var_os("HADES_PYTHON_BIN").unwrap_or_else(|| {
-        let mut p = std::path::PathBuf::from(
-            std::env::var_os("HOME").unwrap_or_default(),
-        );
-        p.push(".local/share/hades-stable/venv/bin/hades");
-        p.into_os_string()
-    })
+fn python_hades_path() -> Result<std::path::PathBuf> {
+    if let Some(bin) = std::env::var_os("HADES_PYTHON_BIN") {
+        return Ok(std::path::PathBuf::from(bin));
+    }
+    let home = std::env::var_os("HOME")
+        .context("HOME is not set; set HADES_PYTHON_BIN to the Python hades path")?;
+    Ok(std::path::PathBuf::from(home).join(".local/share/hades-stable/venv/bin/hades"))
 }
 
 /// Build and execute a Python `hades` subprocess with the given arguments.
@@ -28,7 +27,7 @@ fn python_hades_path() -> std::ffi::OsString {
 /// Inherits stdin/stdout/stderr so the user sees output directly.
 /// Returns the child's exit status so the caller can propagate it.
 pub fn dispatch(args: &[&str]) -> Result<ExitStatus> {
-    let bin = python_hades_path();
+    let bin = python_hades_path()?;
     let status = Command::new(&bin)
         .args(args)
         .stdin(std::process::Stdio::inherit())

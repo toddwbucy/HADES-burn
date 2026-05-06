@@ -1,0 +1,46 @@
+[Unit]
+Description=HADES Embedding Service (Jina V4 / OpenAI-compatible HTTP)
+Documentation=https://github.com/r3d91ll/HADES-Burn
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hades
+Group=hades
+# This service does NOT need ArangoDB or weaver-admin access — it only
+# serves embeddings to local clients (HADES daemon, etc.) over HTTP.
+# The HADES service user has those memberships for other roles
+# (DBA tooling, forensic embedder access); the embedder service itself
+# does not exercise them.
+
+WorkingDirectory=/home/todd/olympus/HADES-Burn/services
+ExecStart=/home/todd/olympus/HADES-Burn/services/.venv/bin/python -m embedding.http_server
+
+EnvironmentFile=-/etc/hades/embedder.conf
+
+Restart=on-failure
+RestartSec=10
+
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# /var/cache/hades for HF model cache; ProtectHome=read-only blocks ~/.cache.
+CacheDirectory=hades
+CacheDirectoryMode=0755
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/cache/hades
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hades-embedder
+
+[Install]
+WantedBy=multi-user.target

@@ -17,15 +17,20 @@ database:
   # password: always from ARANGO_PASSWORD env var
 
   sockets:
-    readonly: /run/metis/readonly/arangod.sock
-    readwrite: /run/metis/readwrite/arangod.sock
+    # metis proxy is planned but not built; talk to arangod directly for now.
+    # Both readonly and readwrite point at the same socket — DB-level ACLs on
+    # the HADES ArangoDB user enforce read-only on production DBs.
+    readonly: /run/arangodb3/arangodb.sock
+    readwrite: /run/arangodb3/arangodb.sock
 
 # -----------------------------------------------------------------------------
 # Embedding Service Configuration
 # -----------------------------------------------------------------------------
 embedding:
   service:
-    socket: /run/hades/embedder.sock
+    # Embedder is owned by WeaverTools; HADES is an opportunistic consumer.
+    # Reachable via `weaver-admin` supplementary group on the HADES service user.
+    socket: /run/weaver/embedder.sock
     fallback_to_local: true
     timeout_ms: 30000
     idle_timeout: 0

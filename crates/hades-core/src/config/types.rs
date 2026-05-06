@@ -247,7 +247,7 @@ pub struct EmbeddingServiceConfig {
 impl Default for EmbeddingServiceConfig {
     fn default() -> Self {
         Self {
-            socket: "/run/hades/embedder.sock".into(),
+            socket: "/run/weaver/embedder.sock".into(),
             fallback_to_local: true,
             timeout_ms: 30000,
             idle_timeout: 0,

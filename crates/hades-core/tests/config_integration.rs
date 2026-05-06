@@ -40,15 +40,18 @@ fn load_fixture_hades_yaml() {
     assert_eq!(config.database.username, "root");
     assert_eq!(
         config.database.sockets.readonly.as_deref(),
-        Some("/run/hades/readonly/arangod.sock")
+        Some("/run/arangodb3/arangodb.sock")
     );
     assert_eq!(
         config.database.sockets.readwrite.as_deref(),
-        Some("/run/hades/readwrite/arangod.sock")
+        Some("/run/arangodb3/arangodb.sock")
     );
 
-    // Embedding service
-    assert_eq!(config.embedding.service.socket, "/run/hades/embedder.sock");
+    // Embedding service — owned by WeaverTools, accessed via weaver-admin group.
+    assert_eq!(
+        config.embedding.service.socket,
+        "/run/weaver/embedder.sock"
+    );
     assert!(config.embedding.service.fallback_to_local);
     assert_eq!(config.embedding.service.timeout_ms, 30000);
     assert_eq!(config.embedding.service.idle_timeout, 0);

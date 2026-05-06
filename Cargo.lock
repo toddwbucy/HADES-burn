@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "hades-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "hades-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -733,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "hades-prefetch"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "hades-core",
  "hades-proto",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "hades-proto"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "prost",
  "prost-types",

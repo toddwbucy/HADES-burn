@@ -247,7 +247,11 @@ pub struct EmbeddingServiceConfig {
 impl Default for EmbeddingServiceConfig {
     fn default() -> Self {
         Self {
-            socket: "/run/weaver/embedder.sock".into(),
+            // OpenAI-compatible HTTP endpoint. vLLM default port is 8000;
+            // override per machine in /etc/hades/hades.yaml. For Weaver
+            // coexistence, point at a hades-weaver-bridge Unix socket
+            // (`unix:///run/...`) instead.
+            socket: "http://localhost:8000/v1".into(),
             fallback_to_local: true,
             timeout_ms: 30000,
             idle_timeout: 0,

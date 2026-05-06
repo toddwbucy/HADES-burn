@@ -28,9 +28,13 @@ database:
 # -----------------------------------------------------------------------------
 embedding:
   service:
-    # Embedder is owned by WeaverTools; HADES is an opportunistic consumer.
-    # Reachable via `weaver-admin` supplementary group on the HADES service user.
-    socket: /run/weaver/embedder.sock
+    # OpenAI-compatible embedding endpoint (`POST {endpoint}/embeddings`,
+    # `GET {endpoint}/models`). HADES is engine-agnostic at the protocol
+    # layer; any backend exposing `/v1/embeddings` works (vLLM, TEI, etc.).
+    #
+    # For Weaver coexistence, run `hades-weaver-bridge` and point at:
+    #   socket: unix:///run/hades-weaver-bridge/v1
+    socket: http://localhost:8000/v1
     fallback_to_local: true
     timeout_ms: 30000
     idle_timeout: 0

@@ -47,10 +47,10 @@ fn load_fixture_hades_yaml() {
         Some("/run/arangodb3/arangodb.sock")
     );
 
-    // Embedding service — owned by WeaverTools, accessed via weaver-admin group.
+    // Embedding service — OpenAI-compatible HTTP endpoint (vLLM-style).
     assert_eq!(
         config.embedding.service.socket,
-        "/run/weaver/embedder.sock"
+        "http://localhost:8000/v1"
     );
     assert!(config.embedding.service.fallback_to_local);
     assert_eq!(config.embedding.service.timeout_ms, 30000);

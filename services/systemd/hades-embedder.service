@@ -35,6 +35,11 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
+# If HF_HOME is set to a path outside /var/cache/hades (e.g.
+# /opt/weaver/huggingface for shared-cache deployments), add that path here:
+#   ReadWritePaths=/var/cache/hades /opt/weaver/huggingface
+# Without this, ProtectSystem=strict makes the cache directory read-only and
+# transformers' lock-file creation fails on first model load.
 ReadWritePaths=/var/cache/hades
 
 # Logging

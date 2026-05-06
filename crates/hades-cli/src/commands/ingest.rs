@@ -131,7 +131,7 @@ pub async fn run(
         .await
         .context("failed to connect to extraction service")?;
 
-    let embedder = EmbeddingClient::connect_default()
+    let embedder = EmbeddingClient::connect_at(&config.embedding.service.socket)
         .await
         .context("failed to connect to embedding service")?;
 
@@ -535,9 +535,7 @@ async fn document_exists(
 /// Determine the embedding task based on explicit --task flag or file extensions.
 fn determine_embed_task(task: Option<&str>, inputs: &[InputKind]) -> String {
     if let Some(t) = task {
-        if t == "code" {
-            return "retrieval.code".to_string();
-        }
+        // "code" is a valid Jina V4 task as-is (its own LoRA adapter); pass through unchanged.
         return t.to_string();
     }
 
@@ -551,7 +549,7 @@ fn determine_embed_task(task: Option<&str>, inputs: &[InputKind]) -> String {
         .collect();
 
     if !file_inputs.is_empty() && file_inputs.iter().all(|p| is_code_file(p)) {
-        return "retrieval.code".to_string();
+        return "code".to_string();
     }
 
     "retrieval.passage".to_string()

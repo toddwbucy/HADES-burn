@@ -122,7 +122,7 @@ pub async fn run(
         .context("failed to connect to ArangoDB")?;
 
     // Embedding is optional — ingest proceeds without vectors if the service is unavailable.
-    let embedder = match EmbeddingClient::connect_default().await {
+    let embedder = match EmbeddingClient::connect_at(&config.embedding.service.socket).await {
         Ok(client) => {
             info!("connected to embedding service");
             Some(client)
@@ -682,7 +682,7 @@ async fn ingest_file(
             match emb
                 .embed(
                     &chunk_texts,
-                    "retrieval.code",
+                    "code",
                     Some(config.embedding.batch.size),
                 )
                 .await

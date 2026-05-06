@@ -16,7 +16,7 @@ fn test_config_defaults() {
     // Unix socket variant is opt-in for the hades-weaver-bridge use case.
     match &config.endpoint {
         EmbeddingEndpoint::Tcp(url) => {
-            assert_eq!(url, "http://localhost:8000/v1");
+            assert_eq!(url, "http://localhost:8087/v1");
         }
         EmbeddingEndpoint::Unix(_) => panic!("expected Tcp/HTTP endpoint by default"),
     }

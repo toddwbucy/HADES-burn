@@ -18,9 +18,12 @@ dependencies = [
     # ML - Extraction
     "docling>=2.0",
 
-    # ML - Embedding
+    # ML - Embedding (Jina V4)
     "torch>=2.0,<3.0",
     "transformers>=4.35,<5.0",
+    "peft>=0.7",          # Required by Jina V4's custom modeling code (LoRA adapters)
+    "accelerate>=0.20",   # transformers/peft helper; ensures device placement works on some configs
+    "pillow>=10.0",       # Multimodal: PIL.Image used for image inputs
 
     # Shared
     "numpy>=1.24",

@@ -50,7 +50,7 @@ fn load_fixture_hades_yaml() {
     // Embedding service — OpenAI-compatible HTTP endpoint (vLLM-style).
     assert_eq!(
         config.embedding.service.socket,
-        "http://localhost:8000/v1"
+        "http://localhost:8087/v1"
     );
     assert!(config.embedding.service.fallback_to_local);
     assert_eq!(config.embedding.service.timeout_ms, 30000);

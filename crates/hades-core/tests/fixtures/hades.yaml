@@ -13,7 +13,7 @@ database:
 
 embedding:
   service:
-    socket: http://localhost:8000/v1
+    socket: http://localhost:8087/v1
     fallback_to_local: true
     timeout_ms: 30000
     idle_timeout: 0

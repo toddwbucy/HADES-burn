@@ -78,8 +78,10 @@ pub enum EmbeddingEndpoint {
 /// Default model identifier. Jina V4 is HADES's reference model; future
 /// capability-equivalent models can be substituted by setting this.
 const DEFAULT_MODEL: &str = "jinaai/jina-embeddings-v4";
-/// Default endpoint: vLLM-style local URL. Override via config or env.
-const DEFAULT_ENDPOINT_URL: &str = "http://localhost:8000/v1";
+/// Default endpoint: HADES-owned embedder on local URL. Port 8087 avoids
+/// collisions with vLLM/uvicorn (8000) and weaver-serve LLM API (8080).
+/// Override via config or `HADES_EMBEDDER_SOCKET` env var.
+const DEFAULT_ENDPOINT_URL: &str = "http://localhost:8087/v1";
 
 impl Default for EmbeddingClientConfig {
     fn default() -> Self {

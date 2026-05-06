@@ -77,7 +77,7 @@ Primary embedding endpoint. Always late-chunked. Shape diverges from OpenAI.
 | `input` | string \| string[] | yes | — | Text(s) to embed. Each input is independently late-chunked |
 | `encoding_format` | string | no | `"float"` | Reserved for future encoding variants |
 | `task` | string | no | `"retrieval.passage"` | Jina V4 LoRA adapter; see Tasks |
-| `images` | string[] | no | `[]` | Per-input base64-encoded images for multimodal embedding. Length must equal `input` length when provided |
+| `images` | string[] | no | `[]` | Per-input base64-encoded images for multimodal embedding. When provided, `len(images)` must equal the number of inputs — `1` if `input` is a string, otherwise `len(input)` |
 | `chunk_size_tokens` | int | no | backend-configured | Late-chunking chunk size in tokens |
 | `chunk_overlap_tokens` | int | no | backend-configured | Late-chunking overlap in tokens |
 
@@ -168,9 +168,9 @@ PE-API-specific error codes:
 |------|------|---------|
 | `PE_INVALID_TASK` | 400 | `task` value not in backend's `supported_tasks` |
 | `PE_MULTIMODAL_UNSUPPORTED` | 400 | `images` provided but backend serves text-only model |
-| `PE_INPUT_IMAGES_LENGTH_MISMATCH` | 400 | `len(images) != len(input)` |
+| `PE_INPUT_IMAGES_LENGTH_MISMATCH` | 400 | `len(images) != input_count`, where `input_count = 1` if `input` is a string, else `len(input)` |
 | `PE_INPUT_TOO_LARGE` | 400 | An input exceeds backend's max-context fallback handling |
-| `PE_MODEL_NOT_LOADED` | 503 | Model is unloaded (e.g., idle-timeout); retry after warmup |
+| `PE_MODEL_NOT_LOADED` | 503 | Model is unloaded (e.g., idle-timeout); retry after warm-up |
 | `PE_BACKEND_OOM` | 503 | GPU OOM on this batch; retry with smaller batch or wait |
 
 ## Cohort identity (sketched, deferred to v1.1)
@@ -198,11 +198,15 @@ Concrete shape lands once HADES's forensic / multi-cohort query work begins (see
 
 A conforming PE-API v1.0 backend MUST:
 
-1. Implement `GET /v1/models` returning at least one model with the Jina V4 capability profile (2048-dim, 32k context, late-chunking-capable, supports the four standard tasks).
+1. Implement `GET /v1/models` returning at least one model with the Jina V4 capability profile (2048-dim, 32k context, late-chunking-capable). The model's `supported_tasks` field MUST accurately list the tasks the backend can serve — neither over- nor under-claiming.
 2. Implement `POST /v1/embeddings` returning chunk-array shape — even for single-chunk inputs.
-3. Honor `task` for adapter selection, OR reject `task` values it cannot serve with `PE_INVALID_TASK`. Silently routing to a wrong adapter is a SHOULD-NOT.
-4. Reject multimodal requests it cannot serve with `PE_MULTIMODAL_UNSUPPORTED` rather than silently producing text-only embeddings.
-5. Return HTTP 503 with `PE_MODEL_NOT_LOADED` when the model is unloaded; do not block clients on model warmup.
+3. Honor `task` for adapter selection when the value is listed in the model's `supported_tasks`. Reject `task` values not in `supported_tasks` with `PE_INVALID_TASK`. Silently routing to a different adapter is forbidden — the cost of "wrong adapter" silently degraded retrieval quality is much higher than a hard error.
+4. Reject multimodal requests it cannot serve (i.e., `images` provided to a text-only backend) with `PE_MULTIMODAL_UNSUPPORTED` rather than silently producing text-only embeddings.
+5. Return HTTP 503 with `PE_MODEL_NOT_LOADED` when the model is unloaded; do not block clients on model warm-up.
+
+A conforming PE-API v1.0 backend SHOULD:
+
+- Support all four standard tasks (`retrieval.passage`, `retrieval.query`, `text-matching`, `code`) where the loaded model is capable. Backends limited to a single pre-baked adapter are valid (they list a single task in `supported_tasks` and reject the others) but reduce HADES's retrieval quality and are NOT the recommended deployment shape.
 
 A conforming backend MAY:
 

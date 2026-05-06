@@ -3049,8 +3049,7 @@ mod handlers {
         config: &crate::config::HadesConfig,
         verbose: bool,
     ) -> Result<Value, HandlerError> {
-        use std::path::PathBuf;
-        use crate::persephone::embedding::{EmbeddingClient, EmbeddingClientConfig, EmbeddingEndpoint};
+        use crate::persephone::embedding::EmbeddingClient;
 
         // 1. ArangoDB health
         let health = pool.health_check().await;
@@ -3063,14 +3062,10 @@ mod handlers {
         // 2. Embedder probe — connect + info(), with 5-second timeout
         let socket_path = &config.embedding.service.socket;
         let embedder_info = {
-            let emb_config = EmbeddingClientConfig {
-                endpoint: EmbeddingEndpoint::Unix(PathBuf::from(socket_path)),
-                ..Default::default()
-            };
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 async {
-                    let client = EmbeddingClient::connect(emb_config).await?;
+                    let client = EmbeddingClient::connect_at(socket_path).await?;
                     client.info().await
                 },
             )
@@ -4474,7 +4469,7 @@ mod handlers {
     ) -> Result<Value, HandlerError> {
         use crate::persephone::embedding::EmbeddingClient;
 
-        let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+        let client = EmbeddingClient::connect_at(&config.embedding.service.socket)
             .await
             .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
         let result = client
@@ -4964,7 +4959,7 @@ mod handlers {
         let verify_result = smell_verify(pool, path, &[]).await?;
 
         // Embedding probe for each verified ref.
-        let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+        let client = EmbeddingClient::connect_at(&config.embedding.service.socket)
             .await
             .map_err(|e| HandlerError::ServiceError(format!("embedding connect: {e}")))?;
         let mut probes = Vec::new();

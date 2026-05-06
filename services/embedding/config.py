@@ -8,9 +8,17 @@ from dataclasses import dataclass
 
 @dataclass
 class EmbeddingConfig:
-    """Configuration for the embedding service."""
+    """Configuration for the embedding service.
 
-    socket_path: str = "/run/hades/embedder.sock"
+    The HTTP server binds to (host, port). Unix-domain-socket binding was
+    supported by an earlier gRPC implementation; that path is intentionally
+    omitted now — HADES's latency margin is generous enough that TCP
+    localhost is fine, and the simpler config surface is worth more than
+    UDS would buy here.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8000
     device: str = "cuda:2"
     model_name: str = "jinaai/jina-embeddings-v4"
     use_fp16: bool = True
@@ -21,6 +29,7 @@ class EmbeddingConfig:
     def from_env(cls) -> EmbeddingConfig:
         raw_batch = os.environ.get("HADES_EMBEDDER_BATCH_SIZE", "")
         raw_idle = os.environ.get("HADES_EMBEDDER_IDLE_TIMEOUT", "")
+        raw_port = os.environ.get("HADES_EMBEDDER_PORT", "")
 
         try:
             batch_size = int(raw_batch) if raw_batch else cls.batch_size
@@ -36,10 +45,16 @@ class EmbeddingConfig:
                 f"HADES_EMBEDDER_IDLE_TIMEOUT must be a number, got {raw_idle!r}"
             ) from None
 
+        try:
+            port = int(raw_port) if raw_port else cls.port
+        except ValueError:
+            raise ValueError(
+                f"HADES_EMBEDDER_PORT must be an integer, got {raw_port!r}"
+            ) from None
+
         return cls(
-            socket_path=os.environ.get(
-                "HADES_EMBEDDER_SOCKET", cls.socket_path
-            ),
+            host=os.environ.get("HADES_EMBEDDER_HOST", cls.host),
+            port=port,
             device=os.environ.get("HADES_EMBEDDER_DEVICE", cls.device),
             model_name=os.environ.get(
                 "HADES_EMBEDDER_MODEL", cls.model_name

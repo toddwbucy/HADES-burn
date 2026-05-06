@@ -1,0 +1,46 @@
+[Unit]
+Description=HADES Knowledge-Graph Daemon
+Documentation=https://github.com/r3d91ll/HADES-Burn
+After=arangodb3.service
+Wants=arangodb3.service
+# NOTE: deliberately NO After=weaver-embedder.service. HADES is a DBA tool
+# that uses the embedder opportunistically when ingesting; embedder
+# unavailability must not block the daemon's primary admin/query functions.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hades
+Group=hades
+# weaver-admin: opportunistic permission for /run/weaver/embedder.sock (ingest)
+# arangodb:     constitutive permission for /run/arangodb3/arangodb.sock (DBA)
+SupplementaryGroups=weaver-admin arangodb
+
+# Runtime directory created by tmpfiles.d/hades.conf; this is belt-and-suspenders.
+RuntimeDirectory=hades
+RuntimeDirectoryMode=0755
+
+ExecStart=/usr/local/bin/hades daemon --socket /run/hades/hades.sock
+
+EnvironmentFile=-/etc/hades/daemon.conf
+
+Restart=on-failure
+RestartSec=10
+
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+# Embedder + arango sockets are accessed via group permission, not path
+# permission, so they don't need ReadWritePaths entries.
+ReadWritePaths=/run/hades
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hades-daemon
+
+[Install]
+WantedBy=multi-user.target

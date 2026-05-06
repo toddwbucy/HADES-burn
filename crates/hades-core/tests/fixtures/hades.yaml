@@ -8,12 +8,12 @@ database:
   database: NestedLearning
   username: root
   sockets:
-    readonly: /run/hades/readonly/arangod.sock
-    readwrite: /run/hades/readwrite/arangod.sock
+    readonly: /run/arangodb3/arangodb.sock
+    readwrite: /run/arangodb3/arangodb.sock
 
 embedding:
   service:
-    socket: /run/hades/embedder.sock
+    socket: http://localhost:8000/v1
     fallback_to_local: true
     timeout_ms: 30000
     idle_timeout: 0

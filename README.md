@@ -33,14 +33,14 @@ For the research questions HADES-Burn was built to investigate, see [RESEARCH_GO
 ```
 
 **External services** (GPU-bound, Python):
-- Embedder — Jina V4 (Qwen2.5-VL-3B + LoRA) via gRPC on `/run/hades/embedder.sock`
+- Embedder — Jina V4 (Qwen2.5-VL-3B + LoRA) via OpenAI-compatible HTTP on `http://localhost:8087/v1` (HADES-owned FastAPI service on dedicated GPU). The contract is the [Persephone Embedding API v1](docs/persephone-embedding-api.md).
 - Extractor — Docling VLM via gRPC on `/run/hades/extractor.sock`
 
 **Database**: ArangoDB over Unix socket at `/run/arangodb3/arangodb.sock`.
 
 ## Design Decisions Relevant to the Research Questions
 
-**Unix sockets end-to-end.** Every transport in the system — client to daemon, daemon to database, daemon to embedder, daemon to extractor — uses a Unix domain socket. There is no HTTP or TCP path in the query hot path. This is the single most consequential latency decision and sets the floor for what the rest of the system can achieve.
+**Unix sockets in the hot query path.** The query hot path — CLI client to daemon at `/run/hades/hades.sock`, daemon to ArangoDB at `/run/arangodb3/arangodb.sock` — uses Unix domain sockets. This is the load-bearing latency decision for query workloads and sets the floor for what the rest of the system can achieve. The embedder takes a different transport choice (HTTP-over-TCP localhost) because retrieval ingest is not latency-bound the same way and the OpenAI-compatible HTTP contract is what makes HADES engine-agnostic — see [PE-API v1](docs/persephone-embedding-api.md). The extractor remains on a Unix socket for now.
 
 **Closed operation vocabulary for model agents.** Models do not write raw AQL against HADES-Burn. The daemon exposes a bounded set of pseudo-code operations (`search`, `traverse`, `neighbors`, `materialize`, and so on) that are translated to AQL internally. The vocabulary is deliberately aligned with the training distribution of 24–32B-parameter Mistral and Qwen models, so that operation selection is reliable without task-specific fine-tuning. This also functions as a guardrail: the action space available to a model agent is finite and inspectable. See [docs/model-operation-vocabulary.md](docs/model-operation-vocabulary.md).
 
@@ -61,7 +61,7 @@ For low-latency local deployments, HADES-Burn connects to ArangoDB over a Unix d
 - Rust edition 2024 (stable 1.85+)
 
 **Optional — only required for their respective command paths:**
-- Jina V4 embedder service on a Unix socket (default `/run/hades/embedder.sock`) — required for `hades embed`, `hades codebase ingest --embed`, and hybrid-search queries.
+- Jina V4 embedder service exposing the [PE-API v1 HTTP contract](docs/persephone-embedding-api.md) (default `http://localhost:8087/v1`) — required for `hades embed`, `hades codebase ingest --embed`, and hybrid-search queries. Reference implementation in `services/embedding/http_server.py`. Override per-machine via `embedding.service.socket` in `hades.yaml` or `HADES_EMBEDDER_SOCKET` env var; supports `http://`, `https://`, `unix://`, and bare-path endpoint forms (the latter intended for the future `hades-weaver-bridge` Unix-socket adapter).
 - Docling extractor service on a Unix socket (default `/run/hades/extractor.sock`) — required for `hades extract` (paper / PDF ingestion).
 
 ## Build

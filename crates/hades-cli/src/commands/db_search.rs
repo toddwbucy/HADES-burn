@@ -60,7 +60,7 @@ pub async fn run_query(
     })?;
 
     // 2. Embed the query text.
-    let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+    let client = EmbeddingClient::connect_at(&config.embedding.service.socket)
         .await
         .context("failed to connect to embedding service — is it running?")?;
     let embed_result = client

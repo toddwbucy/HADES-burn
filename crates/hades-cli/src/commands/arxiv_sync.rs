@@ -48,7 +48,7 @@ pub async fn run(
     // Connect to services.
     let arxiv_client = ArxivClient::for_sync()
         .context("failed to create arXiv client")?;
-    let embed_client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket).await
+    let embed_client = EmbeddingClient::connect_at(&config.embedding.service.socket).await
         .context("failed to connect to embedding service")?;
 
     let sync_config = SyncConfig {

@@ -1,14 +1,19 @@
 [project]
 name = "hades-services"
 version = "0.1.0"
-description = "Persephone ML services for HADES — extraction and embedding over gRPC"
+description = "Persephone ML services for HADES — Docling extraction (gRPC) and Jina V4 embedding (OpenAI-compatible HTTP)"
 requires-python = ">=3.11"
 
 dependencies = [
-    # gRPC
+    # gRPC — used by the extraction service and (future) hades-weaver-bridge
     "grpcio>=1.62",
     "grpcio-tools>=1.62",
     "protobuf>=4.25",
+
+    # HTTP — used by the embedding service (OpenAI-compatible /v1/embeddings)
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.0",
 
     # ML - Extraction
     "docling>=2.0",

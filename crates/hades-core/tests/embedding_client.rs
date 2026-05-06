@@ -12,12 +12,15 @@ use hades_core::persephone::embedding::{
 #[test]
 fn test_config_defaults() {
     let config = EmbeddingClientConfig::default();
+    // Default is OpenAI-compatible HTTP endpoint (vLLM-style local URL).
+    // Unix socket variant is opt-in for the hades-weaver-bridge use case.
     match &config.endpoint {
-        EmbeddingEndpoint::Unix(path) => {
-            assert_eq!(path, &PathBuf::from("/run/hades/embedder.sock"));
+        EmbeddingEndpoint::Tcp(url) => {
+            assert_eq!(url, "http://localhost:8000/v1");
         }
-        EmbeddingEndpoint::Tcp(_) => panic!("expected Unix endpoint by default"),
+        EmbeddingEndpoint::Unix(_) => panic!("expected Tcp/HTTP endpoint by default"),
     }
+    assert_eq!(config.model, "jinaai/jina-embeddings-v4");
     assert_eq!(config.timeout.as_secs(), 300);
     assert_eq!(config.connect_timeout.as_secs(), 10);
 }

@@ -20,7 +20,7 @@ use super::output::{self, OutputFormat};
 
 /// `hades embed text TEXT [--format F]`
 pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> Result<()> {
-    let client = EmbeddingClient::connect_unix_at(&config.embedding.service.socket)
+    let client = EmbeddingClient::connect_at(&config.embedding.service.socket)
         .await
         .context("failed to connect to embedding service")?;
     let result = client
@@ -67,7 +67,7 @@ pub async fn run_embed_text(config: &HadesConfig, text: &str, format: &str) -> R
 pub async fn run_service_status(config: &HadesConfig) -> Result<()> {
     let socket = &config.embedding.service.socket;
 
-    match EmbeddingClient::connect_unix_at(socket).await {
+    match EmbeddingClient::connect_at(socket).await {
         Ok(client) => match client.info().await {
             Ok(info) => {
                 let status = if info.model_loaded { "ok" } else { "idle" };
@@ -136,7 +136,7 @@ pub async fn run_service_start(config: &HadesConfig, foreground: bool) -> Result
 
     // Wait briefly for the service to initialize, then probe health
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let available = match EmbeddingClient::connect_unix_at(&config.embedding.service.socket).await {
+    let available = match EmbeddingClient::connect_at(&config.embedding.service.socket).await {
         Ok(client) => client.health_check().await,
         Err(_) => false,
     };
@@ -187,7 +187,7 @@ pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
     let gpus = parse_nvidia_smi_output(&run_nvidia_smi()?);
 
     // Try to get embedder device from service info
-    let embedder_device = match EmbeddingClient::connect_unix_at(&config.embedding.service.socket).await {
+    let embedder_device = match EmbeddingClient::connect_at(&config.embedding.service.socket).await {
         Ok(client) => client.info().await.ok().map(|info| info.device),
         Err(_) => None,
     };

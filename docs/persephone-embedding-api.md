@@ -49,7 +49,10 @@ Discover the model the backend has loaded. OpenAI-compatible response shape.
 }
 ```
 
-`dimension`, `max_seq_length`, and `supported_tasks` are **PE-API extensions** to OpenAI's model object. Backends that do not surface these may omit them; clients should treat their absence as "ask via embedding round-trip."
+`dimension`, `max_seq_length`, and `supported_tasks` are **PE-API extensions** to OpenAI's model object.
+
+- **`supported_tasks` is REQUIRED.** Conforming backends MUST include it, accurately reflecting the tasks they can serve (see Implementation requirements). Clients use this field to validate `task` values before sending requests, avoiding unnecessary round-trips that would only fail with `PE_INVALID_TASK`.
+- **`dimension` and `max_seq_length` are OPTIONAL.** Backends MAY omit them; clients that need either value can determine it via an embedding round-trip (`/v1/embeddings` with a probe input).
 
 ### `POST /v1/embeddings`
 
@@ -162,11 +165,14 @@ Errors follow OpenAI's error envelope:
 }
 ```
 
+By convention, **4xx** HTTP responses (caller's fault) use `type: "invalid_request_error"`, and **5xx** responses (server's fault) use `type: "server_error"`. Unclassified or library-specific errors default to `"server_error"`. The `code` field is PE-API-specific and provides a more granular machine-readable identifier than `type`.
+
 PE-API-specific error codes:
 
 | Code | HTTP | Meaning |
 |------|------|---------|
 | `PE_INVALID_TASK` | 400 | `task` value not in backend's `supported_tasks` |
+| `PE_UNSUPPORTED_ENCODING_FORMAT` | 400 | `encoding_format` value other than `"float"` (only `"float"` is supported in v1.0) |
 | `PE_MULTIMODAL_UNSUPPORTED` | 400 | `images` provided but backend serves text-only model |
 | `PE_INPUT_IMAGES_LENGTH_MISMATCH` | 400 | `len(images) != input_count`, where `input_count = 1` if `input` is a string, else `len(input)` |
 | `PE_INPUT_TOO_LARGE` | 400 | An input exceeds backend's max-context fallback handling |
@@ -198,11 +204,12 @@ Concrete shape lands once HADES's forensic / multi-cohort query work begins (see
 
 A conforming PE-API v1.0 backend MUST:
 
-1. Implement `GET /v1/models` returning at least one model with the Jina V4 capability profile (2048-dim, 32k context, late-chunking-capable). The model's `supported_tasks` field MUST accurately list the tasks the backend can serve — neither over- nor under-claiming.
+1. Implement `GET /v1/models` returning at least one model with the Jina V4 capability profile (2048-dim, 32k context, late-chunking-capable). The model's `supported_tasks` field is REQUIRED and MUST accurately list the tasks the backend can serve — neither over- nor under-claiming.
 2. Implement `POST /v1/embeddings` returning chunk-array shape — even for single-chunk inputs.
 3. Honor `task` for adapter selection when the value is listed in the model's `supported_tasks`. Reject `task` values not in `supported_tasks` with `PE_INVALID_TASK`. Silently routing to a different adapter is forbidden — the cost of "wrong adapter" silently degraded retrieval quality is much higher than a hard error.
 4. Reject multimodal requests it cannot serve (i.e., `images` provided to a text-only backend) with `PE_MULTIMODAL_UNSUPPORTED` rather than silently producing text-only embeddings.
-5. Return HTTP 503 with `PE_MODEL_NOT_LOADED` when the model is unloaded; do not block clients on model warm-up.
+5. Reject `encoding_format` values other than `"float"` with `PE_UNSUPPORTED_ENCODING_FORMAT`. v1.0 supports only `"float"`; the field is reserved for future variants.
+6. Return HTTP 503 with `PE_MODEL_NOT_LOADED` when the model is unloaded; do not block clients on model warm-up.
 
 A conforming PE-API v1.0 backend SHOULD:
 
@@ -210,7 +217,7 @@ A conforming PE-API v1.0 backend SHOULD:
 
 A conforming backend MAY:
 
-- Surface `device`, `dimension`, `max_seq_length`, `supported_tasks` in `/v1/models` response.
+- Surface `device`, `dimension`, and `max_seq_length` in `/v1/models` response (these fields are optional; `supported_tasks` is required per item 1 above).
 - Pre-allocate / batch internally on top of the per-request `chunk_size_tokens`/`chunk_overlap_tokens` overrides.
 - Idle-unload the model after configurable timeout, returning `PE_MODEL_NOT_LOADED` until reload.
 

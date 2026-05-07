@@ -199,9 +199,8 @@ through to Python. Here's the current state as of 2026-04-08.
 |-------|----------|-------|
 | **System** | `status`, `orient`, `extract` | |
 | **Ingest** | `ingest`, `link` | |
-| **arXiv** | `arxiv sync`, `arxiv sync-status` | Legacy — arxiv becomes metadata field post-cutover |
 | **DB Read** | `query`, `get`, `count`, `list`, `collections`, `databases`, `check`, `recent`, `health`, `stats`, `export`, `index-status`, `aql` | `query` handles vector+hybrid natively |
-| **DB Write** | `insert`, `update`, `delete`, `purge`, `create`, `create-database`, `create-index`, `backfill-text` | |
+| **DB Write** | `insert`, `update`, `delete`, `purge`, `create`, `create-database`, `create-index` | |
 | **DB Graph** | `traverse`, `shortest-path`, `neighbors`, `list`, `create`, `drop`, `materialize` | `materialize` reads from RuntimeSchema (Phase 2) |
 | **DB Schema** | `init`, `list`, `show`, `version` | New — runtime ontology management (Phase 1-2) |
 | **DB Search** | `search` | Vector + hybrid search |

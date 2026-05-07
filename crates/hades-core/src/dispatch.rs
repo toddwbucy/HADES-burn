@@ -2301,7 +2301,9 @@ mod handlers {
     }
 
     /// Default graph name used when the caller doesn't specify one.
-    const DEFAULT_GRAPH: &str = "nl_concept_map";
+    /// Generic placeholder; per-database graph names should be passed explicitly
+    /// via the `graph` parameter on traversal commands.
+    const DEFAULT_GRAPH: &str = "default";
 
     /// Maximum traversal depth to prevent runaway queries.
     const MAX_TRAVERSAL_DEPTH: u32 = 20;
@@ -3092,17 +3094,7 @@ mod handlers {
             }
         };
 
-        // 3. Sync watermark
-        let sync_info = match crate::arxiv::sync_metadata::get_sync_status(pool).await {
-            Ok(Some(wm)) => json!({
-                "last_sync": wm.last_sync,
-                "total_synced": wm.total_synced,
-            }),
-            Ok(None) => json!({ "last_sync": null, "total_synced": 0 }),
-            Err(_) => json!({ "last_sync": null, "total_synced": 0, "error": "failed to read sync metadata" }),
-        };
-
-        // 4. Config summary
+        // 3. Config summary
         let writable = config.require_writable_database().is_ok();
         let config_info = json!({
             "database": config.effective_database(),
@@ -3122,7 +3114,6 @@ mod handlers {
                 "status": arango_status,
             },
             "embedder": embedder_info,
-            "sync": sync_info,
             "config": config_info,
         });
 

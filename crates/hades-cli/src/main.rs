@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use hades_core::config;
 
 use commands::{
-    arxiv::ArxivCmd, codebase::CodebaseCmd, db::DbCmd,
+    codebase::CodebaseCmd, db::DbCmd,
     embed::{EmbedCmd, EmbedGpuCmd, EmbedServiceCmd},
     graph_embed::GraphEmbedCmd, smell::SmellCmd, task::TaskCmd,
 };
@@ -75,7 +75,7 @@ enum Commands {
 
     /// Ingest documents into the knowledge base.
     Ingest {
-        /// Input arXiv IDs or file paths (can mix both).
+        /// Input file paths to ingest.
         inputs: Vec<String>,
 
         /// Custom document ID (single input only).
@@ -102,7 +102,7 @@ enum Commands {
         #[arg(long)]
         claims: Vec<String>,
 
-        /// Collection profile (arxiv, sync, default).
+        /// Collection profile name (must be defined in the runtime schema).
         #[arg(short = 'c', long)]
         collection: Option<String>,
 
@@ -132,10 +132,6 @@ enum Commands {
         #[arg(short = 'y', long)]
         force: bool,
     },
-
-    /// arXiv paper sync and status.
-    #[command(subcommand)]
-    Arxiv(ArxivCmd),
 
     /// Database operations — query, CRUD, indexes, and graph traversal.
     #[command(subcommand)]
@@ -241,25 +237,6 @@ fn main() -> anyhow::Result<()> {
                     Err(e)
                 }
             }
-        }
-        Commands::Arxiv(ArxivCmd::Sync {
-            from_date, categories, max_results, batch_size, incremental,
-        }) => {
-            init_tracing();
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::arxiv_sync::run(
-                &config,
-                from_date.as_deref(),
-                categories.as_deref(),
-                max_results,
-                batch_size,
-                incremental,
-            ))
-        }
-        Commands::Arxiv(ArxivCmd::SyncStatus { limit }) => {
-            init_tracing();
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::arxiv_sync::status(&config, limit))
         }
         Commands::Codebase(CodebaseCmd::Ingest { path, language, batch }) => {
             run_codebase_ingest(&config, path, language.as_deref(), batch)

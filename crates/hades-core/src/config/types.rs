@@ -4,7 +4,6 @@
 //! so missing YAML keys produce identical behavior to the Python system.
 
 use std::env;
-use std::path::PathBuf;
 
 use anyhow::bail;
 use serde::Deserialize;
@@ -27,7 +26,6 @@ pub struct HadesConfig {
     pub search: SearchConfig,
     pub rocchio: RocchioConfig,
     pub sync: SyncConfig,
-    pub arxiv: ArxivConfig,
     pub logging: LoggingConfig,
     pub batch_processing: BatchProcessingConfig,
 }
@@ -79,14 +77,6 @@ impl HadesConfig {
         // Embedding service
         if let Ok(v) = env::var("HADES_EMBEDDER_SOCKET") {
             self.embedding.service.socket = v;
-        }
-
-        // ArXiv paths
-        if let Ok(v) = env::var("HADES_PDF_PATH") {
-            self.arxiv.pdf_base_path = PathBuf::from(v);
-        }
-        if let Ok(v) = env::var("HADES_LATEX_PATH") {
-            self.arxiv.latex_base_path = PathBuf::from(v);
         }
 
         Ok(())
@@ -468,26 +458,6 @@ impl Default for BatchProcessingConfig {
             progress_interval_secs: 1.0,
             rate_limit_rps: 0.0,
             rate_limit_retries: 3,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ArXiv paths
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ArxivConfig {
-    pub pdf_base_path: PathBuf,
-    pub latex_base_path: PathBuf,
-}
-
-impl Default for ArxivConfig {
-    fn default() -> Self {
-        Self {
-            pdf_base_path: PathBuf::from("/bulk-store/arxiv-data/pdf"),
-            latex_base_path: PathBuf::from("/bulk-store/arxiv-data/src"),
         }
     }
 }

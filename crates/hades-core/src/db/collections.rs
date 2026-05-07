@@ -1,21 +1,23 @@
 //! Collection profiles mapping logical names to physical ArangoDB collections.
 //!
 //! Each profile groups three collections: metadata, chunks, and embeddings.
-//! Matches the Python `PROFILES` dict in `core/database/collections.py`.
+//! Profiles are intentionally generic — domain-specific schemas (NL papers,
+//! arxiv abstracts, etc.) belong in the database's own `hades_schema`
+//! collection, not as compiled-in profiles.
 
 use std::env;
 
 /// A set of three physical ArangoDB collection names for a logical collection.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CollectionProfile {
-    /// Document metadata collection (e.g. `arxiv_metadata`).
+    /// Document metadata collection (e.g. `documents`).
     pub metadata: &'static str,
-    /// Text chunk collection (e.g. `arxiv_abstract_chunks`).
+    /// Text chunk collection (e.g. `chunks`).
     pub chunks: &'static str,
-    /// Embedding vector collection (e.g. `arxiv_abstract_embeddings`).
+    /// Embedding vector collection (e.g. `embeddings`).
     pub embeddings: &'static str,
     /// Field name in chunks/embeddings that references the parent metadata
-    /// document key (e.g. `"paper_key"` for arxiv, `"file_key"` for codebase).
+    /// document key (e.g. `"paper_key"` for documents, `"file_key"` for codebase).
     pub foreign_key: &'static str,
 }
 
@@ -23,23 +25,9 @@ pub struct CollectionProfile {
 // Static profile registry
 // ---------------------------------------------------------------------------
 
-static ARXIV: CollectionProfile = CollectionProfile {
-    metadata: "arxiv_metadata",
-    chunks: "arxiv_abstract_chunks",
-    embeddings: "arxiv_abstract_embeddings",
-    foreign_key: "paper_key",
-};
-
-static SYNC: CollectionProfile = CollectionProfile {
-    metadata: "arxiv_papers",
-    chunks: "arxiv_abstracts",
-    embeddings: "arxiv_embeddings",
-    foreign_key: "paper_key",
-};
-
-/// Generic profile — still uses `paper_key` because the standard ingestion
-/// pipeline (`ingest_document` in the Python backend) writes `paper_key` into
-/// chunks/embeddings for all non-codebase profiles.
+/// Generic document profile — `documents` / `chunks` / `embeddings`. The
+/// canonical default for any database that hasn't defined a more specific
+/// profile in its `hades_schema`.
 static DEFAULT: CollectionProfile = CollectionProfile {
     metadata: "documents",
     chunks: "chunks",
@@ -47,9 +35,7 @@ static DEFAULT: CollectionProfile = CollectionProfile {
     foreign_key: "paper_key",
 };
 
-static ALL_PROFILES: [(&str, &CollectionProfile); 4] = [
-    ("arxiv", &ARXIV),
-    ("sync", &SYNC),
+static ALL_PROFILES: [(&str, &CollectionProfile); 2] = [
     ("default", &DEFAULT),
     ("codebase", &CODEBASE_PROFILE),
 ];
@@ -143,10 +129,11 @@ impl CollectionProfile {
 
     /// Get the default profile.
     ///
-    /// Reads `HADES_DEFAULT_COLLECTION` env var, falling back to `"arxiv"`.
+    /// Reads `HADES_DEFAULT_COLLECTION` env var, falling back to `"default"`
+    /// (the generic `documents`/`chunks`/`embeddings` profile).
     pub fn default_profile() -> &'static CollectionProfile {
-        let name = env::var("HADES_DEFAULT_COLLECTION").unwrap_or_else(|_| "arxiv".to_string());
-        Self::get(&name).unwrap_or(&ARXIV)
+        let name = env::var("HADES_DEFAULT_COLLECTION").unwrap_or_else(|_| "default".to_string());
+        Self::get(&name).unwrap_or(&DEFAULT)
     }
 
     /// Look up a profile by its metadata collection name.
@@ -169,22 +156,6 @@ impl CollectionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_arxiv_profile() {
-        let p = CollectionProfile::get("arxiv").unwrap();
-        assert_eq!(p.metadata, "arxiv_metadata");
-        assert_eq!(p.chunks, "arxiv_abstract_chunks");
-        assert_eq!(p.embeddings, "arxiv_abstract_embeddings");
-    }
-
-    #[test]
-    fn test_sync_profile() {
-        let p = CollectionProfile::get("sync").unwrap();
-        assert_eq!(p.metadata, "arxiv_papers");
-        assert_eq!(p.chunks, "arxiv_abstracts");
-        assert_eq!(p.embeddings, "arxiv_embeddings");
-    }
 
     #[test]
     fn test_default_profile() {
@@ -210,7 +181,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| {
             let p = CollectionProfile::default_profile();
-            assert_eq!(p.metadata, "arxiv_metadata");
+            assert_eq!(p.metadata, "documents");
         });
 
         // Restore before propagating any panic
@@ -225,10 +196,8 @@ mod tests {
     #[test]
     fn test_all_profiles() {
         let all = CollectionProfile::all();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 2);
         let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
-        assert!(names.contains(&"arxiv"));
-        assert!(names.contains(&"sync"));
         assert!(names.contains(&"default"));
         assert!(names.contains(&"codebase"));
     }
@@ -266,10 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn test_find_by_metadata_arxiv() {
-        let p = CollectionProfile::find_by_metadata("arxiv_metadata").unwrap();
-        assert_eq!(p.chunks, "arxiv_abstract_chunks");
-        assert_eq!(p.embeddings, "arxiv_abstract_embeddings");
+    fn test_find_by_metadata_default() {
+        let p = CollectionProfile::find_by_metadata("documents").unwrap();
+        assert_eq!(p.chunks, "chunks");
+        assert_eq!(p.embeddings, "embeddings");
         assert_eq!(p.foreign_key, "paper_key");
     }
 

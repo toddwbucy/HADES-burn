@@ -28,7 +28,11 @@ pub fn normalize_document_key(raw: &str) -> String {
     stripped.replace(['.', '/'], "_")
 }
 
-/// Strip the version suffix from an arxiv ID without replacing delimiters.
+/// Strip a trailing `v\d+` version suffix from an identifier without
+/// replacing other delimiters.
+///
+/// Originally written for arxiv IDs (e.g. `2501.12345v1` → `2501.12345`)
+/// but works on any string with the same versioning convention.
 ///
 /// # Examples
 /// ```
@@ -36,8 +40,8 @@ pub fn normalize_document_key(raw: &str) -> String {
 /// assert_eq!(strip_version("2501.12345v1"), "2501.12345");
 /// assert_eq!(strip_version("2501.12345"), "2501.12345");
 /// ```
-pub fn strip_version(arxiv_id: &str) -> String {
-    VERSION_SUFFIX.replace(arxiv_id, "").into_owned()
+pub fn strip_version(id: &str) -> String {
+    VERSION_SUFFIX.replace(id, "").into_owned()
 }
 
 /// Build a chunk key from a normalized document key and chunk index.
@@ -171,9 +175,15 @@ mod tests {
 
     #[test]
     fn test_strip_version() {
+        // arxiv-style identifiers (the original use case)
         assert_eq!(strip_version("2501.12345v1"), "2501.12345");
         assert_eq!(strip_version("2501.12345v12"), "2501.12345");
         assert_eq!(strip_version("2501.12345"), "2501.12345");
+        // non-arxiv identifiers — function is generic over any `v\d+` suffix
+        assert_eq!(strip_version("libfoo-1.0v3"), "libfoo-1.0");
+        assert_eq!(strip_version("libfoo-1.0"), "libfoo-1.0");
+        // version-like substring NOT at the end is left alone
+        assert_eq!(strip_version("v2_doc.key"), "v2_doc.key");
     }
 
     #[test]

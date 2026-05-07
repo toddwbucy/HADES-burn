@@ -1,6 +1,6 @@
 //! Persephone service clients.
 //!
-//! Typed gRPC clients for the Persephone embedding, extraction, and
+//! Typed clients for the Persephone embedding, extraction, and
 //! training services.  Connects over Unix domain sockets or TCP.
 
 pub mod embedding;

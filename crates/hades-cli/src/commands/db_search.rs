@@ -44,7 +44,7 @@ pub async fn run_query(
         Some(name) => name,
         None => {
             default_name = std::env::var("HADES_DEFAULT_COLLECTION")
-                .unwrap_or_else(|_| "arxiv".to_string());
+                .unwrap_or_else(|_| "default".to_string());
             &default_name
         }
     };

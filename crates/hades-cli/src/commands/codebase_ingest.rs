@@ -402,7 +402,13 @@ async fn ensure_named_graph(db: &ArangoPool) -> Result<()> {
             debug!(graph = CODEBASE_GRAPH, "named graph already exists");
         }
         Err(e) => {
-            return Err(anyhow::anyhow!(e).context("failed to create named graph"));
+            // Non-fatal: edge collections work for AQL traversals without
+            // a named graph. The Metis proxy may block the gharial endpoint.
+            warn!(
+                graph = CODEBASE_GRAPH,
+                error = %e,
+                "failed to create named graph (non-fatal — edges still work)"
+            );
         }
     }
     Ok(())

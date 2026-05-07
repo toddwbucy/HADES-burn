@@ -10,8 +10,16 @@
 use std::path::PathBuf;
 
 use hades_core::db::{ArangoClient, ArangoPool};
-use hades_core::graph::{self, EDGE_COLLECTION_NAMES, JINA_DIM, NUM_RELATIONS};
+use hades_core::graph::{self, EDGE_COLLECTION_NAMES, JINA_DIM, NUM_RELATIONS, RuntimeSchema};
 use tracing::warn;
+
+/// Load the runtime schema for the integration tests, falling back to NL
+/// statics if `hades_schema` is not seeded in the test database.
+async fn load_test_schema(pool: &ArangoPool) -> RuntimeSchema {
+    RuntimeSchema::load(pool)
+        .await
+        .expect("failed to load RuntimeSchema for integration test")
+}
 
 fn arango_socket() -> PathBuf {
     PathBuf::from(
@@ -57,7 +65,10 @@ fn nl_pool() -> Option<ArangoPool> {
 async fn test_load_full_graph() {
     let Some(pool) = nl_pool() else { return };
 
-    let (graph, id_map) = graph::load(&pool).await.expect("graph load failed");
+    let schema = load_test_schema(&pool).await;
+    let (graph, id_map) = graph::load(&pool, &schema)
+        .await
+        .expect("graph load failed");
 
     // Structural invariants
     assert!(graph.num_nodes > 0, "graph should have nodes");
@@ -166,7 +177,10 @@ fn test_edge_collection_names_match_schema() {
 async fn test_idmap_collection_grouping() {
     let Some(pool) = nl_pool() else { return };
 
-    let (_graph, id_map) = graph::load(&pool).await.expect("graph load failed");
+    let schema = load_test_schema(&pool).await;
+    let (_graph, id_map) = graph::load(&pool, &schema)
+        .await
+        .expect("graph load failed");
 
     let groups = id_map.nodes_by_collection();
 

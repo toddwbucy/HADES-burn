@@ -62,8 +62,19 @@ pub async fn run(
         .context("failed to connect to Persephone training service")?;
 
     // ── Load graph from ArangoDB ────────────────────────────────────
+    info!("loading runtime schema");
+    let schema = hades_core::graph::RuntimeSchema::load(&source_pool)
+        .await
+        .context("failed to load runtime schema from hades_schema")?;
+    info!(
+        from_db = schema.from_database,
+        num_relations = schema.meta.num_relations,
+        feature_dim = schema.meta.feature_dim,
+        "schema loaded"
+    );
+
     info!("loading graph from ArangoDB");
-    let (graph, id_map) = hades_core::graph::load(&source_pool).await?;
+    let (graph, id_map) = hades_core::graph::load(&source_pool, &schema).await?;
 
     info!(
         num_nodes = graph.num_nodes,

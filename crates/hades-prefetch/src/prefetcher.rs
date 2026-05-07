@@ -50,6 +50,9 @@ pub enum PrefetchError {
     #[error("graph loading failed: {0}")]
     GraphLoad(#[from] GraphLoaderError),
 
+    #[error("runtime schema load failed: {0}")]
+    SchemaLoad(String),
+
     #[error("tensor/serialization error: {0}")]
     Tensor(#[from] TensorError),
 
@@ -317,7 +320,16 @@ pub async fn prepare_training_data(
     config: &SplitConfig,
 ) -> Result<TrainingData, PrefetchError> {
     info!("loading graph from ArangoDB");
-    let (graph, id_map) = hades_core::graph::load(pool).await?;
+    let schema = hades_core::graph::RuntimeSchema::load(pool)
+        .await
+        .map_err(|e| PrefetchError::SchemaLoad(e.to_string()))?;
+    info!(
+        from_db = schema.from_database,
+        num_relations = schema.meta.num_relations,
+        feature_dim = schema.meta.feature_dim,
+        "loaded runtime schema"
+    );
+    let (graph, id_map) = hades_core::graph::load(pool, &schema).await?;
 
     info!(
         num_nodes = graph.num_nodes,

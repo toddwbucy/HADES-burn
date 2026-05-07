@@ -240,14 +240,28 @@ impl GraphData {
         }
     }
 
-    /// Allocate a graph with known node and edge counts.
+    /// Allocate a graph with known node and edge counts, defaulting to the
+    /// compile-time NL constants (`NUM_RELATIONS`, `JINA_DIM`).
     ///
     /// Node features are initialized to zero (no embedding).
     /// `node_collections` is initialized to `u32::MAX` (sentinel) so that
     /// unset entries are caught by [`validate()`] once `collection_names` is populated.
     pub fn with_capacity(num_nodes: usize, num_edges: usize) -> Self {
+        Self::with_schema_capacity(num_nodes, num_edges, NUM_RELATIONS, JINA_DIM)
+    }
+
+    /// Allocate a graph with explicit relation count and feature dimension.
+    ///
+    /// Use this from runtime paths that load schema from `hades_schema`;
+    /// `with_capacity` exists for tests that just need the NL defaults.
+    pub fn with_schema_capacity(
+        num_nodes: usize,
+        num_edges: usize,
+        num_relations: usize,
+        feature_dim: usize,
+    ) -> Self {
         Self {
-            node_features: vec![0.0; num_nodes * JINA_DIM],
+            node_features: vec![0.0; num_nodes * feature_dim],
             has_embedding: vec![false; num_nodes],
             node_collections: vec![u32::MAX; num_nodes],
             edge_src: Vec::with_capacity(num_edges),
@@ -255,8 +269,8 @@ impl GraphData {
             edge_type: Vec::with_capacity(num_edges),
             num_nodes,
             num_edges: 0,
-            num_relations: NUM_RELATIONS,
-            feature_dim: JINA_DIM,
+            num_relations,
+            feature_dim,
             collection_names: Vec::new(),
         }
     }

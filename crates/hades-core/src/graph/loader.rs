@@ -14,7 +14,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::db::{ArangoError, ArangoPool};
 use crate::db::query::{self, ExecutionTarget};
 
-use super::schema::{EDGE_COLLECTION_NAMES, JINA_DIM};
+use super::runtime_schema::RuntimeSchema;
 use super::types::{GraphData, GraphDataError, IDMap};
 
 // ---------------------------------------------------------------------------
@@ -63,38 +63,46 @@ const EMBEDDING_BATCH_KEYS: usize = 5_000;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Load the full NL knowledge graph from ArangoDB.
+/// Load the full knowledge graph from ArangoDB using `schema` to enumerate
+/// edge collections and the feature dimension.
 ///
-/// Scans all 22 RGCN edge collections to discover nodes, then batch-fetches
-/// Jina V4 embeddings per vertex collection. Returns a validated [`GraphData`]
-/// and the [`IDMap`] used to translate between ArangoDB `_id` and integer
-/// node indices.
+/// Scans every edge collection in `schema.meta.relation_order` to discover
+/// nodes, then batch-fetches embeddings per vertex collection. Returns a
+/// validated [`GraphData`] and the [`IDMap`] used to translate between
+/// ArangoDB `_id` and integer node indices.
 ///
 /// Collections that do not exist (future relation slots) are silently skipped.
-#[instrument(skip(pool), fields(db = %pool.database()))]
-pub async fn load(pool: &ArangoPool) -> Result<LoadResult, GraphLoaderError> {
+#[instrument(skip(pool, schema), fields(db = %pool.database()))]
+pub async fn load(
+    pool: &ArangoPool,
+    schema: &RuntimeSchema,
+) -> Result<LoadResult, GraphLoaderError> {
     // ------------------------------------------------------------------
     // Phase 1: Edge loading — discover nodes, accumulate raw edges
     // ------------------------------------------------------------------
     let mut id_map = IDMap::new();
     let mut raw_edges: Vec<(u32, u32, u32)> = Vec::new();
 
+    let relation_order = &schema.meta.relation_order;
+    let feature_dim = schema.meta.feature_dim;
+
     info!(
-        num_collections = EDGE_COLLECTION_NAMES.len(),
+        num_collections = relation_order.len(),
+        feature_dim,
         "loading edges"
     );
 
-    for (rel_idx, &col_name) in EDGE_COLLECTION_NAMES.iter().enumerate() {
+    for (rel_idx, col_name) in relation_order.iter().enumerate() {
         match load_edge_collection(pool, &mut id_map, col_name, rel_idx, &mut raw_edges).await {
             Ok(count) => {
                 if count > 0 {
-                    info!(collection = col_name, edges = count, "loaded edges");
+                    info!(collection = %col_name, edges = count, "loaded edges");
                 } else {
-                    debug!(collection = col_name, "empty (future slot)");
+                    debug!(collection = %col_name, "empty (future slot)");
                 }
             }
             Err(GraphLoaderError::Arango(ref e)) if e.is_not_found() => {
-                debug!(collection = col_name, "not found (future slot)");
+                debug!(collection = %col_name, "not found (future slot)");
             }
             Err(e) => return Err(e),
         }
@@ -108,7 +116,8 @@ pub async fn load(pool: &ArangoPool) -> Result<LoadResult, GraphLoaderError> {
     // ------------------------------------------------------------------
     // Phase 2: Allocate GraphData, set collection indices, load embeddings
     // ------------------------------------------------------------------
-    let mut graph = GraphData::with_capacity(num_nodes, num_edges);
+    let mut graph =
+        GraphData::with_schema_capacity(num_nodes, num_edges, relation_order.len(), feature_dim);
 
     // Add all edges
     for &(src, dst, rel) in &raw_edges {
@@ -142,7 +151,7 @@ pub async fn load(pool: &ArangoPool) -> Result<LoadResult, GraphLoaderError> {
 
     // Fetch embeddings per vertex collection
     for (col_name, node_list) in &nodes_by_col {
-        match load_collection_embeddings(pool, &mut graph, col_name, node_list).await {
+        match load_collection_embeddings(pool, &mut graph, col_name, node_list, feature_dim).await {
             Ok(embedded) => {
                 info!(
                     collection = *col_name,
@@ -241,6 +250,7 @@ async fn load_collection_embeddings(
     graph: &mut GraphData,
     col_name: &str,
     node_list: &[(&str, usize)],
+    feature_dim: usize,
 ) -> Result<usize, GraphLoaderError> {
     // Build (key, node_idx) pairs — extract _key from "collection/_key"
     let keyed_nodes: Vec<(&str, usize)> = node_list
@@ -292,7 +302,7 @@ async fn load_collection_embeddings(
 
             // Skip null / wrong-dimension embeddings
             let emb_arr = match arr[1].as_array() {
-                Some(a) if a.len() == JINA_DIM => a,
+                Some(a) if a.len() == feature_dim => a,
                 _ => {
                     skipped += 1;
                     continue;

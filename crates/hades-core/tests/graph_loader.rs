@@ -10,8 +10,16 @@
 use std::path::PathBuf;
 
 use hades_core::db::{ArangoClient, ArangoPool};
-use hades_core::graph::{self, EDGE_COLLECTION_NAMES, JINA_DIM, NUM_RELATIONS};
+use hades_core::graph::{self, EDGE_COLLECTION_NAMES, NUM_RELATIONS, RuntimeSchema};
 use tracing::warn;
+
+/// Load the runtime schema for the integration tests, falling back to NL
+/// statics if `hades_schema` is not seeded in the test database.
+async fn load_test_schema(pool: &ArangoPool) -> RuntimeSchema {
+    RuntimeSchema::load(pool)
+        .await
+        .expect("failed to load RuntimeSchema for integration test")
+}
 
 fn arango_socket() -> PathBuf {
     PathBuf::from(
@@ -57,13 +65,19 @@ fn nl_pool() -> Option<ArangoPool> {
 async fn test_load_full_graph() {
     let Some(pool) = nl_pool() else { return };
 
-    let (graph, id_map) = graph::load(&pool).await.expect("graph load failed");
+    let schema = load_test_schema(&pool).await;
+    let (graph, id_map) = graph::load(&pool, &schema)
+        .await
+        .expect("graph load failed");
 
-    // Structural invariants
+    // Structural invariants — graph dimensions must match the schema that
+    // drove the load, not the compile-time NL constants. (When `hades_schema`
+    // is absent the schema falls back to those constants, so this is still
+    // a meaningful check; it just no longer hides divergence.)
     assert!(graph.num_nodes > 0, "graph should have nodes");
     assert!(graph.num_edges > 0, "graph should have edges");
-    assert_eq!(graph.num_relations, NUM_RELATIONS);
-    assert_eq!(graph.feature_dim, JINA_DIM);
+    assert_eq!(graph.num_relations, schema.meta.num_relations);
+    assert_eq!(graph.feature_dim, schema.meta.feature_dim);
 
     // Validate passes (already called internally, but double-check)
     graph.validate().unwrap();
@@ -99,7 +113,7 @@ async fn test_load_full_graph() {
     // All edge relation types should be valid indices
     for &rel in &graph.edge_type {
         assert!(
-            (rel as usize) < NUM_RELATIONS,
+            (rel as usize) < schema.meta.num_relations,
             "edge relation type {rel} out of bounds"
         );
     }
@@ -166,7 +180,10 @@ fn test_edge_collection_names_match_schema() {
 async fn test_idmap_collection_grouping() {
     let Some(pool) = nl_pool() else { return };
 
-    let (_graph, id_map) = graph::load(&pool).await.expect("graph load failed");
+    let schema = load_test_schema(&pool).await;
+    let (_graph, id_map) = graph::load(&pool, &schema)
+        .await
+        .expect("graph load failed");
 
     let groups = id_map.nodes_by_collection();
 

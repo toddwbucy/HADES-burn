@@ -639,7 +639,6 @@ request-response socket model.
 | Command                    | Reason                               |
 |----------------------------|--------------------------------------|
 | `ingest`                   | Batch pipeline, long-running         |
-| `arxiv sync`               | Batch API fetch, long-running        |
 | `codebase ingest`          | Batch AST parse, long-running        |
 | `codebase update`          | Batch update, long-running           |
 | `codebase validate`        | Batch validation                     |
@@ -648,7 +647,6 @@ request-response socket model.
 | `extract`                  | File I/O, not a query                |
 | `link`                     | Interactive confirmation             |
 | `db export`                | Batch export to file                 |
-| `db backfill-text`         | Batch backfill                       |
 | `db create-database`       | Infrastructure DDL (rare)            |
 | `db databases`             | Multi-database query (rare)          |
 | `db index-status`          | Index diagnostics (rare)             |

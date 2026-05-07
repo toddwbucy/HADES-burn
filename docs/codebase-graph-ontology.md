@@ -494,40 +494,40 @@ This cascade requires the `file_key` indices defined in Section 6.
 
 ---
 
-## 8. Relationship to NL Graph
+## 8. Relationship to Other Graphs
 
-The codebase graph and the NL knowledge graph are **separate named graphs** in the same database. They share no collections and no edges.
+The codebase graph is one named graph in the database. Other domain ontologies (e.g., a knowledge graph of academic papers, equations, or experiments) live as **separate named graphs** alongside it. They share no collections and no edges.
 
-Future bridging between them (e.g., linking a code symbol to the equation it implements) would use a **new edge collection** — not by mixing vertices across graph boundaries:
+Bridging between graphs (e.g., linking a code symbol to a mathematical equation it implements) would use a **new edge collection** — not by mixing vertices across graph boundaries:
 
 ```text
 Potential future bridge:
   Edge collection: nl_code_equation_edges
   _from: codebase_symbols (code callable)
   _to:   {paper}_equations (mathematical equation)
-
-  This is already reserved as EDGE_COLLECTION_NAMES[5]
-  in graph/schema.rs: "nl_code_equation_edges"
 ```
 
-This bridge is explicitly **out of scope** for the codebase ontology. It belongs to the NL graph schema and would be defined there when the time comes.
+This bridge is explicitly **out of scope** for the codebase ontology. It belongs to the schema of whatever domain graph is hosting the equations, and would be added there as a new edge definition in `hades_schema`.
 
 ---
 
 ## 9. RGCN Training Considerations
 
-The NL graph uses `EDGE_COLLECTION_NAMES` (22 relation types) for RGCN training, where each edge collection maps to a relation-type index. The codebase graph follows the same convention — collection names as relation indices:
+RGCN training assigns a stable integer **relation-type index** to each edge collection. That mapping is recorded in the database's `hades_schema` collection (`SchemaMeta::relation_order` — a list of edge collection names whose position is the relation index).
 
-```rust
-pub const CODEBASE_EDGE_COLLECTIONS: &[&str] = &[
+For a database hosting the codebase graph, `relation_order` should include the four codebase edge collections:
+
+```text
+relation_order: [
     "codebase_defines_edges",      // 0
     "codebase_calls_edges",        // 1
     "codebase_implements_edges",   // 2
     "codebase_imports_edges",      // 3
-];
+    // ...other domain edge collections appended after
+]
 ```
 
-No translation layer. The `hades-prefetch` random walk code can use the same collection-name-to-relation-index pattern it already uses for the NL graph.
+`hades-prefetch` reads this list at runtime via `RuntimeSchema::load(pool)` and uses the index positions as RGCN relation IDs — no translation layer.
 
 **Node features** for codebase vertices use a 5-value `kind` categorical (`file`, `module`, `type`, `callable`, `value`) — clean one-hot encoding, language-agnostic. The `lang_kind` string is available as an additional feature if finer granularity helps training.
 
@@ -618,19 +618,22 @@ codebase_graph (Named Graph)
 
 ---
 
-## Appendix A: Comparison with NL Graph Schema
+## Appendix A: Comparison with a Domain Knowledge Graph
 
-| Aspect | NL Knowledge Graph | Codebase Graph |
-|--------|-------------------|----------------|
-| Named graphs | 6 (`nl_core`, `nl_equations`, ..., `nl_concept_map`) | 1 (`codebase_graph`) |
-| Edge collections | 14 unique (16 defs, some share names) | 4 |
+A representative comparison with a paper-centric knowledge graph (e.g., the
+historical NL ontology, now defined externally as `hades_schema` data
+rather than baked into the framework):
+
+| Aspect | Domain Knowledge Graph (example) | Codebase Graph |
+|--------|----------------------------------|----------------|
+| Named graphs | many (e.g. `core`, `equations`, `concept_map`) | 1 (`codebase_graph`) |
+| Edge collections | dozens, domain-specific | 4 |
 | Relation type discrimination | Collection name | Collection name |
-| RGCN relation indices | `EDGE_COLLECTION_NAMES[0..21]` | `CODEBASE_EDGE_COLLECTIONS[0..3]` |
-| Vertex collections | 80+ (paper-scoped x concept types) | 2 (files, symbols) |
-| Vertex kind taxonomy | Per-collection (axioms, equations, definitions, ...) | 5 universal primitives |
-| Orphan collections | 0 | 2 (chunks, embeddings) |
-| Scope | Global (all papers, all workspaces) | Per-workspace |
-| Scale | ~100K+ documents | ~10K documents per workspace |
+| RGCN relation indices | from `SchemaMeta::relation_order` (data) | from `SchemaMeta::relation_order` (data) |
+| Vertex collections | many (paper-scoped × concept types) | 2 (files, symbols) |
+| Vertex kind taxonomy | Per-collection (axioms, equations, definitions, …) | 5 universal primitives |
+| Orphan collections | typically 0 | 2 (chunks, embeddings) |
+| Scope | Global (all sources, all workspaces) | Per-workspace |
 
 ## Appendix B: AQL Query Examples
 

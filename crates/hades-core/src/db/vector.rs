@@ -30,7 +30,10 @@ pub struct SimilarityResult {
     pub total_chunks: Option<u64>,
     /// Title from the metadata document.
     pub title: Option<String>,
-    /// ArXiv ID from the metadata document.
+    /// External identifier from the metadata document (e.g. arxiv ID, DOI,
+    /// or other source-specific identifier). Field name is `arxiv_id` for
+    /// backward compatibility with existing databases; consider renaming to
+    /// a generic name in a future PR.
     pub arxiv_id: Option<String>,
     /// Similarity score (higher = more similar for cosine/innerProduct).
     pub score: f64,

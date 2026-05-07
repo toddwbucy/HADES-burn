@@ -56,10 +56,6 @@ sync:
   batch_size: 8
   max_results: 1000
 
-arxiv:
-  pdf_base_path: /bulk-store/arxiv-data/pdf
-  latex_base_path: /bulk-store/arxiv-data/src
-
 batch_processing:
   concurrency: 1
   progress_interval_secs: 1.0

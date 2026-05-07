@@ -11,7 +11,7 @@ fn test_pipeline_config_defaults() {
     assert_eq!(config.embed_task, "retrieval.passage");
     assert!(config.embed_batch_size.is_none());
     assert!(config.overwrite);
-    assert_eq!(config.profile.metadata, "arxiv_metadata");
+    assert_eq!(config.profile.metadata, "documents");
 }
 
 #[test]
@@ -80,19 +80,22 @@ fn test_pipeline_summary_counts() {
 fn test_collection_profile_routing() {
     use hades_core::db::collections::CollectionProfile;
 
-    let arxiv = CollectionProfile::get("arxiv").unwrap();
+    // Default profile — generic documents/chunks/embeddings.
+    let default = CollectionProfile::get("default").unwrap();
     let config = PipelineConfig {
-        profile: arxiv,
+        profile: default,
         ..PipelineConfig::default()
     };
-    assert_eq!(config.profile.metadata, "arxiv_metadata");
-    assert_eq!(config.profile.chunks, "arxiv_abstract_chunks");
-    assert_eq!(config.profile.embeddings, "arxiv_abstract_embeddings");
+    assert_eq!(config.profile.metadata, "documents");
+    assert_eq!(config.profile.chunks, "chunks");
+    assert_eq!(config.profile.embeddings, "embeddings");
 
-    let sync = CollectionProfile::get("sync").unwrap();
+    // Codebase profile — distinct collections + foreign_key (`file_key`).
+    let codebase = CollectionProfile::get("codebase").unwrap();
     let config = PipelineConfig {
-        profile: sync,
+        profile: codebase,
         ..PipelineConfig::default()
     };
-    assert_eq!(config.profile.metadata, "arxiv_papers");
+    assert_eq!(config.profile.metadata, "codebase_files");
+    assert_eq!(config.profile.foreign_key, "file_key");
 }

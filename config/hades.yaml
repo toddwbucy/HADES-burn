@@ -91,17 +91,10 @@ rocchio:
   gamma: 0.15
 
 # -----------------------------------------------------------------------------
-# Sync Settings
+# Sync Settings (generic batch lookback / pagination — used by sync-style
+# ingest workflows; not arxiv-specific)
 # -----------------------------------------------------------------------------
 sync:
   default_lookback_days: 7
   batch_size: 8
   max_results: 1000
-
-# -----------------------------------------------------------------------------
-# ArXiv Data Paths
-# -----------------------------------------------------------------------------
-arxiv:
-  # Environment-specific — override with HADES_PDF_PATH / HADES_LATEX_PATH
-  pdf_base_path: /bulk-store/arxiv-data/pdf
-  latex_base_path: /bulk-store/arxiv-data/src

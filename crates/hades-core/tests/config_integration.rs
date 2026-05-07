@@ -96,16 +96,6 @@ fn load_fixture_hades_yaml() {
     assert_eq!(config.sync.batch_size, 8);
     assert_eq!(config.sync.max_results, 1000);
 
-    // ArXiv paths
-    assert_eq!(
-        config.arxiv.pdf_base_path.to_str().unwrap(),
-        "/bulk-store/arxiv-data/pdf"
-    );
-    assert_eq!(
-        config.arxiv.latex_base_path.to_str().unwrap(),
-        "/bulk-store/arxiv-data/src"
-    );
-
     // Batch processing
     assert_eq!(config.batch_processing.concurrency, 1);
     assert_eq!(config.batch_processing.progress_interval_secs, 1.0);

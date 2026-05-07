@@ -1,15 +1,16 @@
 //! Native Rust implementation of the `hades ingest` command.
 //!
-//! Replaces the Python dispatch for document ingestion.  Supports:
-//! - ArXiv paper ingest (download PDF + extract + chunk + embed + store)
-//! - Local file ingest (extract + chunk + embed + store)
-//! - Mixed inputs (arXiv IDs and file paths in one invocation)
+//! Generic file ingestion: extract → chunk → embed → store. Supports:
+//! - Local file ingest (PDF, LaTeX, text, code via the extractor service)
 //! - Batch mode with per-document error isolation
 //! - Resumable checkpointing with progress reporting
 //! - Bounded concurrency and rate limiting
 //! - Custom metadata merging
 //! - Collection profile selection
 //! - Force re-processing (surgical delete + re-insert)
+//!
+//! Domain-specific orchestration (arxiv API ingest, NL-paper schemas, etc.)
+//! belongs in user scripts that compose this command + `hades db insert` etc.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +20,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use hades_core::arxiv::{ArxivClient, is_arxiv_id, normalize_arxiv_id};
 use hades_core::batch::{BatchProcessor, BatchProcessorConfig, RateLimiter};
 use hades_core::chunking::{ChunkingStrategy, TokenChunking};
 use hades_core::db::collections::CollectionProfile;
@@ -39,13 +39,7 @@ const CODE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Keys that user-provided metadata cannot override.
-const PROTECTED_KEYS: &[&str] = &["_key", "status", "source", "arxiv_id"];
-
-/// Classify a single input as either an arXiv ID or a file path.
-enum InputKind {
-    Arxiv(String),
-    File(PathBuf),
-}
+const PROTECTED_KEYS: &[&str] = &["_key", "status", "source"];
 
 /// Ingest command failed with partial results.
 ///
@@ -80,7 +74,7 @@ pub async fn run(
 
     // -- Validate inputs -------------------------------------------------------
     if inputs.is_empty() && !resume {
-        bail!("no inputs provided. Supply arXiv IDs or file paths.");
+        bail!("no inputs provided. Supply file paths to ingest.");
     }
 
     if id.is_some() && inputs.len() > 1 {
@@ -107,18 +101,7 @@ pub async fn run(
         None => CollectionProfile::default_profile(),
     };
 
-    // -- Classify inputs -------------------------------------------------------
-    let classified: Vec<InputKind> = inputs
-        .iter()
-        .map(|input| {
-            let s = input.to_string_lossy();
-            if is_arxiv_id(&s) {
-                InputKind::Arxiv(s.into_owned())
-            } else {
-                InputKind::File(input.clone())
-            }
-        })
-        .collect();
+    let file_paths: Vec<PathBuf> = inputs.to_vec();
 
     // Guard: refuse to write to production databases.
     config.require_writable_database()?;
@@ -136,7 +119,7 @@ pub async fn run(
         .context("failed to connect to embedding service")?;
 
     // -- Build pipeline --------------------------------------------------------
-    let embed_task = determine_embed_task(task, &classified);
+    let embed_task = determine_embed_task(task, &file_paths);
     let pipeline_config = PipelineConfig {
         profile,
         embed_task,
@@ -150,15 +133,6 @@ pub async fn run(
         chunk_size: config.embedding.chunking.size_tokens as usize,
         overlap: config.embedding.chunking.overlap_tokens as usize,
     });
-
-    // -- ArXiv client (only created if we have arXiv inputs) -------------------
-    let arxiv_client = if classified.iter().any(|k| matches!(k, InputKind::Arxiv(_))) {
-        Some(Arc::new(
-            ArxivClient::new().context("failed to create ArXiv client")?,
-        ))
-    } else {
-        None
-    };
 
     // -- Configure batch processor ---------------------------------------------
     let batch_concurrency = concurrency
@@ -176,7 +150,7 @@ pub async fn run(
 
     let batch_config = BatchProcessorConfig {
         concurrency: batch_concurrency,
-        state_file: if batch || resume || classified.len() > 1 {
+        state_file: if batch || resume || file_paths.len() > 1 {
             Some(PathBuf::from(".hades-batch-state.json"))
         } else {
             None
@@ -192,63 +166,38 @@ pub async fn run(
     let processor = BatchProcessor::new(batch_config);
 
     // -- Build items for batch processor ---------------------------------------
-    let config = Arc::new(config.clone());
     let custom_id: Option<Arc<str>> = id.map(Arc::from);
     let extra_metadata = extra_metadata.map(Arc::new);
 
-    let items: Vec<(String, InputKind)> = classified
+    let items: Vec<(String, PathBuf)> = file_paths
         .into_iter()
-        .map(|kind| {
-            let item_id = match &kind {
-                InputKind::Arxiv(s) => s.clone(),
-                InputKind::File(p) => p.display().to_string(),
-            };
-            (item_id, kind)
+        .map(|path| {
+            let item_id = path.display().to_string();
+            (item_id, path)
         })
         .collect();
 
     // -- Process batch ---------------------------------------------------------
     let summary = processor
-        .process(items, move |_item_id, kind| {
+        .process(items, move |_item_id, path| {
             let pipeline = pipeline.clone();
             let chunker = chunker.clone();
             let db = db.clone();
-            let arxiv_client = arxiv_client.clone();
-            let config = config.clone();
             let custom_id = custom_id.clone();
             let extra_metadata = extra_metadata.clone();
 
             async move {
-                match kind {
-                    InputKind::Arxiv(arxiv_id) => {
-                        ingest_arxiv_paper(
-                            arxiv_client.as_deref().unwrap(),
-                            &pipeline,
-                            chunker.as_ref(),
-                            &db,
-                            profile,
-                            &arxiv_id,
-                            &config,
-                            force,
-                            extra_metadata.as_deref(),
-                            custom_id.as_deref(),
-                        )
-                        .await
-                    }
-                    InputKind::File(path) => {
-                        ingest_file(
-                            &pipeline,
-                            chunker.as_ref(),
-                            &db,
-                            profile,
-                            &path,
-                            force,
-                            extra_metadata.as_deref(),
-                            custom_id.as_deref(),
-                        )
-                        .await
-                    }
-                }
+                ingest_file(
+                    &pipeline,
+                    chunker.as_ref(),
+                    &db,
+                    profile,
+                    &path,
+                    force,
+                    extra_metadata.as_deref(),
+                    custom_id.as_deref(),
+                )
+                .await
             }
         })
         .await
@@ -318,113 +267,6 @@ pub async fn run(
         .into());
     }
     Ok(())
-}
-
-// ── ArXiv paper ingest ───────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-async fn ingest_arxiv_paper(
-    arxiv: &ArxivClient,
-    pipeline: &Pipeline,
-    chunker: &(dyn ChunkingStrategy + Send + Sync),
-    db: &ArangoPool,
-    profile: &CollectionProfile,
-    arxiv_id: &str,
-    config: &HadesConfig,
-    force: bool,
-    extra_metadata: Option<&Value>,
-    custom_id: Option<&str>,
-) -> Result<Value> {
-    let normalized = normalize_arxiv_id(arxiv_id);
-    let doc_key = custom_id
-        .map(keys::normalize_document_key)
-        .unwrap_or_else(|| keys::normalize_document_key(&normalized));
-
-    // Check if already exists (unless --force).
-    if !force && document_exists(db, profile.metadata, &doc_key).await? {
-        info!(doc_key, "already ingested, skipping (use --force to re-process)");
-        return Ok(json!({"skipped": true}));
-    }
-
-    // Fetch metadata from arXiv API.
-    let paper = arxiv
-        .get_paper_metadata(arxiv_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("paper not found on arXiv: {arxiv_id}"))?;
-
-    // Download PDF.
-    let download = arxiv
-        .download_paper(
-            arxiv_id,
-            &config.arxiv.pdf_base_path,
-            Some(&config.arxiv.latex_base_path),
-            force,
-        )
-        .await;
-
-    if !download.success {
-        bail!(
-            "download failed: {}",
-            download.error_message.unwrap_or_default()
-        );
-    }
-
-    let pdf_path = download
-        .pdf_path
-        .ok_or_else(|| anyhow::anyhow!("download succeeded but no PDF path returned"))?;
-
-    // Process through pipeline.
-    let result = pipeline.process_document(&pdf_path, &doc_key, chunker).await;
-
-    if !result.success {
-        bail!(
-            "{}",
-            result
-                .error
-                .unwrap_or_else(|| "unknown pipeline error".into())
-        );
-    }
-
-    // Store arXiv-specific metadata (title, authors, abstract, etc.) as a merge.
-    let mut arxiv_meta = json!({
-        "title": paper.title,
-        "authors": paper.authors,
-        "abstract": paper.abstract_text,
-        "categories": paper.categories,
-        "primary_category": paper.primary_category,
-        "published": paper.published.to_rfc3339(),
-        "updated": paper.updated.to_rfc3339(),
-        "arxiv_id": paper.arxiv_id,
-        "source": "arxiv",
-        "status": "PROCESSED",
-    });
-    if let Some(doi) = &paper.doi {
-        arxiv_meta["doi"] = json!(doi);
-    }
-    if let Some(jr) = &paper.journal_ref {
-        arxiv_meta["journal_ref"] = json!(jr);
-    }
-    // Merge user-provided extra metadata, skipping protected keys.
-    merge_extra_metadata(&mut arxiv_meta, extra_metadata);
-    // Identity fields are sacrosanct — reassert after merge.
-    arxiv_meta["_key"] = json!(doc_key);
-
-    // Update the metadata document with arXiv-specific fields.
-    if let Err(e) = hades_core::db::crud::update_document(
-        db,
-        profile.metadata,
-        &doc_key,
-        &arxiv_meta,
-    )
-    .await
-    {
-        warn!(doc_key, error = %e, "failed to update arxiv metadata (document was still stored)");
-    }
-
-    Ok(json!({
-        "num_chunks": result.chunk_count,
-        "title": paper.title,
-    }))
 }
 
 // ── Local file ingest ────────────────────────────────────────────────────
@@ -533,22 +375,14 @@ async fn document_exists(
 }
 
 /// Determine the embedding task based on explicit --task flag or file extensions.
-fn determine_embed_task(task: Option<&str>, inputs: &[InputKind]) -> String {
+fn determine_embed_task(task: Option<&str>, inputs: &[PathBuf]) -> String {
     if let Some(t) = task {
         // "code" is a valid Jina V4 task as-is (its own LoRA adapter); pass through unchanged.
         return t.to_string();
     }
 
-    // Auto-detect: if all file inputs are code files, use code task.
-    let file_inputs: Vec<&PathBuf> = inputs
-        .iter()
-        .filter_map(|k| match k {
-            InputKind::File(p) => Some(p),
-            _ => None,
-        })
-        .collect();
-
-    if !file_inputs.is_empty() && file_inputs.iter().all(|p| is_code_file(p)) {
+    // Auto-detect: if all inputs are code files, use code task.
+    if !inputs.is_empty() && inputs.iter().all(|p| is_code_file(p)) {
         return "code".to_string();
     }
 

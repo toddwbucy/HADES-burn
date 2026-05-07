@@ -326,7 +326,8 @@ pub struct DbGraphDropParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbSchemaInitParams {
-    /// Seed name: "nl" or "empty".
+    /// Seed name. Only "empty" is currently accepted — initializes the
+    /// `hades_schema` collection with metadata only and no edge definitions.
     pub seed: String,
 }
 

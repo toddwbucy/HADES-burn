@@ -382,7 +382,8 @@ pub enum DbGraphCmd {
 pub enum DbSchemaCmd {
     /// Initialize the hades_schema collection with a seed ontology.
     Init {
-        /// Seed name: "empty" (blank for new domains).
+        /// Seed name. Only "empty" is currently accepted — initializes a
+        /// `hades_schema` collection with metadata only and no edge definitions.
         #[arg(short = 's', long)]
         seed: String,
     },

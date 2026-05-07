@@ -369,72 +369,6 @@ impl RuntimeSchema {
 // Seed generation
 // ---------------------------------------------------------------------------
 
-/// Generate `hades_schema` documents from the compile-time NL statics.
-///
-/// Returns a list of JSON documents ready for bulk insert into `hades_schema`.
-pub fn nl_seed_documents() -> Vec<Value> {
-    use super::schema::{ALL_EDGE_COLLECTIONS, ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM};
-
-    let mut docs = Vec::with_capacity(ALL_EDGE_COLLECTIONS.len() + ALL_NAMED_GRAPHS.len() + 1);
-
-    // Edge definitions.
-    for edef in ALL_EDGE_COLLECTIONS.iter() {
-        let strategy = match (edef.name, edef.source_field) {
-            ("nl_lineage_chain_edges", "chain") => "lineage",
-            ("nl_cross_paper_edges", "from_node") => "cross_paper",
-            _ => "standard",
-        };
-        let key = format!("edge__{}__{}", edef.name, edef.source_field);
-        docs.push(serde_json::json!({
-            "_key": key,
-            "schema_type": "edge_definition",
-            "name": edef.name,
-            "source_field": edef.source_field,
-            "from_collections": edef.from_collections,
-            "to_collections": edef.to_collections,
-            "description": edef.description,
-            "is_array": edef.is_array,
-            "edge_attributes": edef.edge_attributes,
-            "materialize_strategy": strategy,
-            "relation_index": super::schema::relation_index(edef.name),
-        }));
-    }
-
-    // Named graphs.
-    for ng in ALL_NAMED_GRAPHS.iter() {
-        let edge_names: Vec<&str> = ng
-            .edge_collection_indices
-            .iter()
-            .map(|&i| ALL_EDGE_COLLECTIONS[i].name)
-            .collect();
-        docs.push(serde_json::json!({
-            "_key": format!("graph__{}", ng.name),
-            "schema_type": "named_graph",
-            "name": ng.name,
-            "edge_definitions": edge_names,
-            "description": ng.description,
-        }));
-    }
-
-    // Metadata.
-    let relation_order: Vec<&str> = EDGE_COLLECTION_NAMES.to_vec();
-    let relation_order_owned: Vec<String> = relation_order.iter().map(|s| s.to_string()).collect();
-    let checksum = compute_checksum(&relation_order_owned);
-
-    docs.push(serde_json::json!({
-        "_key": "meta",
-        "schema_type": "schema_meta",
-        "schema_version": 1,
-        "seed_name": "nl",
-        "relation_order": relation_order,
-        "num_relations": relation_order.len(),
-        "feature_dim": JINA_DIM,
-        "schema_checksum": checksum,
-    }));
-
-    docs
-}
-
 /// Generate an empty seed — metadata only, no edge definitions or graphs.
 pub fn empty_seed_documents() -> Vec<Value> {
     vec![serde_json::json!({
@@ -465,57 +399,6 @@ pub fn compute_checksum(relation_order: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_nl_seed_document_count() {
-        let docs = nl_seed_documents();
-        // 16 edge defs + 6 named graphs + 1 meta = 23
-        assert_eq!(docs.len(), 23);
-    }
-
-    #[test]
-    fn test_nl_seed_has_meta() {
-        let docs = nl_seed_documents();
-        let meta = docs.iter().find(|d| d["_key"] == "meta").unwrap();
-        assert_eq!(meta["schema_type"], "schema_meta");
-        assert_eq!(meta["num_relations"], 22);
-        assert_eq!(meta["seed_name"], "nl");
-        assert_eq!(meta["feature_dim"], 2048);
-    }
-
-    #[test]
-    fn test_nl_seed_edge_keys_are_deterministic() {
-        let docs = nl_seed_documents();
-        let first_edge = docs
-            .iter()
-            .find(|d| d["schema_type"] == "edge_definition")
-            .unwrap();
-        let key = first_edge["_key"].as_str().unwrap();
-        assert!(key.starts_with("edge__"));
-        assert!(key.contains("__"));
-    }
-
-    #[test]
-    fn test_nl_seed_strategy_assignment() {
-        let docs = nl_seed_documents();
-        let lineage = docs
-            .iter()
-            .find(|d| d["name"] == "nl_lineage_chain_edges" && d["source_field"] == "chain")
-            .unwrap();
-        assert_eq!(lineage["materialize_strategy"], "lineage");
-
-        let cross_paper = docs
-            .iter()
-            .find(|d| d["name"] == "nl_cross_paper_edges")
-            .unwrap();
-        assert_eq!(cross_paper["materialize_strategy"], "cross_paper");
-
-        let standard = docs
-            .iter()
-            .find(|d| d["name"] == "nl_axiom_basis_edges")
-            .unwrap();
-        assert_eq!(standard["materialize_strategy"], "standard");
-    }
 
     #[test]
     fn test_empty_seed() {

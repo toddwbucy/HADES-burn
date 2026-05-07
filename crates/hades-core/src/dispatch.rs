@@ -326,7 +326,8 @@ pub struct DbGraphDropParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbSchemaInitParams {
-    /// Seed name: "nl" or "empty".
+    /// Seed name. Only "empty" is currently accepted — initializes the
+    /// `hades_schema` collection with metadata only and no edge definitions.
     pub seed: String,
 }
 
@@ -5216,12 +5217,11 @@ mod handlers {
 
         // Validate seed name.
         let docs = match seed {
-            "nl" => runtime_schema::nl_seed_documents(),
             "empty" => runtime_schema::empty_seed_documents(),
             other => {
                 return Err(HandlerError::InvalidParameter {
                     name: "seed".to_string(),
-                    reason: format!("unknown seed \"{other}\"; expected \"nl\" or \"empty\""),
+                    reason: format!("unknown seed \"{other}\"; expected \"empty\""),
                 });
             }
         };

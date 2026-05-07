@@ -61,7 +61,10 @@ For low-latency local deployments, HADES-Burn connects to ArangoDB over a Unix d
 - Rust edition 2024 (stable 1.85+)
 
 **Optional — only required for their respective command paths:**
-- Jina V4 embedder service exposing the [PE-API v1 HTTP contract](docs/persephone-embedding-api.md) (default `http://localhost:8087/v1`) — required for `hades embed`, `hades codebase ingest --embed`, and hybrid-search queries. Reference implementation in `services/embedding/http_server.py`. Override per-machine via `embedding.service.socket` in `hades.yaml` or `HADES_EMBEDDER_SOCKET` env var; supports `http://`, `https://`, `unix://`, and bare-path endpoint forms (the latter intended for the future `hades-weaver-bridge` Unix-socket adapter).
+- Jina V4 embedder service exposing the [PE-API v1 HTTP contract](docs/persephone-embedding-api.md) (default `http://localhost:8087/v1`) — required for `hades embed`, `hades codebase ingest --embed`, and hybrid-search queries. Reference implementation in `services/embedding/http_server.py`.
+
+  *Two configs to keep aligned:* the embedder service's **server-side** listen address, GPU device, batch size, and idle timeout come from `/etc/hades/embedder.conf` (sourced by `hades-embedder.service` via `EnvironmentFile=`). HADES's **client-side** endpoint — where the daemon and CLI look for the embedder — comes from `embedding.service.socket` in `hades.yaml` (or the `HADES_EMBEDDER_SOCKET` env var, e.g. in `/etc/hades/daemon.conf`). The two must agree on host:port; changing one without the other silently sends client traffic to the wrong service. The `socket` field accepts `http://`, `https://`, `unix://`, and bare-path endpoint forms (the latter intended for the future `hades-weaver-bridge` Unix-socket adapter).
+
 - Docling extractor service on a Unix socket (default `/run/hades/extractor.sock`) — required for `hades extract` (paper / PDF ingestion).
 
 ## Build

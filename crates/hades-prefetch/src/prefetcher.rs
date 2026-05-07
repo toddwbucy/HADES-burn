@@ -376,7 +376,10 @@ pub async fn prepare_training_data(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hades_core::graph::schema::JINA_DIM;
+
+    /// Jina V4 feature dimension — local to keep tests independent of the
+    /// deleted `graph::schema` module.
+    const JINA_DIM: usize = 2048;
 
     /// Build a small test graph matching tensor.rs tests.
     fn test_graph() -> GraphData {

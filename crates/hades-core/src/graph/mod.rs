@@ -1,21 +1,14 @@
-//! Graph schema and data types for RGCN training.
+//! Graph data types and runtime schema for RGCN training.
 //!
-//! Ports the NL knowledge graph schema from Python HADES
-//! (`core/database/nl_graph_schema.py`) and defines the tensor-like
-//! data structures consumed by the graph loader and training pipeline.
+//! The schema is loaded from each database's `hades_schema` collection at
+//! runtime — there is no compile-time ontology baked into the binary.
 
 pub mod export;
 pub mod loader;
 pub mod runtime_schema;
-pub mod schema;
 pub mod types;
 
 pub use export::{ExportConfig, ExportError, ExportResult, decode_f32_embeddings, export_embeddings};
 pub use loader::{GraphLoaderError, load};
 pub use runtime_schema::{RuntimeEdgeDef, RuntimeNamedGraph, RuntimeSchema, SchemaMeta, SchemaError};
-pub use schema::{
-    EdgeCollectionDef, NamedGraphDef, NlGraphSchema, ALL_EDGE_COLLECTIONS,
-    ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM, NL_GRAPH_SCHEMA, NUM_RELATIONS,
-    relation_index,
-};
 pub use types::{GraphData, GraphDataError, IDMap};

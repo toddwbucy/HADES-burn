@@ -1,12 +1,10 @@
 //! Runtime schema — database-local ontology definitions.
 //!
 //! Each database has a `hades_schema` collection storing its edge definitions,
-//! named graphs, and metadata as documents. This replaces the compile-time
-//! statics in `schema.rs` for all runtime operations (materialize, graph
-//! creation, RGCN training).
-//!
-//! The compile-time statics remain as **seeds** — written to `hades_schema` by
-//! `db schema init --seed nl`. They are never read in the hot path.
+//! named graphs, and metadata as documents. The schema is pure data: there is
+//! no compile-time fallback. Databases must seed `hades_schema` (e.g. via
+//! `db schema init --seed empty` or by direct insert) before runtime
+//! operations like `graph::load` can succeed.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -140,8 +138,9 @@ pub struct RuntimeSchema {
 impl RuntimeSchema {
     /// Load schema from the `hades_schema` collection.
     ///
-    /// If the collection does not exist, falls back to compile-time NL statics
-    /// for backward compatibility with databases that predate runtime schema.
+    /// Returns [`SchemaError::NoSchemaCollection`] if `hades_schema` is
+    /// missing. Seed it first with `db schema init --seed empty` (or via
+    /// direct insert).
     pub async fn load(pool: &ArangoPool) -> Result<Self, SchemaError> {
         // Check if hades_schema collection exists.
         let collections = crate::db::crud::list_collections(pool, false)
@@ -150,7 +149,7 @@ impl RuntimeSchema {
 
         let has_schema = collections.iter().any(|c| c.name == "hades_schema");
         if !has_schema {
-            return Self::from_nl_statics();
+            return Err(SchemaError::NoSchemaCollection);
         }
 
         // Load all documents from hades_schema.
@@ -245,66 +244,6 @@ impl RuntimeSchema {
             named_graphs,
             from_database: true,
         })
-    }
-
-    /// Construct a RuntimeSchema from the compile-time NL statics.
-    ///
-    /// Used as a fallback when `hades_schema` collection doesn't exist.
-    fn from_nl_statics() -> Result<Self, SchemaError> {
-        use super::schema::{ALL_EDGE_COLLECTIONS, ALL_NAMED_GRAPHS, EDGE_COLLECTION_NAMES, JINA_DIM};
-
-        let edge_definitions: Vec<RuntimeEdgeDef> = ALL_EDGE_COLLECTIONS
-            .iter()
-            .map(|edef| {
-                let strategy = match (edef.name, edef.source_field) {
-                    ("nl_lineage_chain_edges", "chain") => "lineage",
-                    ("nl_cross_paper_edges", "from_node") => "cross_paper",
-                    _ => "standard",
-                };
-                RuntimeEdgeDef {
-                    name: edef.name.to_string(),
-                    source_field: edef.source_field.to_string(),
-                    from_collections: edef.from_collections.iter().map(|s| s.to_string()).collect(),
-                    to_collections: edef.to_collections.iter().map(|s| s.to_string()).collect(),
-                    description: edef.description.to_string(),
-                    is_array: edef.is_array,
-                    edge_attributes: edef.edge_attributes.iter().map(|s| s.to_string()).collect(),
-                    materialize_strategy: strategy.to_string(),
-                    relation_index: super::schema::relation_index(edef.name).map(|i| i as u32),
-                }
-            })
-            .collect();
-
-        let named_graphs: Vec<RuntimeNamedGraph> = ALL_NAMED_GRAPHS
-            .iter()
-            .map(|ng| {
-                let edge_names: Vec<String> = ng
-                    .edge_collection_indices
-                    .iter()
-                    .map(|&i| ALL_EDGE_COLLECTIONS[i].name.to_string())
-                    .collect();
-                RuntimeNamedGraph {
-                    name: ng.name.to_string(),
-                    edge_definitions: edge_names,
-                    description: ng.description.to_string(),
-                }
-            })
-            .collect();
-
-        let relation_order: Vec<String> =
-            EDGE_COLLECTION_NAMES.iter().map(|s| s.to_string()).collect();
-        let checksum = compute_checksum(&relation_order);
-
-        let meta = SchemaMeta {
-            schema_version: 1,
-            seed_name: Some("nl".to_string()),
-            num_relations: relation_order.len(),
-            relation_order,
-            feature_dim: JINA_DIM,
-            schema_checksum: checksum,
-        };
-
-        Ok(Self { meta, edge_definitions, named_graphs, from_database: false })
     }
 
     /// Look up an edge definition by name.
@@ -425,35 +364,4 @@ mod tests {
         assert_ne!(compute_checksum(&order1), compute_checksum(&order2));
     }
 
-    #[test]
-    fn test_from_nl_statics() {
-        let schema = RuntimeSchema::from_nl_statics().unwrap();
-        assert_eq!(schema.meta.num_relations, 22);
-        assert_eq!(schema.edge_definitions.len(), 16);
-        assert_eq!(schema.named_graphs.len(), 6);
-        assert!(schema.meta.schema_checksum.starts_with("sha256:"));
-    }
-
-    #[test]
-    fn test_runtime_relation_index() {
-        let schema = RuntimeSchema::from_nl_statics().unwrap();
-        assert_eq!(schema.relation_index("nl_axiom_basis_edges"), Some(0));
-        assert_eq!(schema.relation_index("nl_validated_against_edges"), Some(19));
-        assert_eq!(schema.relation_index("nonexistent"), None);
-    }
-
-    #[test]
-    fn test_runtime_gharial_payload() {
-        let schema = RuntimeSchema::from_nl_statics().unwrap();
-        let payload = schema.to_gharial_payload("nl_core").unwrap();
-        assert_eq!(payload["name"], "nl_core");
-        let edge_defs = payload["edgeDefinitions"].as_array().unwrap();
-        assert_eq!(edge_defs.len(), 3);
-    }
-
-    #[test]
-    fn test_runtime_gharial_payload_unknown_graph() {
-        let schema = RuntimeSchema::from_nl_statics().unwrap();
-        assert!(schema.to_gharial_payload("nonexistent").is_none());
-    }
 }

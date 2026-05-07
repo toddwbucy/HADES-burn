@@ -192,6 +192,7 @@ async fn query_brute_force(
             LET meta = DOCUMENT(CONCAT("{metadata}/", emb.paper_key))
             RETURN {{
                 paper_key: emb.paper_key,
+                chunk_key: emb.chunk_key,
                 embedding: emb.embedding,
                 text: chunk.text,
                 chunk_index: chunk.chunk_index,

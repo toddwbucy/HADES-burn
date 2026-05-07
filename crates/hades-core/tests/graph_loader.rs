@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use hades_core::db::{ArangoClient, ArangoPool};
-use hades_core::graph::{self, EDGE_COLLECTION_NAMES, JINA_DIM, NUM_RELATIONS, RuntimeSchema};
+use hades_core::graph::{self, EDGE_COLLECTION_NAMES, NUM_RELATIONS, RuntimeSchema};
 use tracing::warn;
 
 /// Load the runtime schema for the integration tests, falling back to NL
@@ -70,11 +70,14 @@ async fn test_load_full_graph() {
         .await
         .expect("graph load failed");
 
-    // Structural invariants
+    // Structural invariants — graph dimensions must match the schema that
+    // drove the load, not the compile-time NL constants. (When `hades_schema`
+    // is absent the schema falls back to those constants, so this is still
+    // a meaningful check; it just no longer hides divergence.)
     assert!(graph.num_nodes > 0, "graph should have nodes");
     assert!(graph.num_edges > 0, "graph should have edges");
-    assert_eq!(graph.num_relations, NUM_RELATIONS);
-    assert_eq!(graph.feature_dim, JINA_DIM);
+    assert_eq!(graph.num_relations, schema.meta.num_relations);
+    assert_eq!(graph.feature_dim, schema.meta.feature_dim);
 
     // Validate passes (already called internally, but double-check)
     graph.validate().unwrap();
@@ -110,7 +113,7 @@ async fn test_load_full_graph() {
     // All edge relation types should be valid indices
     for &rel in &graph.edge_type {
         assert!(
-            (rel as usize) < NUM_RELATIONS,
+            (rel as usize) < schema.meta.num_relations,
             "edge relation type {rel} out of bounds"
         );
     }

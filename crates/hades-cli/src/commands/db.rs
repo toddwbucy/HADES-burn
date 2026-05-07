@@ -251,21 +251,6 @@ pub enum DbCmd {
         format: String,
     },
 
-    /// Backfill text fields for embedding.
-    BackfillText {
-        /// Collection name.
-        #[arg(short = 'c', long)]
-        collection: Option<String>,
-
-        /// Preview mode — don't actually modify documents.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Batch size.
-        #[arg(long, default_value_t = 100)]
-        batch_size: u32,
-    },
-
     /// Graph operations.
     #[command(subcommand)]
     Graph(DbGraphCmd),
@@ -397,7 +382,7 @@ pub enum DbGraphCmd {
 pub enum DbSchemaCmd {
     /// Initialize the hades_schema collection with a seed ontology.
     Init {
-        /// Seed name: "nl" (Nested Learning) or "empty" (blank for new domains).
+        /// Seed name: "empty" (blank for new domains).
         #[arg(short = 's', long)]
         seed: String,
     },

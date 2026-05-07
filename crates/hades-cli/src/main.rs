@@ -465,13 +465,6 @@ fn main() -> anyhow::Result<()> {
                 &config, collection.as_deref(), dimension, metric.as_deref(),
             ))
         }
-        Commands::Db(commands::db::DbCmd::BackfillText { collection, dry_run, batch_size }) => {
-            init_tracing();
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::db_write::run_backfill_text(
-                &config, collection.as_deref(), dry_run, batch_size,
-            ))
-        }
         // ── Native DB graph commands ──────────────────────────────────
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Traverse {
             start, direction, min_depth, max_depth, graph, format: _,

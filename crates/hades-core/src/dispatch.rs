@@ -5216,12 +5216,11 @@ mod handlers {
 
         // Validate seed name.
         let docs = match seed {
-            "nl" => runtime_schema::nl_seed_documents(),
             "empty" => runtime_schema::empty_seed_documents(),
             other => {
                 return Err(HandlerError::InvalidParameter {
                     name: "seed".to_string(),
-                    reason: format!("unknown seed \"{other}\"; expected \"nl\" or \"empty\""),
+                    reason: format!("unknown seed \"{other}\"; expected \"empty\""),
                 });
             }
         };

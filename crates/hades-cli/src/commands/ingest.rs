@@ -101,8 +101,7 @@ pub async fn run(
         None => CollectionProfile::default_profile(),
     };
 
-    // -- Classify inputs (all inputs are file paths) ---------------------------
-    let classified: Vec<PathBuf> = inputs.to_vec();
+    let file_paths: Vec<PathBuf> = inputs.to_vec();
 
     // Guard: refuse to write to production databases.
     config.require_writable_database()?;
@@ -120,7 +119,7 @@ pub async fn run(
         .context("failed to connect to embedding service")?;
 
     // -- Build pipeline --------------------------------------------------------
-    let embed_task = determine_embed_task(task, &classified);
+    let embed_task = determine_embed_task(task, &file_paths);
     let pipeline_config = PipelineConfig {
         profile,
         embed_task,
@@ -151,7 +150,7 @@ pub async fn run(
 
     let batch_config = BatchProcessorConfig {
         concurrency: batch_concurrency,
-        state_file: if batch || resume || classified.len() > 1 {
+        state_file: if batch || resume || file_paths.len() > 1 {
             Some(PathBuf::from(".hades-batch-state.json"))
         } else {
             None
@@ -167,11 +166,10 @@ pub async fn run(
     let processor = BatchProcessor::new(batch_config);
 
     // -- Build items for batch processor ---------------------------------------
-    let config = Arc::new(config.clone());
     let custom_id: Option<Arc<str>> = id.map(Arc::from);
     let extra_metadata = extra_metadata.map(Arc::new);
 
-    let items: Vec<(String, PathBuf)> = classified
+    let items: Vec<(String, PathBuf)> = file_paths
         .into_iter()
         .map(|path| {
             let item_id = path.display().to_string();
@@ -185,7 +183,6 @@ pub async fn run(
             let pipeline = pipeline.clone();
             let chunker = chunker.clone();
             let db = db.clone();
-            let _config = config.clone();
             let custom_id = custom_id.clone();
             let extra_metadata = extra_metadata.clone();
 

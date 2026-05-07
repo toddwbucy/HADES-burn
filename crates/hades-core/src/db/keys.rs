@@ -175,9 +175,15 @@ mod tests {
 
     #[test]
     fn test_strip_version() {
+        // arxiv-style identifiers (the original use case)
         assert_eq!(strip_version("2501.12345v1"), "2501.12345");
         assert_eq!(strip_version("2501.12345v12"), "2501.12345");
         assert_eq!(strip_version("2501.12345"), "2501.12345");
+        // non-arxiv identifiers — function is generic over any `v\d+` suffix
+        assert_eq!(strip_version("libfoo-1.0v3"), "libfoo-1.0");
+        assert_eq!(strip_version("libfoo-1.0"), "libfoo-1.0");
+        // version-like substring NOT at the end is left alone
+        assert_eq!(strip_version("v2_doc.key"), "v2_doc.key");
     }
 
     #[test]

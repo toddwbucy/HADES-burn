@@ -9,7 +9,7 @@
 //!   `doc_filter` is specified (ANN cannot push filters).
 
 use serde_json::Value;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 use super::collections::CollectionProfile;
 use super::error::ArangoError;
@@ -264,14 +264,16 @@ async fn query_brute_force(
     // Parse into SimilarityResult (strip raw embedding)
     let mut results = Vec::with_capacity(scored.len());
     for (score, doc) in scored {
-        let parent_key = doc
-            .get("paper_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let Some(parent_key) = doc.get("paper_key").and_then(|v| v.as_str()) else {
+            warn!(
+                chunk_key = doc.get("chunk_key").and_then(|v| v.as_str()).unwrap_or("?"),
+                "skipping search result: missing or non-string paper_key"
+            );
+            continue;
+        };
 
         results.push(SimilarityResult {
-            parent_key,
+            parent_key: parent_key.to_string(),
             text: doc.get("text").and_then(|v| v.as_str()).map(String::from),
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
@@ -308,18 +310,17 @@ fn dot_product(a: &[f64], b: &[f64]) -> f64 {
 fn parse_search_results(docs: Vec<Value>) -> Result<Vec<SimilarityResult>, ArangoError> {
     let mut results = Vec::with_capacity(docs.len());
     for doc in docs {
-        let parent_key = doc
-            .get("paper_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let Some(parent_key) = doc.get("paper_key").and_then(|v| v.as_str()) else {
+            warn!("skipping search result: missing or non-string paper_key");
+            continue;
+        };
         let score = doc
             .get("score")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
 
         results.push(SimilarityResult {
-            parent_key,
+            parent_key: parent_key.to_string(),
             text: doc.get("text").and_then(|v| v.as_str()).map(String::from),
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
@@ -411,5 +412,20 @@ mod tests {
         assert_eq!(results[0].external_id.as_deref(), Some("2501.12345"));
         assert_eq!(results[0].text.as_deref(), Some("some text"));
         assert!((results[0].score - 0.95).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_parse_search_results_skips_missing_paper_key() {
+        // Three docs: valid, missing paper_key, paper_key as non-string.
+        // The two malformed rows should be skipped (not pushed with empty key).
+        let docs = vec![
+            serde_json::json!({ "paper_key": "good_key", "score": 0.9 }),
+            serde_json::json!({ "score": 0.8 }), // no paper_key
+            serde_json::json!({ "paper_key": 42, "score": 0.7 }), // non-string
+        ];
+
+        let results = parse_search_results(docs).unwrap();
+        assert_eq!(results.len(), 1, "only the well-formed row should survive");
+        assert_eq!(results[0].parent_key, "good_key");
     }
 }

@@ -10,7 +10,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::schema::{JINA_DIM, NUM_RELATIONS};
+/// Default relation count for the test-defaulted [`GraphData::with_capacity`] —
+/// matches the historical NL ontology size. Production paths should call
+/// [`GraphData::with_schema_capacity`] with values from the runtime schema.
+const DEFAULT_NUM_RELATIONS: usize = 22;
+
+/// Default feature dimension for the test-defaulted constructors —
+/// matches Jina V4. Production paths read [`SchemaMeta::feature_dim`]
+/// from the runtime schema.
+const DEFAULT_FEATURE_DIM: usize = 2048;
 
 // ---------------------------------------------------------------------------
 // IDMap — bidirectional ArangoDB _id ↔ integer index
@@ -234,20 +242,22 @@ impl GraphData {
             edge_type: Vec::new(),
             num_nodes: 0,
             num_edges: 0,
-            num_relations: NUM_RELATIONS,
-            feature_dim: JINA_DIM,
+            num_relations: DEFAULT_NUM_RELATIONS,
+            feature_dim: DEFAULT_FEATURE_DIM,
             collection_names: Vec::new(),
         }
     }
 
     /// Allocate a graph with known node and edge counts, defaulting to the
-    /// compile-time NL constants (`NUM_RELATIONS`, `JINA_DIM`).
+    /// historical NL relation count and Jina V4 feature dim. Production
+    /// paths should call [`with_schema_capacity`](Self::with_schema_capacity)
+    /// with values from the runtime schema.
     ///
     /// Node features are initialized to zero (no embedding).
     /// `node_collections` is initialized to `u32::MAX` (sentinel) so that
     /// unset entries are caught by [`validate()`] once `collection_names` is populated.
     pub fn with_capacity(num_nodes: usize, num_edges: usize) -> Self {
-        Self::with_schema_capacity(num_nodes, num_edges, NUM_RELATIONS, JINA_DIM)
+        Self::with_schema_capacity(num_nodes, num_edges, DEFAULT_NUM_RELATIONS, DEFAULT_FEATURE_DIM)
     }
 
     /// Allocate a graph with explicit relation count and feature dimension.
@@ -423,6 +433,10 @@ impl GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test-local aliases for the historical NL ontology shape.
+    const NUM_RELATIONS: usize = DEFAULT_NUM_RELATIONS;
+    const JINA_DIM: usize = DEFAULT_FEATURE_DIM;
 
     #[test]
     fn test_idmap_get_or_create() {

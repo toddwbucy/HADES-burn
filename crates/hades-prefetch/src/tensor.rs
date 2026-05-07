@@ -720,7 +720,10 @@ pub fn prepare_and_serialize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hades_core::graph::schema::{JINA_DIM, NUM_RELATIONS};
+
+    /// Local test fixtures matching the historical NL ontology shape.
+    const JINA_DIM: usize = 2048;
+    const NUM_RELATIONS: usize = 22;
 
     /// Build a small test graph for unit tests.
     fn test_graph() -> GraphData {

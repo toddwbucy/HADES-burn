@@ -429,7 +429,9 @@ impl std::fmt::Debug for Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hades_core::graph::schema::NUM_RELATIONS;
+
+    /// Local fixture matching the historical NL ontology shape.
+    const NUM_RELATIONS: usize = 22;
 
     #[test]
     fn test_train_config_defaults() {

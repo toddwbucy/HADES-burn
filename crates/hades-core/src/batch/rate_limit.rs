@@ -1,7 +1,4 @@
 //! Token-bucket rate limiter with exponential backoff.
-//!
-//! Extracted from the pattern in `arxiv/client.rs` but made
-//! standalone and reusable.
 
 use std::time::{Duration, Instant};
 

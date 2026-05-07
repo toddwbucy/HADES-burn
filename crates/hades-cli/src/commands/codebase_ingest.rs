@@ -401,6 +401,25 @@ async fn ensure_named_graph(db: &ArangoPool) -> Result<()> {
         Err(e) if e.kind() == ArangoErrorKind::Conflict => {
             debug!(graph = CODEBASE_GRAPH, "named graph already exists");
         }
+        Err(e)
+            if matches!(
+                e.kind(),
+                ArangoErrorKind::Forbidden
+                    | ArangoErrorKind::NotFound
+                    | ArangoErrorKind::Unavailable
+            ) =>
+        {
+            // Non-fatal: edge collections work for AQL traversals without
+            // a named graph wrapper. Forbidden/NotFound typically mean the
+            // Metis proxy or RBAC blocks the gharial management endpoint;
+            // Unavailable means the endpoint is temporarily down.
+            warn!(
+                graph = CODEBASE_GRAPH,
+                error = %e,
+                kind = ?e.kind(),
+                "failed to create named graph (non-fatal — edges still work)"
+            );
+        }
         Err(e) => {
             return Err(anyhow::anyhow!(e).context("failed to create named graph"));
         }

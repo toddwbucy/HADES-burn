@@ -47,15 +47,19 @@ pub enum SchemaError {
 pub struct RuntimeEdgeDef {
     /// ArangoDB edge collection name.
     pub name: String,
-    /// Document field that holds the reference(s).
-    pub source_field: String,
+    /// Document field that holds the reference(s) used to materialize edges
+    /// from this source. `None` for edge collections that aren't materialized
+    /// from a source-document field (e.g., compliance edges authored directly
+    /// via `hades link`).
+    #[serde(default)]
+    pub source_field: Option<String>,
     /// Vertex collections that can appear as `_from`.
     pub from_collections: Vec<String>,
     /// Vertex collections that can appear as `_to`.
     pub to_collections: Vec<String>,
-    /// Human-readable description.
+    /// Human-readable description. `None` when the YAML omitted it.
     #[serde(default)]
-    pub description: String,
+    pub description: Option<String>,
     /// Whether `source_field` holds a list of references.
     #[serde(default)]
     pub is_array: bool,

@@ -425,7 +425,9 @@ mod tests {
         let (mut client, server) = UnixStream::pair().unwrap();
 
         // Dummy pool+config — dispatch is never reached (tier check fires first).
-        let config = HadesConfig::default();
+        // The pool just needs to exist; no real DB connection happens in this test.
+        let mut config = HadesConfig::default();
+        config.database.name = Some("bident_burn".to_string());
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let payload = serde_json::to_vec(&serde_json::json!({

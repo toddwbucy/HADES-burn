@@ -3098,7 +3098,7 @@ mod handlers {
         // 3. Config summary
         let writable = config.require_writable_database().is_ok();
         let config_info = json!({
-            "database": config.effective_database(),
+            "database": config.effective_database().ok(),
             "writable": writable,
             "arango_socket_ro": config.effective_socket(true),
             "arango_socket_rw": config.effective_socket(false),
@@ -5718,7 +5718,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_insert() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5739,7 +5739,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_remove() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5760,7 +5760,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_update() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5781,7 +5781,7 @@ mod tests {
         // "RETURN 1" should pass the read-only check (will fail at AQL execution
         // if ArangoDB is unreachable, but should not fail at validation).
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5809,7 +5809,7 @@ mod tests {
     #[test]
     fn test_db_aql_allows_insert_in_string() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         // The word INSERT appears inside a string literal — should NOT be rejected.
@@ -5834,7 +5834,7 @@ mod tests {
     #[test]
     fn test_db_aql_allows_update_in_comment() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         // The word UPDATE appears inside a comment — should NOT be rejected.
@@ -5861,7 +5861,7 @@ mod tests {
     #[test]
     fn test_db_list_invalid_profile() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5884,7 +5884,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_non_object_bind() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6007,7 +6007,7 @@ mod tests {
     fn test_write_denied_on_production_db() {
         // Default config targets NestedLearning — writes must be rejected.
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6030,7 +6030,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_update() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6052,7 +6052,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_delete() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6073,7 +6073,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_purge() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6093,7 +6093,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_create_collection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6338,7 +6338,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_graph_create() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default(); // NestedLearning — production
+        let config = HadesConfig::with_database("NestedLearning"); // non-writable
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6359,7 +6359,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_graph_drop() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default(); // NestedLearning — production
+        let config = HadesConfig::with_database("NestedLearning"); // non-writable
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6381,7 +6381,7 @@ mod tests {
     #[test]
     fn test_write_denied_on_production_db_link_code_smell() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::default(); // NestedLearning — production
+        let config = HadesConfig::with_database("NestedLearning"); // non-writable
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(

@@ -12,7 +12,10 @@
 database:
   host: localhost
   port: 8529
-  database: NestedLearning
+  # No `database:` field by design — every command must specify --db <name>
+  # (or set HADES_DATABASE) explicitly. There is no implicit default; an
+  # unconfigured command fails with a clear "no database specified" error
+  # rather than silently targeting some shared/production database.
   username: root
   # password: always from ARANGO_PASSWORD env var
 

@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_pool_from_config_shared() {
         let mut config = HadesConfig::default();
-        config.database.name = "test_pool_db".to_string();
+        config.database.name = Some("test_pool_db".to_string());
         let pool = ArangoPool::from_config(&config).unwrap();
         assert!(pool.is_shared());
         assert_eq!(pool.database(), "test_pool_db");
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_pool_accessors() {
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         let pool = ArangoPool::from_config(&config).unwrap();
         // Both should target the same database
         assert_eq!(pool.reader().database(), pool.writer().database());

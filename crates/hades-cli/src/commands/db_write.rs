@@ -181,7 +181,7 @@ pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) ->
     // Constructing a temporary HadesConfig with the target name lets us reuse
     // the existing `require_writable_database` check.
     let mut target_config = config.clone();
-    target_config.database.name = name.to_string();
+    target_config.database.name = Some(name.to_string());
     target_config
         .require_writable_database()
         .with_context(|| format!("refusing to drop database '{name}'"))?;
@@ -189,7 +189,7 @@ pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) ->
     use hades_core::db::ArangoClient;
 
     let mut system_config = config.clone();
-    system_config.database.name = "_system".to_string();
+    system_config.database.name = Some("_system".to_string());
     let client = ArangoClient::from_config(&system_config, false)
         .context("failed to connect to ArangoDB for database deletion")?;
 
@@ -224,7 +224,7 @@ pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()>
     // session whose default DB is read-only (e.g. NestedLearning) would
     // wrongly fail the guard.
     let mut target_config = config.clone();
-    target_config.database.name = name.to_string();
+    target_config.database.name = Some(name.to_string());
     target_config
         .require_writable_database()
         .with_context(|| format!("refusing to create database '{name}'"))?;
@@ -232,7 +232,7 @@ pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()>
     use hades_core::db::ArangoClient;
 
     let mut system_config = config.clone();
-    system_config.database.name = "_system".to_string();
+    system_config.database.name = Some("_system".to_string());
     let client = ArangoClient::from_config(&system_config, false)
         .context("failed to connect to ArangoDB for database creation")?;
 

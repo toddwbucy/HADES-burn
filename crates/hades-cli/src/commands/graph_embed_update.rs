@@ -36,7 +36,7 @@ pub async fn run(
     // ── Preflight export target ─────────────────────────────────────
     let export_pool = if let Some(target_db) = export_to {
         let mut export_config = config.clone();
-        export_config.database.name = target_db.to_string();
+        export_config.database.name = Some(target_db.to_string());
         export_config.require_writable_database()?;
         ArangoPool::from_config(&export_config)
             .context("failed to connect to export target database")?
@@ -177,7 +177,7 @@ pub async fn run(
         },
         "export": {
             "count": export_count,
-            "target_db": export_to.unwrap_or(config.effective_database()),
+            "target_db": export_to.unwrap_or_else(|| config.effective_database().unwrap_or("")),
         },
     });
 

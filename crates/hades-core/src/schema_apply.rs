@@ -35,6 +35,12 @@ use tracing::{debug, info};
 
 use crate::db::{ArangoError, ArangoErrorKind, ArangoPool, crud};
 
+/// Placeholder used in plan ops and `_key` suffixes when an edge
+/// definition has no `source_field`. Parenthesized so it cannot
+/// collide with a user-supplied field name. Must match between
+/// `plan()` (operation visibility) and `apply()` (Arango `_key`).
+const NO_SOURCE_FIELD: &str = "(none)";
+
 // ── public types ──────────────────────────────────────────────────────
 
 /// Errors that can occur during schema apply.
@@ -400,7 +406,10 @@ pub fn plan(file: &SchemaFile) -> Vec<Operation> {
     for ed in &file.edge_definitions {
         ops.push(Operation::UpsertEdgeDefinition {
             name: ed.name.clone(),
-            source_field: ed.source_field.clone().unwrap_or_else(|| "(none)".into()),
+            source_field: ed
+                .source_field
+                .clone()
+                .unwrap_or_else(|| NO_SOURCE_FIELD.into()),
         });
     }
 
@@ -478,7 +487,7 @@ pub async fn apply(
     //    keyed off different source fields can coexist on one
     //    collection (the historical NL pattern).
     for ed in &file.edge_definitions {
-        let sf_key_part = ed.source_field.as_deref().unwrap_or("default");
+        let sf_key_part = ed.source_field.as_deref().unwrap_or(NO_SOURCE_FIELD);
         let key = format!("edge__{}__{}", ed.name, sf_key_part);
         let doc = json!({
             "_key": key,
@@ -530,15 +539,16 @@ pub async fn apply(
 
     // 6. Named graphs via gharial. Idempotent: 409 Conflict (graph
     //    exists) is treated as success; other errors propagate.
-    for ng in &file.named_graphs {
-        // Build edge_definitions payload from the named edge collection
-        // names, looking up from/to in our parsed edge_definitions.
-        let edge_def_lookup: HashMap<&str, &EdgeDef> = file
-            .edge_definitions
-            .iter()
-            .map(|ed| (ed.name.as_str(), ed))
-            .collect();
+    //
+    //    Build the edge_definitions lookup once: it depends only on
+    //    `file`, not on which graph we're iterating.
+    let edge_def_lookup: HashMap<&str, &EdgeDef> = file
+        .edge_definitions
+        .iter()
+        .map(|ed| (ed.name.as_str(), ed))
+        .collect();
 
+    for ng in &file.named_graphs {
         let edge_definitions: Vec<Value> = ng
             .edges
             .iter()

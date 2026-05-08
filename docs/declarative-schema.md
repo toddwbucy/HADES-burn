@@ -261,9 +261,14 @@ the same). Re-running with a *modified* YAML on an in-use DB is what
 
 Two layers:
 
-1. **Structural**: serde deserialization rejects unknown fields and
-   missing required fields. Output: clear "field X missing at line N"
-   errors.
+1. **Structural**: serde deserialization rejects missing required
+   fields with clear "field X missing at line N" errors. Note that
+   serde's *default* behavior silently ignores unknown fields, which
+   would let typos in user-authored YAML pass without warning. The
+   implementation MUST annotate every schema struct with
+   `#[serde(deny_unknown_fields)]` (or perform an equivalent runtime
+   check) so that `axiom:` written instead of `axioms:` is caught at
+   parse time rather than silently dropped.
 2. **Semantic**: after parse, the validator checks:
    - Every edge collection in `edge_definitions[].from_collections` /
      `to_collections` is also declared in `collections:`
@@ -398,9 +403,11 @@ my_concepts:
     description: "first concept"
 EOF
 
-# 2. Provision the database
+# 2. Provision the database. `schema apply` is the single bootstrap
+#    entrypoint: it creates `hades_schema` (if missing) along with every
+#    collection declared in the YAML, then populates them. There is no
+#    separate `db schema init` step required.
 $ hades db create-database my_project_db
-$ hades --db my_project_db db schema init --seed empty
 $ hades --db my_project_db schema apply my-project/schema.yaml
 
 # 3. Verify

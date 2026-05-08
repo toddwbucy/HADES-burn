@@ -226,14 +226,14 @@ skip "drop test collection $TEST_COL" "no CLI 'db drop-collection'; collection l
 
 # ── Summary ────────────────────────────────────────────────────────────
 TOTAL=$((PASS + FAIL + SKIPPED))
-printf "\n${D}══════════════════════════════════════════════${N}\n"
+printf "\n%s══════════════════════════════════════════════%s\n" "$D" "$N"
 printf "Total:   %3d\n" "$TOTAL"
-printf "${G}Passed:  %3d${N}\n" "$PASS"
-printf "${R}Failed:  %3d${N}\n" "$FAIL"
-printf "${Y}Skipped: %3d${N}\n" "$SKIPPED"
+printf "%sPassed:  %3d%s\n" "$G" "$PASS" "$N"
+printf "%sFailed:  %3d%s\n" "$R" "$FAIL" "$N"
+printf "%sSkipped: %3d%s\n" "$Y" "$SKIPPED" "$N"
 
 if [[ $FAIL -gt 0 ]]; then
-    printf "\n${R}Failures:${N}\n"
+    printf "\n%sFailures:%s\n" "$R" "$N"
     for f in "${FAILURES[@]}"; do
         printf "  - %s\n" "$f"
     done

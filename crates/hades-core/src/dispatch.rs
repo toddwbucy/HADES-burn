@@ -4640,19 +4640,59 @@ mod handlers {
     ///
     /// Given a file like `conductor.rs`, generates:
     /// `["conductor", "conductor-rs", "conductor_rs"]`
-    pub(crate) fn candidate_doc_keys(path: &std::path::Path) -> Vec<String> {
+    /// Generate candidate document keys for a file path.
+    ///
+    /// The canonical key (matching what `codebase ingest` writes via
+    /// `keys::file_key(rel_path)`) is produced first — this is the form
+    /// `src/lib.rs` → `src_lib_rs` that's actually stored in
+    /// `codebase_files`. The basename-derived variants follow as
+    /// fallbacks for legacy databases that may have different key shapes.
+    ///
+    /// `scan_root` is the directory the verify pass was launched against
+    /// (so we can compute `path` relative to it). When `path` is not
+    /// inside `scan_root` (defensive case — shouldn't happen during a
+    /// normal scan), the canonical step is skipped and only basename
+    /// variants are produced.
+    pub(crate) fn candidate_doc_keys(
+        scan_root: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Vec<String> {
+        use crate::db::keys;
+
+        let mut keys: Vec<String> = Vec::new();
+
+        // Canonical form: file_key over the path relative to scan_root.
+        // E.g., `src/lib.rs` relative to project root → `src_lib_rs`.
+        // When path == scan_root (single-file scan), strip_prefix yields
+        // an empty path; fall back to the file name so we still produce
+        // the canonical `<filename>_<ext>` form.
+        if let Ok(rel) = path.strip_prefix(scan_root) {
+            let rel_str = rel.to_string_lossy();
+            let canonical = if rel_str.is_empty() {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(keys::file_key)
+            } else {
+                Some(keys::file_key(&rel_str))
+            };
+            if let Some(key) = canonical {
+                keys.push(key);
+            }
+        }
+
+        // Basename-derived fallbacks (legacy / heuristic keys).
         let stem = path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
         if stem.is_empty() {
-            return Vec::new();
+            return keys;
         }
         let ext_label = path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
-        let mut keys = vec![stem.clone()];
+        keys.push(stem.clone());
         if !ext_label.is_empty() {
             keys.push(format!("{stem}-{ext_label}"));
         }
@@ -4851,8 +4891,11 @@ mod handlers {
         // verify lookup to legitimate source collections (e.g.,
         // codebase_files, agent memory collections) without spuriously
         // matching same-keyed documents in unrelated collections.
-        // Falls back to ["codebase_files"] if no edge_definition is
-        // registered for compliance_edges yet.
+        //
+        // Fallback to `["codebase_files"]` covers two scenarios:
+        //   - The edge_definition isn't registered yet (empty result)
+        //   - The hades_schema collection itself doesn't exist (NotFound)
+        // Real errors (transport, auth, AQL syntax) still propagate.
         let source_collections: Vec<String> = {
             let schema_aql = r#"
                 FOR sd IN hades_schema
@@ -4864,17 +4907,25 @@ mod handlers {
             let res = query::query(
                 pool, schema_aql, None, None, false, ExecutionTarget::Reader,
             )
-            .await
-            .map_err(|e| HandlerError::Query {
-                context: "failed to read compliance_edges definition from hades_schema".into(),
-                source: e,
-            })?;
-            res.results
-                .into_iter()
-                .next()
-                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| vec!["codebase_files".to_string()])
+            .await;
+            match res {
+                Ok(r) => r.results
+                    .into_iter()
+                    .next()
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| vec!["codebase_files".to_string()]),
+                Err(e) if e.is_not_found() => {
+                    // hades_schema collection doesn't exist (fresh DB).
+                    vec!["codebase_files".to_string()]
+                }
+                Err(e) => {
+                    return Err(HandlerError::Query {
+                        context: "failed to read compliance_edges definition from hades_schema".into(),
+                        source: e,
+                    });
+                }
+            }
         };
 
         // Verify compliance edges.
@@ -4897,7 +4948,7 @@ mod handlers {
             };
 
             let smell_id = smell["_id"].as_str().unwrap_or("");
-            let candidate_keys = candidate_doc_keys(file);
+            let candidate_keys = candidate_doc_keys(scan_path, file);
 
             // Build full `_from` candidates: cross product of declared
             // source collections × candidate keys. This preserves
@@ -7036,15 +7087,43 @@ mod tests {
     fn test_candidate_doc_keys() {
         use super::handlers;
         use std::path::Path;
-        let keys = handlers::candidate_doc_keys(Path::new("conductor.rs"));
+
+        // Single-file scan (root and file are the same): canonical key
+        // is the file_key form. Basename variants follow as fallbacks.
+        let keys = handlers::candidate_doc_keys(
+            Path::new("conductor.rs"),
+            Path::new("conductor.rs"),
+        );
+        assert!(keys.contains(&"conductor_rs".into()),
+                "canonical file_key form missing from {keys:?}");
         assert!(keys.contains(&"conductor".into()));
         assert!(keys.contains(&"conductor-rs".into()));
 
-        let keys2 = handlers::candidate_doc_keys(Path::new("my_module.py"));
+        // Underscore-bearing stem: dashed-variant fallback exists.
+        let keys2 = handlers::candidate_doc_keys(
+            Path::new("my_module.py"),
+            Path::new("my_module.py"),
+        );
+        assert!(keys2.contains(&"my_module_py".into()),
+                "canonical file_key form missing from {keys2:?}");
         assert!(keys2.contains(&"my_module".into()));
         assert!(keys2.contains(&"my_module-py".into()));
         assert!(keys2.contains(&"my-module".into()));
         assert!(keys2.contains(&"my-module-py".into()));
+
+        // Nested file relative to a scan root: canonical form uses the
+        // relative path. This is the case that was broken before —
+        // verify on `src/lib.rs` would only check `lib`/`lib-rs` and
+        // never match the actually-stored `src_lib_rs` key.
+        let keys3 = handlers::candidate_doc_keys(
+            Path::new("/proj"),
+            Path::new("/proj/src/lib.rs"),
+        );
+        assert!(keys3.contains(&"src_lib_rs".into()),
+                "canonical file_key form missing from {keys3:?}");
+        // Basename fallbacks still present.
+        assert!(keys3.contains(&"lib".into()));
+        assert!(keys3.contains(&"lib-rs".into()));
     }
 
     #[test]

@@ -4846,6 +4846,37 @@ mod handlers {
             }
         }
 
+        // Look up which source collections compliance_edges accepts —
+        // read from the database's hades_schema. This bounds the
+        // verify lookup to legitimate source collections (e.g.,
+        // codebase_files, agent memory collections) without spuriously
+        // matching same-keyed documents in unrelated collections.
+        // Falls back to ["codebase_files"] if no edge_definition is
+        // registered for compliance_edges yet.
+        let source_collections: Vec<String> = {
+            let schema_aql = r#"
+                FOR sd IN hades_schema
+                    FILTER sd.schema_type == "edge_definition"
+                       AND sd.name == "compliance_edges"
+                    LIMIT 1
+                    RETURN sd.from_collections
+            "#;
+            let res = query::query(
+                pool, schema_aql, None, None, false, ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to read compliance_edges definition from hades_schema".into(),
+                source: e,
+            })?;
+            res.results
+                .into_iter()
+                .next()
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| vec!["codebase_files".to_string()])
+        };
+
         // Verify compliance edges.
         let mut verified_refs = Vec::new();
         let mut missing_from_graph = Vec::new();
@@ -4868,20 +4899,25 @@ mod handlers {
             let smell_id = smell["_id"].as_str().unwrap_or("");
             let candidate_keys = candidate_doc_keys(file);
 
-            // Find a compliance edge from any source collection whose
-            // _from key matches a candidate. Source-collection-agnostic:
-            // claims linked from `codebase_files`, agent memory
-            // collections, paper corpora, etc. all match the same query.
-            // PARSE_IDENTIFIER splits the document `_id` into its
-            // collection and key parts.
+            // Build full `_from` candidates: cross product of declared
+            // source collections × candidate keys. This preserves
+            // collection identity — an edge from
+            // `agent_memory/main_rs` won't satisfy a CS claim in a
+            // codebase_files document just because they share a key.
+            let froms: Vec<String> = source_collections
+                .iter()
+                .flat_map(|col| {
+                    candidate_keys.iter().map(move |k| format!("{col}/{k}"))
+                })
+                .collect();
+
             let aql = r#"
                 FOR e IN compliance_edges
-                    FILTER e._to == @to
-                    FILTER PARSE_IDENTIFIER(e._from).key IN @keys
+                    FILTER e._to == @to AND e._from IN @froms
                     LIMIT 1
                     RETURN e
             "#;
-            let bind_vars = json!({ "keys": candidate_keys, "to": smell_id });
+            let bind_vars = json!({ "froms": froms, "to": smell_id });
             let result = query::query(
                 pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
             )
@@ -5136,10 +5172,16 @@ mod handlers {
         let smell_key = smell_doc["_key"].as_str().unwrap_or(smell_id);
         let smell_name = smell_doc["name"].as_str().unwrap_or("");
 
-        // Construct edge with a generic composite key:
-        //   <source_collection>_<source_key>__smell_specs_<smell_key>
-        let edge_key = format!(
-            "{source_collection}_{source_key}__smell_specs_{smell_key}"
+        // Construct edge with a collision-resistant key. The previous
+        // form `{source_collection}_{source_key}__smell_specs_{smell_key}`
+        // was ambiguous: `("codebase_files","foo_bar")` and
+        // `("codebase","files_foo_bar")` collided. The helper hashes
+        // null-separated components so the (collection, key) pair is
+        // unambiguous.
+        let edge_key = crate::db::keys::compliance_edge_key(
+            source_collection,
+            source_key,
+            smell_key,
         );
         let from_id = format!("{source_collection}/{source_key}");
         let to_id = format!("smell_specs/{smell_key}");

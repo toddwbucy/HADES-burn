@@ -4494,13 +4494,6 @@ mod handlers {
 
     // ── Smell & compliance handlers ──────────────────────────────────
 
-    /// STATIC tier smell IDs — violations block ingest.
-    const STATIC_SMELL_IDS: &[i64] = &[10, 11, 13, 40];
-    /// BEHAVIORAL tier smell IDs — informational.
-    const BEHAVIORAL_SMELL_IDS: &[i64] = &[27, 28, 32];
-    /// ARCHITECTURAL tier smell IDs — informational.
-    const ARCHITECTURAL_SMELL_IDS: &[i64] = &[31];
-
     /// Source file extensions to scan.
     const SOURCE_EXTENSIONS: &[&str] = &[
         ".py", ".rs", ".cu", ".cpp", ".c", ".ts", ".js",
@@ -4508,18 +4501,14 @@ mod handlers {
     ];
 
     /// Allowed enforcement types for compliance edges.
+    ///
+    /// Stays as a hardcoded validator: these are the *enforcement
+    /// semantics* the framework supports, not the per-smell tier
+    /// classification (which is now read from each smell_spec
+    /// document's `tier` field).
     const ALLOWED_ENFORCEMENT: &[&str] = &[
         "static", "behavioral", "architectural", "review", "documentation",
     ];
-
-    pub(crate) fn smell_tier(smell_id: Option<i64>) -> &'static str {
-        match smell_id {
-            Some(id) if STATIC_SMELL_IDS.contains(&id) => "static",
-            Some(id) if BEHAVIORAL_SMELL_IDS.contains(&id) => "behavioral",
-            Some(id) if ARCHITECTURAL_SMELL_IDS.contains(&id) => "architectural",
-            _ => "unknown",
-        }
-    }
 
     pub(crate) fn comment_prefixes(ext: &str) -> &'static [&'static str] {
         match ext {
@@ -4687,13 +4676,17 @@ mod handlers {
         use crate::db::query::{self, ExecutionTarget};
 
         // Load smells with forbidden patterns from the graph.
+        // The `tier` field comes from the document itself — no hardcoded
+        // ID-to-tier mapping. Smells without a `tier` field default to
+        // "unknown" at the consumer.
         let aql = r#"
-            FOR doc IN nl_code_smells
+            FOR doc IN smell_specs
                 FILTER doc.forbidden_patterns != null AND LENGTH(doc.forbidden_patterns) > 0
                 RETURN {
                     _key: doc._key,
                     smell_id: doc.smell_id,
                     name: doc.name,
+                    tier: doc.tier,
                     forbidden_patterns: doc.forbidden_patterns,
                     scope: doc.scope
                 }
@@ -4751,7 +4744,10 @@ mod handlers {
                             None => continue,
                         };
                         if line.contains(pat) {
-                            let tier = smell_tier(smell_id);
+                            // Read tier directly from the smell document.
+                            // Falls back to "unknown" if the document was
+                            // authored without a tier field.
+                            let tier = smell["tier"].as_str().unwrap_or("unknown");
                             if tier == "static" {
                                 has_static_violation = true;
                             }
@@ -4830,7 +4826,7 @@ mod handlers {
             let num_str = cs_id.strip_prefix("CS-").unwrap_or(cs_id);
 
             let aql = r#"
-                FOR doc IN nl_code_smells
+                FOR doc IN smell_specs
                     FILTER doc.smell_id == TO_NUMBER(@num) OR STARTS_WITH(doc.name, @prefix)
                     LIMIT 1
                     RETURN {_key: doc._key, _id: doc._id, smell_id: doc.smell_id, name: doc.name}
@@ -4873,11 +4869,15 @@ mod handlers {
             let candidate_keys = candidate_doc_keys(file);
 
             // Try each candidate key to find a compliance edge.
+            // Source documents are assumed to live in `codebase_files`
+            // (the universal codebase ontology). For domains using a
+            // different source collection, set up the corresponding
+            // edge_definition in your `hades_schema`.
             let mut found_edge = None;
             for key in &candidate_keys {
-                let from_id = format!("arxiv_metadata/{key}");
+                let from_id = format!("codebase_files/{key}");
                 let aql = r#"
-                    FOR e IN nl_smell_compliance_edges
+                    FOR e IN compliance_edges
                         FILTER e._from == @from AND e._to == @to
                         LIMIT 1
                         RETURN e
@@ -5059,14 +5059,34 @@ mod handlers {
             });
         }
 
-        // Verify source document exists in arxiv_metadata.
-        let source_key = source_id.trim();
-        crud::get_document(pool, "arxiv_metadata", source_key)
+        // Parse source_id as "<collection>/<key>". Reject bare keys —
+        // the caller must qualify the source so the link command is
+        // domain-agnostic (works against codebase_files, agent memory
+        // collections, paper corpora, etc.).
+        let trimmed = source_id.trim();
+        let (source_collection, source_key) = trimmed.split_once('/').ok_or_else(|| {
+            HandlerError::InvalidParameter {
+                name: "source_id".into(),
+                reason: format!(
+                    "expected '<collection>/<key>', got {trimmed:?} — \
+                     bare keys are no longer accepted (post-PR α)"
+                ),
+            }
+        })?;
+        if source_collection.is_empty() || source_key.is_empty() {
+            return Err(HandlerError::InvalidParameter {
+                name: "source_id".into(),
+                reason: format!("empty collection or key in source_id {trimmed:?}"),
+            });
+        }
+
+        // Verify source document exists in its declared collection.
+        crud::get_document(pool, source_collection, source_key)
             .await
             .map_err(|e| {
                 if e.is_not_found() {
                     HandlerError::DocumentNotFound {
-                        collection: "arxiv_metadata".into(),
+                        collection: source_collection.into(),
                         key: source_key.into(),
                     }
                 } else {
@@ -5081,7 +5101,7 @@ mod handlers {
         let smell_doc = if let Some(prefix) = smell_key_prefix(smell_id) {
             let prefix_len = prefix.len() as i64;
             let aql = r#"
-                FOR s IN nl_code_smells
+                FOR s IN smell_specs
                     FILTER LEFT(s._key, @prefix_len) == @prefix
                     LIMIT 1
                     RETURN s
@@ -5098,7 +5118,7 @@ mod handlers {
             result.results.into_iter().next()
         } else {
             // Treat as exact key.
-            match crud::get_document(pool, "nl_code_smells", smell_id).await {
+            match crud::get_document(pool, "smell_specs", smell_id).await {
                 Ok(doc) => Some(doc),
                 Err(e) if e.is_not_found() => None,
                 Err(e) => {
@@ -5111,19 +5131,20 @@ mod handlers {
         };
 
         let smell_doc = smell_doc.ok_or_else(|| HandlerError::DocumentNotFound {
-            collection: "nl_code_smells".into(),
+            collection: "smell_specs".into(),
             key: smell_id.into(),
         })?;
 
         let smell_key = smell_doc["_key"].as_str().unwrap_or(smell_id);
         let smell_name = smell_doc["name"].as_str().unwrap_or("");
 
-        // Construct edge.
+        // Construct edge with a generic composite key:
+        //   <source_collection>_<source_key>__smell_specs_<smell_key>
         let edge_key = format!(
-            "arxiv_metadata_{source_key}__nl_code_smells_{smell_key}"
+            "{source_collection}_{source_key}__smell_specs_{smell_key}"
         );
-        let from_id = format!("arxiv_metadata/{source_key}");
-        let to_id = format!("nl_code_smells/{smell_key}");
+        let from_id = format!("{source_collection}/{source_key}");
+        let to_id = format!("smell_specs/{smell_key}");
 
         let mut edge_doc = json!({
             "_key": edge_key,
@@ -5141,7 +5162,7 @@ mod handlers {
 
         // Insert edge — treat 409 Conflict as idempotent success.
         let already_exists = match crud::insert_document(
-            pool, "nl_smell_compliance_edges", &edge_doc,
+            pool, "compliance_edges", &edge_doc,
         ).await {
             Ok(_) => false,
             Err(e) if e.kind() == ArangoErrorKind::Conflict => true,
@@ -6924,20 +6945,11 @@ mod tests {
         let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
     }
 
-    #[test]
-    fn test_smell_tier_classification() {
-        use super::handlers;
-        assert_eq!(handlers::smell_tier(Some(10)), "static");
-        assert_eq!(handlers::smell_tier(Some(11)), "static");
-        assert_eq!(handlers::smell_tier(Some(13)), "static");
-        assert_eq!(handlers::smell_tier(Some(40)), "static");
-        assert_eq!(handlers::smell_tier(Some(27)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(28)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(32)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(31)), "architectural");
-        assert_eq!(handlers::smell_tier(Some(99)), "unknown");
-        assert_eq!(handlers::smell_tier(None), "unknown");
-    }
+    // test_smell_tier_classification removed in PR α: smell tier is now
+    // read from each smell_spec document's `tier` field rather than
+    // looked up in compile-time constants. The default-to-"unknown"
+    // behavior for missing/unknown tiers is exercised inline at the
+    // smell_check call site (`smell["tier"].as_str().unwrap_or("unknown")`).
 
     #[test]
     fn test_smell_key_prefix() {

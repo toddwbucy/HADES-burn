@@ -8,5 +8,6 @@ pub mod dispatch;
 pub mod graph;
 pub mod persephone;
 pub mod pipeline;
+pub mod schema_apply;
 
 pub use config::HadesConfig;

@@ -15,7 +15,7 @@ use hades_core::config;
 use commands::{
     codebase::CodebaseCmd, db::DbCmd,
     embed::{EmbedCmd, EmbedGpuCmd, EmbedServiceCmd},
-    graph_embed::GraphEmbedCmd, smell::SmellCmd, task::TaskCmd,
+    graph_embed::GraphEmbedCmd, schema::SchemaCmd, smell::SmellCmd, task::TaskCmd,
 };
 
 /// HADES-Burn — AI model interface for semantic search over academic papers,
@@ -156,6 +156,13 @@ enum Commands {
     /// Graph embedding operations — train and query structural embeddings.
     #[command(subcommand)]
     GraphEmbed(GraphEmbedCmd),
+
+    /// Declarative schema operations — apply YAML schema files at bootstrap.
+    ///
+    /// Distinct from `db schema {init,list,show,version}` which inspects
+    /// the live `hades_schema` collection. See `docs/declarative-schema.md`.
+    #[command(subcommand)]
+    Schema(SchemaCmd),
 
     /// Start the HADES daemon (Unix socket query server).
     Daemon {
@@ -303,6 +310,11 @@ fn main() -> anyhow::Result<()> {
                 export_to.as_deref(),
                 &checkpoint_dir,
             ))
+        }
+        Commands::Schema(SchemaCmd::Apply { file, dry_run, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::schema::run_apply(&config, &file, dry_run, force))
         }
         Commands::Daemon { socket } => {
             init_tracing();

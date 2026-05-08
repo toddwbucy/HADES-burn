@@ -2640,7 +2640,11 @@ mod handlers {
                 continue;
             }
 
-            let def_key = format!("{}:{}", edef.name, edef.source_field);
+            let def_key = format!(
+                "{}:{}",
+                edef.name,
+                edef.source_field.as_deref().unwrap_or("(none)")
+            );
             tracing::info!(definition = %def_key, "materializing");
 
             let mut stats = MaterializeStats::default();
@@ -2794,7 +2798,13 @@ mod handlers {
         use crate::db::query::{self, ExecutionTarget};
 
         let mut edges = Vec::new();
-        let field = &edef.source_field;
+        // Edge definitions without a source_field aren't materialize-able
+        // (e.g. compliance edges authored directly via `hades link`).
+        // Return empty edges so the materialize pass skips this definition.
+        let field = match edef.source_field.as_deref() {
+            Some(f) if !f.is_empty() => f,
+            _ => return edges,
+        };
 
         for from_coll in &edef.from_collections {
             if !existing.contains(from_coll.as_str()) {

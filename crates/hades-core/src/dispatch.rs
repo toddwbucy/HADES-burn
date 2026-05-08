@@ -4663,20 +4663,29 @@ mod handlers {
 
         // Canonical form: file_key over the path relative to scan_root.
         // E.g., `src/lib.rs` relative to project root → `src_lib_rs`.
-        // When path == scan_root (single-file scan), strip_prefix yields
-        // an empty path; fall back to the file name so we still produce
-        // the canonical `<filename>_<ext>` form.
         if let Ok(rel) = path.strip_prefix(scan_root) {
             let rel_str = rel.to_string_lossy();
-            let canonical = if rel_str.is_empty() {
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(keys::file_key)
+            if !rel_str.is_empty() {
+                keys.push(keys::file_key(&rel_str));
             } else {
-                Some(keys::file_key(&rel_str))
-            };
-            if let Some(key) = canonical {
-                keys.push(key);
+                // path == scan_root (single-file scan): no relative
+                // path is available, so we can't know which depth
+                // the file was originally ingested at. Emit
+                // file_key candidates for every parent-suffix —
+                // covers ingests done from various directory roots.
+                // For `/proj/src/lib.rs`: `proj_src_lib_rs`,
+                // `src_lib_rs`, `lib_rs`.
+                let parts: Vec<&str> = path
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => s.to_str(),
+                        _ => None,
+                    })
+                    .collect();
+                for i in 0..parts.len() {
+                    let suffix = parts[i..].join("/");
+                    keys.push(keys::file_key(&suffix));
+                }
             }
         }
 
@@ -4886,47 +4895,16 @@ mod handlers {
             }
         }
 
-        // Look up which source collections compliance_edges accepts —
-        // read from the database's hades_schema. This bounds the
-        // verify lookup to legitimate source collections (e.g.,
-        // codebase_files, agent memory collections) without spuriously
-        // matching same-keyed documents in unrelated collections.
-        //
-        // Fallback to `["codebase_files"]` covers two scenarios:
-        //   - The edge_definition isn't registered yet (empty result)
-        //   - The hades_schema collection itself doesn't exist (NotFound)
-        // Real errors (transport, auth, AQL syntax) still propagate.
-        let source_collections: Vec<String> = {
-            let schema_aql = r#"
-                FOR sd IN hades_schema
-                    FILTER sd.schema_type == "edge_definition"
-                       AND sd.name == "compliance_edges"
-                    LIMIT 1
-                    RETURN sd.from_collections
-            "#;
-            let res = query::query(
-                pool, schema_aql, None, None, false, ExecutionTarget::Reader,
-            )
-            .await;
-            match res {
-                Ok(r) => r.results
-                    .into_iter()
-                    .next()
-                    .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| vec!["codebase_files".to_string()]),
-                Err(e) if e.is_not_found() => {
-                    // hades_schema collection doesn't exist (fresh DB).
-                    vec!["codebase_files".to_string()]
-                }
-                Err(e) => {
-                    return Err(HandlerError::Query {
-                        context: "failed to read compliance_edges definition from hades_schema".into(),
-                        source: e,
-                    });
-                }
-            }
-        };
+        // The `verify` pass scans **files on disk** for CS-NN comments,
+        // so the source of any matching compliance edge must be a file
+        // document. In HADES's universal codebase ontology, files live
+        // in `codebase_files`. We deliberately do NOT consult
+        // `hades_schema`'s `compliance_edges.from_collections` here:
+        // an edge from `codebase_symbols/foo` (a symbol) shouldn't
+        // satisfy a CS claim authored in a file even if the file's
+        // basename happens to be `foo`. File-on-disk verification is
+        // file-collection-specific by design.
+        const FILE_COLLECTION: &str = "codebase_files";
 
         // Verify compliance edges.
         let mut verified_refs = Vec::new();
@@ -4950,16 +4928,14 @@ mod handlers {
             let smell_id = smell["_id"].as_str().unwrap_or("");
             let candidate_keys = candidate_doc_keys(scan_path, file);
 
-            // Build full `_from` candidates: cross product of declared
-            // source collections × candidate keys. This preserves
-            // collection identity — an edge from
-            // `agent_memory/main_rs` won't satisfy a CS claim in a
-            // codebase_files document just because they share a key.
-            let froms: Vec<String> = source_collections
+            // Build full `_from` candidates against the file
+            // collection only. Other source collections may have
+            // legitimate compliance edges (symbol-level claims,
+            // memory-doc claims, etc.) but those aren't file-on-disk
+            // claims and must not be matched here.
+            let froms: Vec<String> = candidate_keys
                 .iter()
-                .flat_map(|col| {
-                    candidate_keys.iter().map(move |k| format!("{col}/{k}"))
-                })
+                .map(|k| format!("{FILE_COLLECTION}/{k}"))
                 .collect();
 
             let aql = r#"
@@ -7124,6 +7100,20 @@ mod tests {
         // Basename fallbacks still present.
         assert!(keys3.contains(&"lib".into()));
         assert!(keys3.contains(&"lib-rs".into()));
+
+        // Single-file scan with a deep absolute path: emit
+        // path-suffix candidates so verify can match whichever
+        // depth the file was ingested at.
+        let keys4 = handlers::candidate_doc_keys(
+            Path::new("/proj/src/lib.rs"),  // scan_root == path
+            Path::new("/proj/src/lib.rs"),
+        );
+        assert!(keys4.contains(&"lib_rs".into()),
+                "shallow suffix missing from {keys4:?}");
+        assert!(keys4.contains(&"src_lib_rs".into()),
+                "deeper suffix missing from {keys4:?}");
+        assert!(keys4.contains(&"proj_src_lib_rs".into()),
+                "full-path suffix missing from {keys4:?}");
     }
 
     #[test]

@@ -130,8 +130,10 @@ pub struct RuntimeSchema {
     pub meta: SchemaMeta,
     pub edge_definitions: Vec<RuntimeEdgeDef>,
     pub named_graphs: Vec<RuntimeNamedGraph>,
-    /// Whether the schema was loaded from the database (true) or from
-    /// compile-time NL statics as a fallback (false).
+    /// Whether the schema was loaded from the database. Always `true` after
+    /// PR #77 removed the compile-time fallback; retained for compatibility
+    /// with serialized snapshots and for forward-compatibility with
+    /// alternative load sources (e.g. ahead-of-time exports).
     pub from_database: bool,
 }
 

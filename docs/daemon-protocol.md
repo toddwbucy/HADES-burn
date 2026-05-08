@@ -366,7 +366,7 @@ Drop a named graph.
 ### `db.graph.materialize` (Admin)
 
 Materialize edges from implicit cross-reference fields. Reads edge
-definitions from `hades_schema` (or NL statics fallback).
+definitions from `hades_schema`.
 
 | Param      | Type     | Default | Description                                  |
 |------------|----------|---------|----------------------------------------------|
@@ -399,8 +399,9 @@ List all edge definitions and named graphs in the schema.
 ### `db.schema.show` (Internal)
 
 Show edge definition(s) or named graph by name. Returns all matching
-edge definitions when multiple share a name (e.g., `nl_hecate_trace_edges`
-has three definitions with different `source_field` values).
+edge definitions when multiple share a name but differ in `source_field`
+(a single edge collection can be the materialization target of more
+than one source field).
 
 | Param  | Type     | Default  | Description                              |
 |--------|----------|----------|------------------------------------------|

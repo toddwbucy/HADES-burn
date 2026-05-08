@@ -270,9 +270,9 @@ pub async fn bulk_insert(
 /// Upsert documents using `onDuplicate=replace`.
 ///
 /// Unlike [`insert_documents`] (which uses `overwrite`), this preserves
-/// existing documents whose `_key` is not in the batch.  Essential for
-/// shared edge collections (e.g. `nl_hecate_trace_edges`) that receive
-/// edges from multiple materialization definitions.
+/// existing documents whose `_key` is not in the batch. Essential for
+/// shared edge collections that receive edges from multiple materialization
+/// definitions (where each pass should leave prior passes' edges intact).
 ///
 /// Uses `complete=false` so partial success is allowed — matching the
 /// Python materializer behaviour.

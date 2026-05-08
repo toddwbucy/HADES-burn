@@ -163,6 +163,54 @@ pub async fn run_create_collection(
     Ok(())
 }
 
+/// `hades db drop-database <name> --force`
+///
+/// CLI-only — refuses non-writable target databases (production data is
+/// sacrosanct), requires explicit `--force` because the operation is
+/// irreversible. Connects to `_system` like `create-database`.
+pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) -> Result<()> {
+    if !force {
+        anyhow::bail!(
+            "refusing to drop database '{name}' without --force (-y). \
+             This operation is irreversible — all collections and documents \
+             will be deleted permanently."
+        );
+    }
+
+    // Guard: only databases in the writable allow-list may be dropped.
+    // Constructing a temporary HadesConfig with the target name lets us reuse
+    // the existing `require_writable_database` check.
+    let mut target_config = config.clone();
+    target_config.database.name = name.to_string();
+    target_config
+        .require_writable_database()
+        .with_context(|| format!("refusing to drop database '{name}'"))?;
+
+    use hades_core::db::ArangoClient;
+
+    let mut system_config = config.clone();
+    system_config.database.name = "_system".to_string();
+    let client = ArangoClient::from_config(&system_config, false)
+        .context("failed to connect to ArangoDB for database deletion")?;
+
+    let path = format!("database/{name}");
+    let resp = client
+        .delete(&path)
+        .await
+        .with_context(|| format!("failed to drop database '{name}'"))?;
+
+    output::print_output(
+        "db.drop-database",
+        json!({
+            "dropped": true,
+            "name": name,
+            "response": resp,
+        }),
+        &OutputFormat::Json,
+    );
+    Ok(())
+}
+
 /// `hades db create-database <name>`
 ///
 /// CLI-only — creates a separate ArangoClient targeting `_system` because
@@ -171,7 +219,16 @@ pub async fn run_create_collection(
 /// Uses `ArangoClient::from_config` with the database overridden to `_system`
 /// so that socket/TCP fallback and auth behavior match all other commands.
 pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()> {
-    config.require_writable_database()?;
+    // Guard the *target* name, not the currently-configured database.
+    // Without this, running `hades db create-database bident_burn` from a
+    // session whose default DB is read-only (e.g. NestedLearning) would
+    // wrongly fail the guard.
+    let mut target_config = config.clone();
+    target_config.database.name = name.to_string();
+    target_config
+        .require_writable_database()
+        .with_context(|| format!("refusing to create database '{name}'"))?;
+
     use hades_core::db::ArangoClient;
 
     let mut system_config = config.clone();

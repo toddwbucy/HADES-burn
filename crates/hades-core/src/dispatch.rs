@@ -1512,7 +1512,7 @@ mod handlers {
         let (aql, bind) = if let Some(paper_id) = paper {
             (
                 "FOR d IN @@col \
-                 FILTER d.paper_id == @paper_id || d.document_id == @paper_id || d.arxiv_id == @paper_id \
+                 FILTER d.paper_id == @paper_id || d.document_id == @paper_id || d.external_id == @paper_id \
                  LIMIT @limit \
                  RETURN d",
                 json!({

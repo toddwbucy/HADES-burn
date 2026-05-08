@@ -161,6 +161,16 @@ pub enum DbCmd {
         name: String,
     },
 
+    /// Drop a database. Refuses to drop production databases.
+    DropDatabase {
+        /// Database name.
+        name: String,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(short = 'y', long)]
+        force: bool,
+    },
+
     /// Count documents in a collection.
     Count {
         /// Collection name.

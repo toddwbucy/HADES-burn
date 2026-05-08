@@ -136,7 +136,13 @@ impl ImportResult {
 /// inserted or none are.
 ///
 /// `overwrite` controls whether existing documents (by `_key`) are
-/// replaced.
+/// replaced. When `true`, each document with an existing `_key` is replaced
+/// in place (`onDuplicate=replace`); other documents in the collection are
+/// untouched. When `false`, duplicate keys cause the import to fail.
+///
+/// **Do not** use ArangoDB's `overwrite=true` query parameter — that
+/// truncates the entire collection before inserting, which is rarely
+/// what callers want.
 #[instrument(skip(pool, docs), fields(db = %pool.database(), count = docs.len()))]
 pub async fn insert_documents(
     pool: &ArangoPool,
@@ -148,9 +154,14 @@ pub async fn insert_documents(
         return Ok(ImportResult::empty());
     }
 
-    let path = format!(
-        "import?collection={collection}&type=documents&complete=true&overwrite={overwrite}"
-    );
+    // Per-document upsert when overwrite=true; default duplicate-rejection
+    // (`error`) otherwise. Never set ArangoDB's `overwrite=true` query
+    // parameter — that's the destructive collection-truncate semantic.
+    let path = if overwrite {
+        format!("import?collection={collection}&type=documents&complete=true&onDuplicate=replace")
+    } else {
+        format!("import?collection={collection}&type=documents&complete=true")
+    };
 
     // Build NDJSON body: one JSON object per line, no trailing newline
     let mut ndjson = String::new();

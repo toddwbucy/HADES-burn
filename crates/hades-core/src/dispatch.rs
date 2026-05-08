@@ -4494,13 +4494,6 @@ mod handlers {
 
     // ── Smell & compliance handlers ──────────────────────────────────
 
-    /// STATIC tier smell IDs — violations block ingest.
-    const STATIC_SMELL_IDS: &[i64] = &[10, 11, 13, 40];
-    /// BEHAVIORAL tier smell IDs — informational.
-    const BEHAVIORAL_SMELL_IDS: &[i64] = &[27, 28, 32];
-    /// ARCHITECTURAL tier smell IDs — informational.
-    const ARCHITECTURAL_SMELL_IDS: &[i64] = &[31];
-
     /// Source file extensions to scan.
     const SOURCE_EXTENSIONS: &[&str] = &[
         ".py", ".rs", ".cu", ".cpp", ".c", ".ts", ".js",
@@ -4508,18 +4501,14 @@ mod handlers {
     ];
 
     /// Allowed enforcement types for compliance edges.
+    ///
+    /// Stays as a hardcoded validator: these are the *enforcement
+    /// semantics* the framework supports, not the per-smell tier
+    /// classification (which is now read from each smell_spec
+    /// document's `tier` field).
     const ALLOWED_ENFORCEMENT: &[&str] = &[
         "static", "behavioral", "architectural", "review", "documentation",
     ];
-
-    pub(crate) fn smell_tier(smell_id: Option<i64>) -> &'static str {
-        match smell_id {
-            Some(id) if STATIC_SMELL_IDS.contains(&id) => "static",
-            Some(id) if BEHAVIORAL_SMELL_IDS.contains(&id) => "behavioral",
-            Some(id) if ARCHITECTURAL_SMELL_IDS.contains(&id) => "architectural",
-            _ => "unknown",
-        }
-    }
 
     pub(crate) fn comment_prefixes(ext: &str) -> &'static [&'static str] {
         match ext {
@@ -4651,19 +4640,68 @@ mod handlers {
     ///
     /// Given a file like `conductor.rs`, generates:
     /// `["conductor", "conductor-rs", "conductor_rs"]`
-    pub(crate) fn candidate_doc_keys(path: &std::path::Path) -> Vec<String> {
+    /// Generate candidate document keys for a file path.
+    ///
+    /// The canonical key (matching what `codebase ingest` writes via
+    /// `keys::file_key(rel_path)`) is produced first — this is the form
+    /// `src/lib.rs` → `src_lib_rs` that's actually stored in
+    /// `codebase_files`. The basename-derived variants follow as
+    /// fallbacks for legacy databases that may have different key shapes.
+    ///
+    /// `scan_root` is the directory the verify pass was launched against
+    /// (so we can compute `path` relative to it). When `path` is not
+    /// inside `scan_root` (defensive case — shouldn't happen during a
+    /// normal scan), the canonical step is skipped and only basename
+    /// variants are produced.
+    pub(crate) fn candidate_doc_keys(
+        scan_root: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Vec<String> {
+        use crate::db::keys;
+
+        let mut keys: Vec<String> = Vec::new();
+
+        // Canonical form: file_key over the path relative to scan_root.
+        // E.g., `src/lib.rs` relative to project root → `src_lib_rs`.
+        if let Ok(rel) = path.strip_prefix(scan_root) {
+            let rel_str = rel.to_string_lossy();
+            if !rel_str.is_empty() {
+                keys.push(keys::file_key(&rel_str));
+            } else {
+                // path == scan_root (single-file scan): no relative
+                // path is available, so we can't know which depth
+                // the file was originally ingested at. Emit
+                // file_key candidates for every parent-suffix —
+                // covers ingests done from various directory roots.
+                // For `/proj/src/lib.rs`: `proj_src_lib_rs`,
+                // `src_lib_rs`, `lib_rs`.
+                let parts: Vec<&str> = path
+                    .components()
+                    .filter_map(|c| match c {
+                        std::path::Component::Normal(s) => s.to_str(),
+                        _ => None,
+                    })
+                    .collect();
+                for i in 0..parts.len() {
+                    let suffix = parts[i..].join("/");
+                    keys.push(keys::file_key(&suffix));
+                }
+            }
+        }
+
+        // Basename-derived fallbacks (legacy / heuristic keys).
         let stem = path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
         if stem.is_empty() {
-            return Vec::new();
+            return keys;
         }
         let ext_label = path.extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
-        let mut keys = vec![stem.clone()];
+        keys.push(stem.clone());
         if !ext_label.is_empty() {
             keys.push(format!("{stem}-{ext_label}"));
         }
@@ -4687,13 +4725,17 @@ mod handlers {
         use crate::db::query::{self, ExecutionTarget};
 
         // Load smells with forbidden patterns from the graph.
+        // The `tier` field comes from the document itself — no hardcoded
+        // ID-to-tier mapping. Smells without a `tier` field default to
+        // "unknown" at the consumer.
         let aql = r#"
-            FOR doc IN nl_code_smells
+            FOR doc IN smell_specs
                 FILTER doc.forbidden_patterns != null AND LENGTH(doc.forbidden_patterns) > 0
                 RETURN {
                     _key: doc._key,
                     smell_id: doc.smell_id,
                     name: doc.name,
+                    tier: doc.tier,
                     forbidden_patterns: doc.forbidden_patterns,
                     scope: doc.scope
                 }
@@ -4751,7 +4793,10 @@ mod handlers {
                             None => continue,
                         };
                         if line.contains(pat) {
-                            let tier = smell_tier(smell_id);
+                            // Read tier directly from the smell document.
+                            // Falls back to "unknown" if the document was
+                            // authored without a tier field.
+                            let tier = smell["tier"].as_str().unwrap_or("unknown");
                             if tier == "static" {
                                 has_static_violation = true;
                             }
@@ -4830,7 +4875,7 @@ mod handlers {
             let num_str = cs_id.strip_prefix("CS-").unwrap_or(cs_id);
 
             let aql = r#"
-                FOR doc IN nl_code_smells
+                FOR doc IN smell_specs
                     FILTER doc.smell_id == TO_NUMBER(@num) OR STARTS_WITH(doc.name, @prefix)
                     LIMIT 1
                     RETURN {_key: doc._key, _id: doc._id, smell_id: doc.smell_id, name: doc.name}
@@ -4849,6 +4894,17 @@ mod handlers {
                 smell_map.insert(cs_id.clone(), smell);
             }
         }
+
+        // The `verify` pass scans **files on disk** for CS-NN comments,
+        // so the source of any matching compliance edge must be a file
+        // document. In HADES's universal codebase ontology, files live
+        // in `codebase_files`. We deliberately do NOT consult
+        // `hades_schema`'s `compliance_edges.from_collections` here:
+        // an edge from `codebase_symbols/foo` (a symbol) shouldn't
+        // satisfy a CS claim authored in a file even if the file's
+        // basename happens to be `foo`. File-on-disk verification is
+        // file-collection-specific by design.
+        const FILE_COLLECTION: &str = "codebase_files";
 
         // Verify compliance edges.
         let mut verified_refs = Vec::new();
@@ -4870,33 +4926,34 @@ mod handlers {
             };
 
             let smell_id = smell["_id"].as_str().unwrap_or("");
-            let candidate_keys = candidate_doc_keys(file);
+            let candidate_keys = candidate_doc_keys(scan_path, file);
 
-            // Try each candidate key to find a compliance edge.
-            let mut found_edge = None;
-            for key in &candidate_keys {
-                let from_id = format!("arxiv_metadata/{key}");
-                let aql = r#"
-                    FOR e IN nl_smell_compliance_edges
-                        FILTER e._from == @from AND e._to == @to
-                        LIMIT 1
-                        RETURN e
-                "#;
-                let bind_vars = json!({ "from": from_id, "to": smell_id });
-                let result = query::query(
-                    pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
-                )
-                .await
-                .map_err(|e| HandlerError::Query {
-                    context: "failed to check compliance edge".into(),
-                    source: e,
-                })?;
+            // Build full `_from` candidates against the file
+            // collection only. Other source collections may have
+            // legitimate compliance edges (symbol-level claims,
+            // memory-doc claims, etc.) but those aren't file-on-disk
+            // claims and must not be matched here.
+            let froms: Vec<String> = candidate_keys
+                .iter()
+                .map(|k| format!("{FILE_COLLECTION}/{k}"))
+                .collect();
 
-                if let Some(edge) = result.results.into_iter().next() {
-                    found_edge = Some(edge);
-                    break;
-                }
-            }
+            let aql = r#"
+                FOR e IN compliance_edges
+                    FILTER e._to == @to AND e._from IN @froms
+                    LIMIT 1
+                    RETURN e
+            "#;
+            let bind_vars = json!({ "froms": froms, "to": smell_id });
+            let result = query::query(
+                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to check compliance edge".into(),
+                source: e,
+            })?;
+            let found_edge = result.results.into_iter().next();
 
             match found_edge {
                 Some(edge) => {
@@ -5059,14 +5116,38 @@ mod handlers {
             });
         }
 
-        // Verify source document exists in arxiv_metadata.
-        let source_key = source_id.trim();
-        crud::get_document(pool, "arxiv_metadata", source_key)
+        // Parse source_id as exactly "<collection>/<key>" — one slash,
+        // no more, no less. Reject bare keys (no slash) and
+        // multi-slash strings like "codebase_files/foo/bar" so the
+        // input is unambiguous before reaching get_document().
+        let trimmed = source_id.trim();
+        let slash_count = trimmed.matches('/').count();
+        if slash_count != 1 {
+            return Err(HandlerError::InvalidParameter {
+                name: "source_id".into(),
+                reason: format!(
+                    "expected '<collection>/<key>' (exactly one '/'), got {trimmed:?} \
+                     with {slash_count} slash(es)"
+                ),
+            });
+        }
+        let (source_collection, source_key) = trimmed
+            .split_once('/')
+            .expect("slash_count == 1 guarantees split_once succeeds");
+        if source_collection.is_empty() || source_key.is_empty() {
+            return Err(HandlerError::InvalidParameter {
+                name: "source_id".into(),
+                reason: format!("empty collection or key in source_id {trimmed:?}"),
+            });
+        }
+
+        // Verify source document exists in its declared collection.
+        crud::get_document(pool, source_collection, source_key)
             .await
             .map_err(|e| {
                 if e.is_not_found() {
                     HandlerError::DocumentNotFound {
-                        collection: "arxiv_metadata".into(),
+                        collection: source_collection.into(),
                         key: source_key.into(),
                     }
                 } else {
@@ -5081,7 +5162,7 @@ mod handlers {
         let smell_doc = if let Some(prefix) = smell_key_prefix(smell_id) {
             let prefix_len = prefix.len() as i64;
             let aql = r#"
-                FOR s IN nl_code_smells
+                FOR s IN smell_specs
                     FILTER LEFT(s._key, @prefix_len) == @prefix
                     LIMIT 1
                     RETURN s
@@ -5098,7 +5179,7 @@ mod handlers {
             result.results.into_iter().next()
         } else {
             // Treat as exact key.
-            match crud::get_document(pool, "nl_code_smells", smell_id).await {
+            match crud::get_document(pool, "smell_specs", smell_id).await {
                 Ok(doc) => Some(doc),
                 Err(e) if e.is_not_found() => None,
                 Err(e) => {
@@ -5111,19 +5192,26 @@ mod handlers {
         };
 
         let smell_doc = smell_doc.ok_or_else(|| HandlerError::DocumentNotFound {
-            collection: "nl_code_smells".into(),
+            collection: "smell_specs".into(),
             key: smell_id.into(),
         })?;
 
         let smell_key = smell_doc["_key"].as_str().unwrap_or(smell_id);
         let smell_name = smell_doc["name"].as_str().unwrap_or("");
 
-        // Construct edge.
-        let edge_key = format!(
-            "arxiv_metadata_{source_key}__nl_code_smells_{smell_key}"
+        // Construct edge with a collision-resistant key. The previous
+        // form `{source_collection}_{source_key}__smell_specs_{smell_key}`
+        // was ambiguous: `("codebase_files","foo_bar")` and
+        // `("codebase","files_foo_bar")` collided. The helper hashes
+        // null-separated components so the (collection, key) pair is
+        // unambiguous.
+        let edge_key = crate::db::keys::compliance_edge_key(
+            source_collection,
+            source_key,
+            smell_key,
         );
-        let from_id = format!("arxiv_metadata/{source_key}");
-        let to_id = format!("nl_code_smells/{smell_key}");
+        let from_id = format!("{source_collection}/{source_key}");
+        let to_id = format!("smell_specs/{smell_key}");
 
         let mut edge_doc = json!({
             "_key": edge_key,
@@ -5141,7 +5229,7 @@ mod handlers {
 
         // Insert edge — treat 409 Conflict as idempotent success.
         let already_exists = match crud::insert_document(
-            pool, "nl_smell_compliance_edges", &edge_doc,
+            pool, "compliance_edges", &edge_doc,
         ).await {
             Ok(_) => false,
             Err(e) if e.kind() == ArangoErrorKind::Conflict => true,
@@ -6924,20 +7012,11 @@ mod tests {
         let _: DaemonCommand = serde_json::from_value(serialized).unwrap();
     }
 
-    #[test]
-    fn test_smell_tier_classification() {
-        use super::handlers;
-        assert_eq!(handlers::smell_tier(Some(10)), "static");
-        assert_eq!(handlers::smell_tier(Some(11)), "static");
-        assert_eq!(handlers::smell_tier(Some(13)), "static");
-        assert_eq!(handlers::smell_tier(Some(40)), "static");
-        assert_eq!(handlers::smell_tier(Some(27)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(28)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(32)), "behavioral");
-        assert_eq!(handlers::smell_tier(Some(31)), "architectural");
-        assert_eq!(handlers::smell_tier(Some(99)), "unknown");
-        assert_eq!(handlers::smell_tier(None), "unknown");
-    }
+    // test_smell_tier_classification removed in PR α: smell tier is now
+    // read from each smell_spec document's `tier` field rather than
+    // looked up in compile-time constants. The default-to-"unknown"
+    // behavior for missing/unknown tiers is exercised inline at the
+    // smell_check call site (`smell["tier"].as_str().unwrap_or("unknown")`).
 
     #[test]
     fn test_smell_key_prefix() {
@@ -6984,15 +7063,57 @@ mod tests {
     fn test_candidate_doc_keys() {
         use super::handlers;
         use std::path::Path;
-        let keys = handlers::candidate_doc_keys(Path::new("conductor.rs"));
+
+        // Single-file scan (root and file are the same): canonical key
+        // is the file_key form. Basename variants follow as fallbacks.
+        let keys = handlers::candidate_doc_keys(
+            Path::new("conductor.rs"),
+            Path::new("conductor.rs"),
+        );
+        assert!(keys.contains(&"conductor_rs".into()),
+                "canonical file_key form missing from {keys:?}");
         assert!(keys.contains(&"conductor".into()));
         assert!(keys.contains(&"conductor-rs".into()));
 
-        let keys2 = handlers::candidate_doc_keys(Path::new("my_module.py"));
+        // Underscore-bearing stem: dashed-variant fallback exists.
+        let keys2 = handlers::candidate_doc_keys(
+            Path::new("my_module.py"),
+            Path::new("my_module.py"),
+        );
+        assert!(keys2.contains(&"my_module_py".into()),
+                "canonical file_key form missing from {keys2:?}");
         assert!(keys2.contains(&"my_module".into()));
         assert!(keys2.contains(&"my_module-py".into()));
         assert!(keys2.contains(&"my-module".into()));
         assert!(keys2.contains(&"my-module-py".into()));
+
+        // Nested file relative to a scan root: canonical form uses the
+        // relative path. This is the case that was broken before —
+        // verify on `src/lib.rs` would only check `lib`/`lib-rs` and
+        // never match the actually-stored `src_lib_rs` key.
+        let keys3 = handlers::candidate_doc_keys(
+            Path::new("/proj"),
+            Path::new("/proj/src/lib.rs"),
+        );
+        assert!(keys3.contains(&"src_lib_rs".into()),
+                "canonical file_key form missing from {keys3:?}");
+        // Basename fallbacks still present.
+        assert!(keys3.contains(&"lib".into()));
+        assert!(keys3.contains(&"lib-rs".into()));
+
+        // Single-file scan with a deep absolute path: emit
+        // path-suffix candidates so verify can match whichever
+        // depth the file was ingested at.
+        let keys4 = handlers::candidate_doc_keys(
+            Path::new("/proj/src/lib.rs"),  // scan_root == path
+            Path::new("/proj/src/lib.rs"),
+        );
+        assert!(keys4.contains(&"lib_rs".into()),
+                "shallow suffix missing from {keys4:?}");
+        assert!(keys4.contains(&"src_lib_rs".into()),
+                "deeper suffix missing from {keys4:?}");
+        assert!(keys4.contains(&"proj_src_lib_rs".into()),
+                "full-path suffix missing from {keys4:?}");
     }
 
     #[test]

@@ -140,6 +140,49 @@ pub fn edge_key(from: &str, kind: &str, to: &str) -> String {
     format!("{from_prefix}__{kind}__{to_prefix}__{hash8}")
 }
 
+/// Build a collision-resistant compliance-edge key from its components.
+///
+/// Compliance edges link a source document (in any collection) to a
+/// `smell_specs` document. The key format is:
+///
+/// ```text
+/// {source_col}__{source_key}__{spec_key}__{hash8}
+/// ```
+///
+/// The hash uses null-byte-separated components, so
+/// `("codebase_files", "foo_bar", "smell-001")` and
+/// `("codebase", "files_foo_bar", "smell-001")` produce different
+/// hashes — the readable prefix can collide under truncation, but the
+/// hash disambiguates.
+///
+/// # Examples
+/// ```
+/// # use hades_core::db::keys::compliance_edge_key;
+/// let key = compliance_edge_key("codebase_files", "foo", "smell-010");
+/// assert!(key.starts_with("codebase_files__foo__smell-010__"));
+/// // Different inputs that would collide under naive concatenation
+/// // produce different keys here:
+/// let a = compliance_edge_key("codebase_files", "foo_bar", "s");
+/// let b = compliance_edge_key("codebase", "files_foo_bar", "s");
+/// assert_ne!(a, b);
+/// ```
+pub fn compliance_edge_key(source_col: &str, source_key: &str, spec_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source_col.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(spec_key.as_bytes());
+    let digest = hasher.finalize();
+    let hash8 = hex8(&digest);
+
+    let readable: String = format!("{source_col}__{source_key}__{spec_key}")
+        .chars()
+        .take(40)
+        .collect();
+    format!("{readable}__{hash8}")
+}
+
 /// Compute a deterministic hash of a model identifier for stale-embedding detection.
 ///
 /// Returns the full hex-encoded SHA-256 of the model string. When the model

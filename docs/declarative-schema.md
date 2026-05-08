@@ -117,9 +117,9 @@ Project's database now has:
 ### 3.2 Evolve workflow (in-use project)
 
 ```text
-db insert axioms <new-axiom-doc>           # new content
-db schema add-edge <new-edge-def>          # new edge type
-agent context-engineers a code change      # writes via existing CRUD
+hades --db my_project db insert axioms --data '<new-axiom-doc>'   # new content
+hades --db my_project db schema add-edge <new-edge-def>           # new edge type
+# (or) an agent calls hades --db my_project db insert / db update via its tools
    ↓
 Database has evolved beyond what schema.yaml describes.
 This is expected. The YAML is now stale relative to the DB.
@@ -260,19 +260,19 @@ schema.yaml
 ### 6.1 Generated AQL (illustrative, never authored by user)
 
 ```aql
-// Step 4 (per axiom document):
+// Step 5 (apply, per axiom document):
 UPSERT { _key: "container-is" }
   INSERT { _key: "container-is", name: "...", is: [...], is_not: [...] }
   UPDATE { name: "...", is: [...], is_not: [...] }
 IN axioms
 
-// Step 4 (per smell_spec):
+// Step 5 (apply, per smell_spec):
 UPSERT { _key: "smell-010" }
   INSERT { _key: "smell-010", tier: "static", pattern: "...", description: "..." }
   UPDATE { tier: "static", pattern: "...", description: "..." }
 IN smell_specs
 
-// Step 4 (edge definition into hades_schema):
+// Step 5 (apply, edge definition into hades_schema):
 UPSERT { _key: "edge__compliance_edges__source" }
   INSERT { _key: "edge__compliance_edges__source",
            schema_type: "edge_definition",
@@ -471,8 +471,10 @@ platform that actually constrains model behavior."
 
 ## 12. Open Questions
 
-These remain undecided and should be settled before implementation
-begins:
+The following items track open questions and their current status.
+Items marked **(settled, &lt;date&gt;)** have been finalized and are
+recorded here for the design rationale; remaining items still need
+calls before implementation begins.
 
 - **Q1**: What does `schema apply --force` actually do on an in-use DB?
   Replace conflicting documents? Refuse to delete? Add new ones? Most

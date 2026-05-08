@@ -226,9 +226,12 @@ through to Python. Here's the current state as of 2026-04-08.
 - **Daemon wire protocol**: The Rust daemon (`/run/hades/hades.sock`) accepts
   JSON commands over Unix socket with session-based access tiers (Admin,
   Internal, Agent). Agent sessions restrict which commands are available.
-- **RuntimeSchema (just merged)**: `hades_schema` collection stores per-database
-  ontology. `RuntimeSchema::load()` reads from DB, falls back to NL statics.
-  Seeds: `--seed nl`, `--seed empty`. Adding `--seed memory` is straightforward.
+- **RuntimeSchema**: `hades_schema` collection stores per-database
+  ontology. `RuntimeSchema::load()` reads from DB and errors if absent
+  (no compile-time fallback after PR #77). Seed via
+  `db schema init --seed empty` plus direct insert, or via the
+  declarative-schema mechanism described in
+  `docs/declarative-schema.md`. Adding a `memory` seed is straightforward.
 - **All output is JSON to stdout**, logs to stderr. This is the interface
   weaver-tools already consumes via shell-out.
 

@@ -2579,10 +2579,9 @@ mod handlers {
 
     /// Materialize edges from implicit cross-reference fields.
     ///
-    /// Loads edge definitions from the database's `hades_schema` collection
-    /// (falling back to compile-time NL statics if absent), then scans
-    /// source collections for non-null reference fields and creates explicit
-    /// edge documents.
+    /// Loads edge definitions from the database's `hades_schema` collection,
+    /// then scans source collections for non-null reference fields and
+    /// creates explicit edge documents.
     pub async fn graph_materialize(
         pool: &ArangoPool,
         edge_filter: Option<&str>,
@@ -2593,7 +2592,7 @@ mod handlers {
         use crate::db::crud;
         use crate::graph::runtime_schema::RuntimeSchema;
 
-        // 1. Load schema from hades_schema (or NL statics fallback).
+        // 1. Load schema from hades_schema.
         let schema = RuntimeSchema::load(pool).await.map_err(|e| HandlerError::Query {
             context: "load runtime schema for materialization".into(),
             source: crate::db::ArangoError::Request(e.to_string()),

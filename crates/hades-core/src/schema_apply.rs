@@ -175,7 +175,22 @@ pub struct ApplyResult {
 pub enum Operation {
     CreateCollection { name: String, collection_type: u32 },
     UpsertDocuments { collection: String, count: usize },
-    UpsertEdgeDefinition { name: String },
+    /// One edge_definition document into hades_schema. The
+    /// `(name, source_field)` pair is the unique identity — a single
+    /// edge collection can carry multiple definitions that differ by
+    /// source_field (the historical NL pattern, retained for
+    /// generality). Edge defs without a source_field use the literal
+    /// `"(none)"` so the operation list still distinguishes them.
+    UpsertEdgeDefinition { name: String, source_field: String },
+    /// Persist a `schema_meta` document to `hades_schema` so
+    /// `RuntimeSchema::load` can find it. Always emitted when
+    /// hades_schema is being managed by this apply pass.
+    UpsertSchemaMeta,
+    /// Persist a `named_graph` document to `hades_schema` so
+    /// `RuntimeSchema::load` can deserialize it. Distinct from
+    /// `CreateNamedGraph` (the gharial API call): one materializes
+    /// the graph in ArangoDB, the other records it in `hades_schema`.
+    UpsertNamedGraphDoc { name: String },
     CreateNamedGraph { name: String, edges: Vec<String> },
 }
 
@@ -296,21 +311,33 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
             )),
         }
         for from_col in &ed.from_collections {
-            if !declared.contains_key(from_col.as_str()) {
-                errors.push(format!(
+            match declared.get(from_col.as_str()) {
+                Some(CollectionType::Document) => {}
+                Some(CollectionType::Edge) => errors.push(format!(
+                    "edge_definition '{}' has from_collection '{from_col}' \
+                     declared as type:edge; endpoints must be type:document",
+                    ed.name
+                )),
+                None => errors.push(format!(
                     "edge_definition '{}' has from_collection '{from_col}' \
                      not declared in `collections:`",
                     ed.name
-                ));
+                )),
             }
         }
         for to_col in &ed.to_collections {
-            if !declared.contains_key(to_col.as_str()) {
-                errors.push(format!(
+            match declared.get(to_col.as_str()) {
+                Some(CollectionType::Document) => {}
+                Some(CollectionType::Edge) => errors.push(format!(
+                    "edge_definition '{}' has to_collection '{to_col}' \
+                     declared as type:edge; endpoints must be type:document",
+                    ed.name
+                )),
+                None => errors.push(format!(
                     "edge_definition '{}' has to_collection '{to_col}' \
                      not declared in `collections:`",
                     ed.name
-                ));
+                )),
             }
         }
     }
@@ -343,14 +370,12 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
 pub fn plan(file: &SchemaFile) -> Vec<Operation> {
     let mut ops: Vec<Operation> = Vec::new();
 
-    // Always include `hades_schema` as a managed collection (used by
-    // edge_definitions and named_graphs metadata).
-    if !file.edge_definitions.is_empty() || !file.named_graphs.is_empty() {
-        ops.push(Operation::CreateCollection {
-            name: "hades_schema".into(),
-            collection_type: CollectionType::Document.as_u32(),
-        });
-    }
+    // hades_schema is always present: even an empty schema needs a
+    // schema_meta document for `RuntimeSchema::load` to succeed.
+    ops.push(Operation::CreateCollection {
+        name: "hades_schema".into(),
+        collection_type: CollectionType::Document.as_u32(),
+    });
 
     for c in &file.collections {
         ops.push(Operation::CreateCollection {
@@ -373,8 +398,20 @@ pub fn plan(file: &SchemaFile) -> Vec<Operation> {
     }
 
     for ed in &file.edge_definitions {
-        ops.push(Operation::UpsertEdgeDefinition { name: ed.name.clone() });
+        ops.push(Operation::UpsertEdgeDefinition {
+            name: ed.name.clone(),
+            source_field: ed.source_field.clone().unwrap_or_else(|| "(none)".into()),
+        });
     }
+
+    // Persist named graph metadata to hades_schema so RuntimeSchema::load
+    // can find it. The corresponding gharial creation follows.
+    for ng in &file.named_graphs {
+        ops.push(Operation::UpsertNamedGraphDoc { name: ng.name.clone() });
+    }
+
+    // Always emit a schema_meta upsert; it's required by RuntimeSchema::load.
+    ops.push(Operation::UpsertSchemaMeta);
 
     for ng in &file.named_graphs {
         ops.push(Operation::CreateNamedGraph {
@@ -414,12 +451,10 @@ pub async fn apply(
         return Ok(result);
     }
 
-    // 1. Collections (including hades_schema if needed).
-    let needs_hades_schema =
-        !file.edge_definitions.is_empty() || !file.named_graphs.is_empty();
-    if needs_hades_schema {
-        ensure_collection(pool, "hades_schema", CollectionType::Document, &mut result).await?;
-    }
+    // 1. Collections. `hades_schema` is always ensured: even a
+    //    collections-only YAML needs it for schema_meta so subsequent
+    //    `RuntimeSchema::load` succeeds (matches plan()'s ordering).
+    ensure_collection(pool, "hades_schema", CollectionType::Document, &mut result).await?;
     for c in &file.collections {
         ensure_collection(pool, &c.name, c.collection_type, &mut result).await?;
     }
@@ -438,13 +473,13 @@ pub async fn apply(
         result.documents_upserted += n;
     }
 
-    // 3. Edge definitions registered into hades_schema.
+    // 3. Edge definitions registered into hades_schema. The (name,
+    //    source_field) pair forms the unique _key so multiple defs
+    //    keyed off different source fields can coexist on one
+    //    collection (the historical NL pattern).
     for ed in &file.edge_definitions {
-        let key = format!(
-            "edge__{}__{}",
-            ed.name,
-            ed.source_field.as_deref().unwrap_or("default")
-        );
+        let sf_key_part = ed.source_field.as_deref().unwrap_or("default");
+        let key = format!("edge__{}__{}", ed.name, sf_key_part);
         let doc = json!({
             "_key": key,
             "schema_type": "edge_definition",
@@ -459,7 +494,41 @@ pub async fn apply(
         info!(name = %ed.name, "registered edge definition");
     }
 
-    // 4. Named graphs via gharial. Idempotent: 409 Conflict (graph
+    // 4. Named graph documents into hades_schema. Distinct from the
+    //    gharial creation below: this is the record `RuntimeSchema::load`
+    //    deserializes into `RuntimeNamedGraph`. Field name `edge_definitions`
+    //    matches `RuntimeNamedGraph`'s expected layout.
+    for ng in &file.named_graphs {
+        let doc = json!({
+            "_key": format!("named_graph__{}", ng.name),
+            "schema_type": "named_graph",
+            "name": ng.name,
+            "edge_definitions": ng.edges,
+            "description": ng.description.clone().unwrap_or_default(),
+        });
+        crud::insert_documents(pool, "hades_schema", &[doc], /* overwrite= */ true).await?;
+        info!(name = %ng.name, "registered named graph document");
+    }
+
+    // 5. schema_meta document — required by RuntimeSchema::load. Empty
+    //    seeds get an empty `relation_order` (RGCN training is deferred);
+    //    `feature_dim` mirrors the runtime default for Jina V4.
+    let relation_order: Vec<String> = Vec::new();
+    let checksum = crate::graph::runtime_schema::compute_checksum(&relation_order);
+    let meta_doc = json!({
+        "_key": "meta",
+        "schema_type": "schema_meta",
+        "schema_version": 1u32,
+        "seed_name": Value::Null,
+        "relation_order": relation_order,
+        "num_relations": 0u32,
+        "feature_dim": 2048u32,
+        "schema_checksum": checksum,
+    });
+    crud::insert_documents(pool, "hades_schema", &[meta_doc], /* overwrite= */ true).await?;
+    info!("registered schema_meta document");
+
+    // 6. Named graphs via gharial. Idempotent: 409 Conflict (graph
     //    exists) is treated as success; other errors propagate.
     for ng in &file.named_graphs {
         // Build edge_definitions payload from the named edge collection
@@ -534,14 +603,26 @@ async fn ensure_collection(
 /// Heuristic for "in-use": the database has user-data beyond an
 /// initial empty seed. The codebase universal layer doesn't count
 /// (those collections may exist from prior `codebase ingest` runs
-/// and shouldn't block schema bootstrap).
+/// and shouldn't block schema bootstrap — see
+/// `docs/declarative-schema.md` §11).
 async fn check_not_in_use(
     pool: &ArangoPool,
     file: &SchemaFile,
 ) -> Result<(), ApplyError> {
+    let universal: HashSet<&str> = crate::db::collections::CODEBASE
+        .all_collections()
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+
     // For each user-declared collection, count its existing documents.
     // If any have > 0 docs, treat the DB as in-use.
     for c in &file.collections {
+        if universal.contains(c.name.as_str()) {
+            // Universal layer is exempt: codebase ingest writes here
+            // independently of subject-layer schema bootstrap.
+            continue;
+        }
         let count_aql = "RETURN LENGTH(@@col)";
         let bind = json!({ "@col": c.name });
         let res = crate::db::query::query_single(
@@ -759,7 +840,30 @@ named_graphs:
         let file = parse(yaml).unwrap();
         validate(&file).unwrap();
         let ops = plan(&file);
-        // hades_schema + 3 collections + 2 doc upserts + 1 edge def + 1 named graph
-        assert_eq!(ops.len(), 1 + 3 + 2 + 1 + 1);
+        // 1 (hades_schema) + 3 collections + 2 doc upserts (axioms,
+        // smell_specs) + 1 edge def + 1 named_graph_doc + 1 schema_meta
+        // + 1 named_graph (gharial)
+        assert_eq!(ops.len(), 1 + 3 + 2 + 1 + 1 + 1 + 1);
+    }
+
+    #[test]
+    fn validate_rejects_edge_typed_endpoint() {
+        // from_collections referencing an edge-type collection must be
+        // rejected — gharial only allows document collections at endpoints.
+        let yaml = r#"
+collections:
+  - { name: axioms, type: document }
+  - { name: smell_specs, type: document }
+  - { name: rel_a, type: edge }
+  - { name: rel_b, type: edge }
+edge_definitions:
+  - name: rel_a
+    from_collections: [rel_b]
+    to_collections: [smell_specs]
+"#;
+        let file = parse(yaml).unwrap();
+        let err = validate(&file).unwrap_err();
+        assert!(matches!(err, ApplyError::Validation(ref errs) if
+            errs.iter().any(|e| e.contains("rel_b") && e.contains("type:edge"))));
     }
 }

@@ -50,7 +50,7 @@ impl HadesConfig {
             }
         }
         if let Ok(v) = env::var("HADES_DATABASE") {
-            self.database.name = v;
+            self.database.name = Some(v);
         }
         if let Ok(v) = env::var("ARANGO_RO_SOCKET") {
             self.database.sockets.readonly = Some(v);
@@ -87,7 +87,7 @@ impl HadesConfig {
     /// Only non-`None` values override the config.
     pub fn apply_cli_overrides(&mut self, database: Option<&str>, gpu_device: Option<u32>) {
         if let Some(db) = database {
-            self.database.name = db.to_string();
+            self.database.name = Some(db.to_string());
         }
         if let Some(device_idx) = gpu_device {
             self.gpu.device = format!("cuda:{device_idx}");
@@ -95,16 +95,37 @@ impl HadesConfig {
         }
     }
 
+    /// Test helper: build a config with a specific database name.
+    ///
+    /// Production code should never call this — it sidesteps the YAML/env
+    /// loading path. Used by unit tests that need a config with a known
+    /// database name (e.g., to test the writable-database guard against a
+    /// non-writable name).
+    pub fn with_database(name: &str) -> Self {
+        let mut cfg = Self::default();
+        cfg.database.name = Some(name.to_string());
+        cfg
+    }
+
     /// Get the effective database name after all overrides.
-    pub fn effective_database(&self) -> &str {
-        &self.database.name
+    ///
+    /// Returns an error if no database is configured. There is **no implicit
+    /// default** — every command that touches a database must require
+    /// `--db <name>` (or set `HADES_DATABASE`) explicitly.
+    pub fn effective_database(&self) -> anyhow::Result<&str> {
+        self.database.name.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no database specified. Pass --db <name> (or --database <name>), \
+                 or set HADES_DATABASE in the environment."
+            )
+        })
     }
 
     /// Databases that are allowed to receive writes.
     ///
-    /// Production databases (e.g. `NestedLearning`) are **read-only** to
-    /// prevent accidental data corruption.  Only databases in this list
-    /// may be targeted by write operations (sync, ingest, etc.).
+    /// Production databases (e.g. read-only research data) are **read-only**
+    /// to prevent accidental data corruption. Only databases in this list
+    /// may be targeted by write operations.
     const WRITABLE_DATABASES: &[&str] = &["bident_burn"];
 
     /// Check that the effective database is writable.
@@ -113,7 +134,7 @@ impl HadesConfig {
     /// with a descriptive message otherwise.  Call this before any
     /// command that writes to ArangoDB.
     pub fn require_writable_database(&self) -> anyhow::Result<()> {
-        let db = self.effective_database();
+        let db = self.effective_database()?;
         if Self::WRITABLE_DATABASES.contains(&db) {
             Ok(())
         } else {
@@ -156,12 +177,15 @@ impl HadesConfig {
 
     /// Get the ArangoDB base URL for HTTP API requests.
     ///
-    /// Used when connecting over TCP instead of Unix socket.
-    pub fn database_url(&self) -> String {
-        format!(
+    /// Used when connecting over TCP instead of Unix socket. Returns an
+    /// error if no database is configured (call `effective_database` first
+    /// or use `--db`).
+    pub fn database_url(&self) -> anyhow::Result<String> {
+        let db = self.effective_database()?;
+        Ok(format!(
             "http://{}:{}/_db/{}",
-            self.database.host, self.database.port, self.database.name
-        )
+            self.database.host, self.database.port, db
+        ))
     }
 
     /// Get the password, returning an error message if unset.
@@ -183,8 +207,14 @@ pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
     /// Database name. Called "database" in the YAML to match ArangoDB convention.
+    ///
+    /// `None` means no database is configured. Commands that need a database
+    /// must require `--db <name>` (or the `HADES_DATABASE` env var) — there
+    /// is **no implicit default**, by design. Defaulting to a real database
+    /// is a footgun: an agent without context could write to the wrong place
+    /// or read stale data thinking it was current.
     #[serde(alias = "database")]
-    pub name: String,
+    pub name: Option<String>,
     pub username: String,
     /// Password is never stored in YAML — always from ARANGO_PASSWORD env var.
     #[serde(skip)]
@@ -197,7 +227,7 @@ impl Default for DatabaseConfig {
         Self {
             host: "localhost".into(),
             port: 8529,
-            name: "NestedLearning".into(),
+            name: None,
             username: "root".into(),
             password: None,
             sockets: SocketConfig::default(),

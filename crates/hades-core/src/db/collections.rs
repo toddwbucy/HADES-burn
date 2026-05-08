@@ -17,7 +17,7 @@ pub struct CollectionProfile {
     /// Embedding vector collection (e.g. `embeddings`).
     pub embeddings: &'static str,
     /// Field name in chunks/embeddings that references the parent metadata
-    /// document key (e.g. `"paper_key"` for documents, `"file_key"` for codebase).
+    /// document key (e.g. `"parent_key"` for documents, `"file_key"` for codebase).
     pub foreign_key: &'static str,
 }
 
@@ -32,7 +32,7 @@ static DEFAULT: CollectionProfile = CollectionProfile {
     metadata: "documents",
     chunks: "chunks",
     embeddings: "embeddings",
-    foreign_key: "paper_key",
+    foreign_key: "parent_key",
 };
 
 static ALL_PROFILES: [(&str, &CollectionProfile); 2] = [
@@ -239,7 +239,7 @@ mod tests {
         let p = CollectionProfile::find_by_metadata("documents").unwrap();
         assert_eq!(p.chunks, "chunks");
         assert_eq!(p.embeddings, "embeddings");
-        assert_eq!(p.foreign_key, "paper_key");
+        assert_eq!(p.foreign_key, "parent_key");
     }
 
     #[test]

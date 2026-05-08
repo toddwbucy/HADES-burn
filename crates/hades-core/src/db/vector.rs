@@ -18,14 +18,9 @@ use super::pool::ArangoPool;
 use super::query::{self, ExecutionTarget};
 
 /// Result of a vector similarity search.
-///
-/// The `*_key` field stores the parent document's `_key` from the embeddings
-/// collection. The stored ArangoDB field name is still `paper_key` for
-/// historical compatibility with existing data; this struct uses the generic
-/// name `parent_key`. The mapping is applied manually at construction.
 #[derive(Debug, Clone)]
 pub struct SimilarityResult {
-    /// Parent document `_key` (from the embeddings collection's foreign key).
+    /// Parent document `_key` from the embeddings collection's foreign key.
     pub parent_key: String,
     /// Text content from the chunk.
     pub text: Option<String>,
@@ -36,8 +31,8 @@ pub struct SimilarityResult {
     /// Title from the metadata document.
     pub title: Option<String>,
     /// External identifier (arxiv ID, DOI, ISBN, or any source-specific
-    /// identifier) read from the metadata document. The stored field name
-    /// is still `arxiv_id` for compatibility with existing data.
+    /// identifier) read from the metadata document's `external_id` field.
+    /// User-defined; HADES does not populate this automatically.
     pub external_id: Option<String>,
     /// Similarity score (higher = more similar for cosine/innerProduct).
     pub score: f64,
@@ -126,14 +121,14 @@ async fn query_ann(
             SORT score {sort_order}
             LIMIT @limit
             LET chunk = DOCUMENT(CONCAT("{chunks}/", emb.chunk_key))
-            LET meta = DOCUMENT(CONCAT("{metadata}/", emb.paper_key))
+            LET meta = DOCUMENT(CONCAT("{metadata}/", emb.parent_key))
             RETURN {{
-                paper_key: emb.paper_key,
+                parent_key: emb.parent_key,
                 text: chunk.text,
                 chunk_index: chunk.chunk_index,
                 total_chunks: chunk.total_chunks,
                 title: meta.title,
-                arxiv_id: meta.arxiv_id,
+                external_id: meta.external_id,
                 score: score
             }}
         "#,
@@ -178,7 +173,7 @@ async fn query_brute_force(
     doc_filter: Option<&str>,
 ) -> Result<Vec<SimilarityResult>, ArangoError> {
     let filter_clause = if doc_filter.is_some() {
-        "FILTER emb.paper_key == @paper_key"
+        "FILTER emb.parent_key == @parent_key"
     } else {
         ""
     };
@@ -189,16 +184,16 @@ async fn query_brute_force(
             FILTER emb.chunk_key != null
             {filter_clause}
             LET chunk = DOCUMENT(CONCAT("{chunks}/", emb.chunk_key))
-            LET meta = DOCUMENT(CONCAT("{metadata}/", emb.paper_key))
+            LET meta = DOCUMENT(CONCAT("{metadata}/", emb.parent_key))
             RETURN {{
-                paper_key: emb.paper_key,
+                parent_key: emb.parent_key,
                 chunk_key: emb.chunk_key,
                 embedding: emb.embedding,
                 text: chunk.text,
                 chunk_index: chunk.chunk_index,
                 total_chunks: chunk.total_chunks,
                 title: meta.title,
-                arxiv_id: meta.arxiv_id
+                external_id: meta.external_id
             }}
         "#,
         embeddings = profile.embeddings,
@@ -208,7 +203,7 @@ async fn query_brute_force(
 
     let mut bind_vars = serde_json::json!({});
     if let Some(filter) = doc_filter {
-        bind_vars["paper_key"] = serde_json::json!(filter);
+        bind_vars["parent_key"] = serde_json::json!(filter);
     }
 
     debug!(limit, has_filter = doc_filter.is_some(), "executing brute-force search");
@@ -265,10 +260,10 @@ async fn query_brute_force(
     // Parse into SimilarityResult (strip raw embedding)
     let mut results = Vec::with_capacity(scored.len());
     for (score, doc) in scored {
-        let Some(parent_key) = doc.get("paper_key").and_then(|v| v.as_str()) else {
+        let Some(parent_key) = doc.get("parent_key").and_then(|v| v.as_str()) else {
             warn!(
                 chunk_key = doc.get("chunk_key").and_then(|v| v.as_str()).unwrap_or("?"),
-                "skipping search result: missing or non-string paper_key"
+                "skipping search result: missing or non-string parent_key"
             );
             continue;
         };
@@ -279,7 +274,7 @@ async fn query_brute_force(
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
             title: doc.get("title").and_then(|v| v.as_str()).map(String::from),
-            external_id: doc.get("arxiv_id").and_then(|v| v.as_str()).map(String::from),
+            external_id: doc.get("external_id").and_then(|v| v.as_str()).map(String::from),
             score,
         });
     }
@@ -311,8 +306,8 @@ fn dot_product(a: &[f64], b: &[f64]) -> f64 {
 fn parse_search_results(docs: Vec<Value>) -> Result<Vec<SimilarityResult>, ArangoError> {
     let mut results = Vec::with_capacity(docs.len());
     for doc in docs {
-        let Some(parent_key) = doc.get("paper_key").and_then(|v| v.as_str()) else {
-            warn!("skipping search result: missing or non-string paper_key");
+        let Some(parent_key) = doc.get("parent_key").and_then(|v| v.as_str()) else {
+            warn!("skipping search result: missing or non-string parent_key");
             continue;
         };
         let score = doc
@@ -326,7 +321,7 @@ fn parse_search_results(docs: Vec<Value>) -> Result<Vec<SimilarityResult>, Arang
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
             title: doc.get("title").and_then(|v| v.as_str()).map(String::from),
-            external_id: doc.get("arxiv_id").and_then(|v| v.as_str()).map(String::from),
+            external_id: doc.get("external_id").and_then(|v| v.as_str()).map(String::from),
             score,
         });
     }
@@ -398,12 +393,12 @@ mod tests {
     #[test]
     fn test_parse_search_results() {
         let docs = vec![serde_json::json!({
-            "paper_key": "2501_12345",
+            "parent_key": "2501_12345",
             "text": "some text",
             "chunk_index": 0,
             "total_chunks": 3,
             "title": "A Paper",
-            "arxiv_id": "2501.12345",
+            "external_id": "2501.12345",
             "score": 0.95
         })];
 
@@ -416,13 +411,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_search_results_skips_missing_paper_key() {
-        // Three docs: valid, missing paper_key, paper_key as non-string.
+    fn test_parse_search_results_skips_missing_parent_key() {
+        // Three docs: valid, missing parent_key, parent_key as non-string.
         // The two malformed rows should be skipped (not pushed with empty key).
         let docs = vec![
-            serde_json::json!({ "paper_key": "good_key", "score": 0.9 }),
-            serde_json::json!({ "score": 0.8 }), // no paper_key
-            serde_json::json!({ "paper_key": 42, "score": 0.7 }), // non-string
+            serde_json::json!({ "parent_key": "good_key", "score": 0.9 }),
+            serde_json::json!({ "score": 0.8 }), // no parent_key
+            serde_json::json!({ "parent_key": 42, "score": 0.7 }), // non-string
         ];
 
         let results = parse_search_results(docs).unwrap();

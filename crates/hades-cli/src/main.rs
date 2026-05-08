@@ -458,6 +458,11 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_create_database(&config, &name))
         }
+        Commands::Db(commands::db::DbCmd::DropDatabase { name, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::db_write::run_drop_database(&config, &name, force))
+        }
         Commands::Db(commands::db::DbCmd::CreateIndex { collection, dimension, metric }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

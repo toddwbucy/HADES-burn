@@ -73,8 +73,13 @@ impl ArangoClient {
     /// `read_only` selects the read-only or read-write socket path.
     pub fn from_config(config: &HadesConfig, read_only: bool) -> Result<Self, ArangoError> {
         let socket_path = resolve_socket(config, read_only);
-        let base_url = config.database_url();
-        let database = config.effective_database().to_string();
+        let database = config
+            .effective_database()
+            .map_err(|e| ArangoError::Request(e.to_string()))?
+            .to_string();
+        let base_url = config
+            .database_url()
+            .map_err(|e| ArangoError::Request(e.to_string()))?;
 
         let auth_header = config.database.password.as_deref().map(|pw| {
             let credentials = format!("{}:{}", config.database.username, pw);
@@ -437,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_client_from_config_defaults() {
-        let config = HadesConfig::default();
+        let config = HadesConfig::with_database("NestedLearning");
         // This will fall through to TCP since no sockets exist in test env
         let client = ArangoClient::from_config(&config, true).unwrap();
         assert_eq!(client.database(), "NestedLearning");

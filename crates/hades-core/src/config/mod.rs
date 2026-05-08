@@ -110,7 +110,8 @@ mod tests {
     #[test]
     fn test_defaults_without_yaml() {
         let config = HadesConfig::default();
-        assert_eq!(config.database.name, "NestedLearning");
+        // No implicit database — must be set via --db, env, or YAML.
+        assert!(config.database.name.is_none());
         assert_eq!(config.database.host, "localhost");
         assert_eq!(config.database.port, 8529);
         assert_eq!(config.embedding.model.dimension, 2048);
@@ -143,7 +144,7 @@ search:
 
         assert_eq!(config.database.host, "db.example.com");
         assert_eq!(config.database.port, 9529);
-        assert_eq!(config.database.name, "TestDB");
+        assert_eq!(config.database.name.as_deref(), Some("TestDB"));
         assert_eq!(
             config.database.sockets.readonly.as_deref(),
             Some("/tmp/test-ro.sock")
@@ -172,7 +173,7 @@ search:
 
         assert_eq!(config.database.host, "override-host");
         assert_eq!(config.database.port, 1234);
-        assert_eq!(config.database.name, "OverrideDB");
+        assert_eq!(config.database.name.as_deref(), Some("OverrideDB"));
         assert_eq!(config.database.password.as_deref(), Some("secret"));
 
         // Clean up
@@ -187,10 +188,10 @@ search:
     #[test]
     fn test_cli_overrides() {
         let mut config = HadesConfig::default();
-        assert_eq!(config.database.name, "NestedLearning");
+        assert!(config.database.name.is_none());
 
         config.apply_cli_overrides(Some("bident_burn"), None);
-        assert_eq!(config.database.name, "bident_burn");
+        assert_eq!(config.database.name.as_deref(), Some("bident_burn"));
 
         config.apply_cli_overrides(None, Some(1));
         assert_eq!(config.gpu.device, "cuda:1");
@@ -207,9 +208,17 @@ search:
     }
 
     #[test]
-    fn test_effective_database() {
+    fn test_effective_database_none_by_default() {
+        // No implicit default — caller must set --db, env, or YAML.
         let config = HadesConfig::default();
-        assert_eq!(config.effective_database(), "NestedLearning");
+        assert!(config.effective_database().is_err());
+    }
+
+    #[test]
+    fn test_effective_database_after_cli_override() {
+        let mut config = HadesConfig::default();
+        config.apply_cli_overrides(Some("bident_burn"), None);
+        assert_eq!(config.effective_database().unwrap(), "bident_burn");
     }
 
     #[test]

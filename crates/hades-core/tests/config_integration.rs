@@ -36,7 +36,7 @@ fn load_fixture_hades_yaml() {
     // Database
     assert_eq!(config.database.host, "localhost");
     assert_eq!(config.database.port, 8529);
-    assert_eq!(config.database.name, "NestedLearning");
+    assert_eq!(config.database.name.as_deref(), Some("NestedLearning"));
     assert_eq!(config.database.username, "root");
     assert_eq!(
         config.database.sockets.readonly.as_deref(),
@@ -110,9 +110,13 @@ fn load_fixture_hades_yaml() {
 fn load_fixture_yaml_then_apply_overrides() {
     let mut config = load_fixture_config();
 
-    // Simulate --db bident_burn
+    // Before any override: fixture YAML provides "NestedLearning" as the
+    // configured database, but the field is now Option<String>.
+    assert_eq!(config.database.name.as_deref(), Some("NestedLearning"));
+
+    // Simulate --db bident_burn — overrides take precedence.
     config.apply_cli_overrides(Some("bident_burn"), None);
-    assert_eq!(config.effective_database(), "bident_burn");
+    assert_eq!(config.effective_database().unwrap(), "bident_burn");
 
     // Other values unchanged
     assert_eq!(config.database.host, "localhost");

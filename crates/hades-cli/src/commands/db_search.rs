@@ -156,7 +156,7 @@ pub async fn run_query(
                      chunk_index: chunk.chunk_index, \
                      total_chunks: chunk.total_chunks, \
                      title: meta.title, \
-                     arxiv_id: meta.arxiv_id, \
+                     external_id: meta.external_id, \
                      score: item.score \
                  }}"
         );
@@ -233,15 +233,10 @@ async fn structural_rerank(
     metadata_col: &str,
     results: &[Value],
 ) -> Result<Vec<Value>> {
-    // Collect parent keys from results.
-    // Prefer `parent_key` (always present in detail results) over `arxiv_id`.
+    // Collect parent keys from results — always present from the detail RETURN.
     let parent_keys: Vec<&str> = results
         .iter()
-        .filter_map(|r| {
-            r.get("parent_key")
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))
-        })
+        .filter_map(|r| r.get("parent_key").and_then(|v| v.as_str()))
         .collect();
 
     if parent_keys.is_empty() {
@@ -286,9 +281,7 @@ async fn structural_rerank(
     let top_vecs: Vec<&Vec<f32>> = results
         .iter()
         .filter_map(|r| {
-            let key = r.get("parent_key")
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))?;
+            let key = r.get("parent_key").and_then(|v| v.as_str())?;
             emb_map.get(key)
         })
         .take(3)
@@ -315,7 +308,6 @@ async fn structural_rerank(
             let current_score = r["score"].as_f64().unwrap_or(0.0);
             let key = r.get("parent_key")
                 .and_then(|v| v.as_str())
-                .or_else(|| r.get("arxiv_id").and_then(|v| v.as_str()))
                 .unwrap_or("");
 
             let structural_sim = emb_map

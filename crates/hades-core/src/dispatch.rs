@@ -4868,35 +4868,29 @@ mod handlers {
             let smell_id = smell["_id"].as_str().unwrap_or("");
             let candidate_keys = candidate_doc_keys(file);
 
-            // Try each candidate key to find a compliance edge.
-            // Source documents are assumed to live in `codebase_files`
-            // (the universal codebase ontology). For domains using a
-            // different source collection, set up the corresponding
-            // edge_definition in your `hades_schema`.
-            let mut found_edge = None;
-            for key in &candidate_keys {
-                let from_id = format!("codebase_files/{key}");
-                let aql = r#"
-                    FOR e IN compliance_edges
-                        FILTER e._from == @from AND e._to == @to
-                        LIMIT 1
-                        RETURN e
-                "#;
-                let bind_vars = json!({ "from": from_id, "to": smell_id });
-                let result = query::query(
-                    pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
-                )
-                .await
-                .map_err(|e| HandlerError::Query {
-                    context: "failed to check compliance edge".into(),
-                    source: e,
-                })?;
-
-                if let Some(edge) = result.results.into_iter().next() {
-                    found_edge = Some(edge);
-                    break;
-                }
-            }
+            // Find a compliance edge from any source collection whose
+            // _from key matches a candidate. Source-collection-agnostic:
+            // claims linked from `codebase_files`, agent memory
+            // collections, paper corpora, etc. all match the same query.
+            // PARSE_IDENTIFIER splits the document `_id` into its
+            // collection and key parts.
+            let aql = r#"
+                FOR e IN compliance_edges
+                    FILTER e._to == @to
+                    FILTER PARSE_IDENTIFIER(e._from).key IN @keys
+                    LIMIT 1
+                    RETURN e
+            "#;
+            let bind_vars = json!({ "keys": candidate_keys, "to": smell_id });
+            let result = query::query(
+                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to check compliance edge".into(),
+                source: e,
+            })?;
+            let found_edge = result.results.into_iter().next();
 
             match found_edge {
                 Some(edge) => {
@@ -5059,20 +5053,24 @@ mod handlers {
             });
         }
 
-        // Parse source_id as "<collection>/<key>". Reject bare keys —
-        // the caller must qualify the source so the link command is
-        // domain-agnostic (works against codebase_files, agent memory
-        // collections, paper corpora, etc.).
+        // Parse source_id as exactly "<collection>/<key>" — one slash,
+        // no more, no less. Reject bare keys (no slash) and
+        // multi-slash strings like "codebase_files/foo/bar" so the
+        // input is unambiguous before reaching get_document().
         let trimmed = source_id.trim();
-        let (source_collection, source_key) = trimmed.split_once('/').ok_or_else(|| {
-            HandlerError::InvalidParameter {
+        let slash_count = trimmed.matches('/').count();
+        if slash_count != 1 {
+            return Err(HandlerError::InvalidParameter {
                 name: "source_id".into(),
                 reason: format!(
-                    "expected '<collection>/<key>', got {trimmed:?} — \
-                     bare keys are no longer accepted (post-PR α)"
+                    "expected '<collection>/<key>' (exactly one '/'), got {trimmed:?} \
+                     with {slash_count} slash(es)"
                 ),
-            }
-        })?;
+            });
+        }
+        let (source_collection, source_key) = trimmed
+            .split_once('/')
+            .expect("slash_count == 1 guarantees split_once succeeds");
         if source_collection.is_empty() || source_key.is_empty() {
             return Err(HandlerError::InvalidParameter {
                 name: "source_id".into(),

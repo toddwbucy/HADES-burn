@@ -1,0 +1,276 @@
+# seeds/code-context-engineering.yaml
+#
+# Flagship RACE (Retrieval-Augmented Context Engineering) demo seed.
+#
+# Purpose: turn any HADES instance into a code-context-engineering platform.
+# Layered on top of the universal codebase ontology
+# (codebase_files, codebase_symbols, codebase_chunks, codebase_*_edges)
+# created by `hades codebase ingest`.
+#
+# Apply with:
+#   hades --db <name> schema apply seeds/code-context-engineering.yaml
+#
+# After applying, the database has:
+#   - axioms                : IS / IS NOT design rules an agent can reason from
+#   - smell_specs           : forbidden-pattern detectors with tier classification
+#   - compliance_edges      : code → axiom / code → smell linkage
+#   - code_context_compliance (named graph): structure + compliance in one view
+#
+# See seeds/README.md for the full bootstrap workflow.
+
+# ─── Collections ──────────────────────────────────────────────────────
+#
+# Universal codebase collections are declared here so the
+# `compliance_edges` edge definition and `code_context_compliance`
+# named graph can reference them. They already exist after `codebase
+# ingest`; `schema apply` treats existing collections as a no-op.
+
+collections:
+  # Universal codebase layer (created by `hades codebase ingest`).
+  - { name: codebase_files,           type: document }
+  - { name: codebase_symbols,         type: document }
+  - { name: codebase_defines_edges,   type: edge }
+  - { name: codebase_calls_edges,     type: edge }
+
+  # RACE constraint layer (this seed authors these).
+  - { name: axioms,                   type: document }
+  - { name: smell_specs,              type: document }
+  - { name: compliance_edges,         type: edge }
+
+# ─── Axioms ───────────────────────────────────────────────────────────
+#
+# Axioms are the IS / IS NOT design rules an agent can ground its
+# reasoning in. They are deliberately framed as a positive set ("IS")
+# and a negative set ("IS NOT") rather than a single description —
+# the contrast is what makes them useful at decision-time.
+
+axioms:
+  - _key: testable-functions
+    name: "Testable Functions"
+    is:
+      - "Pure functions with explicit inputs and outputs"
+      - "Side effects isolated to specific layers"
+      - "Behavior reproducible from arguments alone"
+    is_not:
+      - "Hidden global state mutations"
+      - "Implicit time/random/IO dependencies"
+      - "Coupled to framework lifecycle"
+
+  - _key: errors-as-data
+    name: "Errors Are Data, Not Control Flow"
+    is:
+      - "Errors propagate via Result/Either types"
+      - "Failures named by their semantic kind"
+      - "Library code returns errors; binaries decide what to do with them"
+    is_not:
+      - "Silent error swallowing"
+      - "Bare panics or unwrap() in library code"
+      - "Generic exceptions used to skip uncomfortable paths"
+
+  - _key: explicit-dependencies
+    name: "Dependencies Are Explicit"
+    is:
+      - "Constructor/argument injection over global lookup"
+      - "Configuration values passed in, not read from environment mid-call"
+      - "External services behind a trait/interface the caller chose"
+    is_not:
+      - "Hidden singletons reached via static accessors"
+      - "Modules that read environment variables in business logic"
+      - "Implicit ordering between unrelated initializers"
+
+  - _key: data-flow-clarity
+    name: "Data Flow Is Visible"
+    is:
+      - "Transformations expressed as named functions a reader can follow"
+      - "State changes localized and auditable"
+      - "Naming reflects the meaning of the value, not its mechanics"
+    is_not:
+      - "Mutation buried inside getters"
+      - "Variables named after their type rather than their role"
+      - "Long methods that mix orthogonal responsibilities"
+
+# ─── Smell Specifications ────────────────────────────────────────────
+#
+# Schema (matching `crates/hades-core/src/dispatch.rs:smell_check`):
+#   smell_id           : numeric id, also used by `smell verify CS-<n>`
+#   name               : "CS-<n>: short label"
+#   tier               : "static" | "behavioral" | "architectural"
+#   forbidden_patterns : list of substring patterns; ANY match = violation
+#   scope              : optional file-extension filter (".rs", ".py", …);
+#                        omit for language-agnostic patterns
+#   description        : human-readable explanation
+#   blocks_ingest      : true → `static` tier; surfaces in pre-ingest gate
+#   related_axiom      : axiom _key this smell defends (back-reference)
+#
+# Tier semantics:
+#   static         : autonomous PASS/FAIL — violations block ingest
+#   behavioral     : agent surfaces evidence; human/agent decides
+#   architectural  : agent notes a pattern; informational only
+
+smell_specs:
+  - _key: smell-bare-unwrap
+    smell_id: 10
+    name: "CS-10: Bare unwrap in library code"
+    tier: static
+    forbidden_patterns:
+      - ".unwrap()"
+    scope: ".rs"
+    description: |
+      Bare `.unwrap()` in non-test Rust code panics on the unhappy
+      path instead of propagating an error. Use `?`, `expect("why")`
+      with a real reason, or pattern-match on the Result.
+    blocks_ingest: true
+    related_axiom: errors-as-data
+
+  - _key: smell-bare-panic
+    smell_id: 11
+    name: "CS-11: Bare panic! in library code"
+    tier: static
+    forbidden_patterns:
+      - "panic!("
+    scope: ".rs"
+    description: |
+      `panic!` in library code aborts the caller's process. Library
+      code should return an error type; only binaries should decide
+      to crash.
+    blocks_ingest: true
+    related_axiom: errors-as-data
+
+  - _key: smell-todo-marker
+    smell_id: 13
+    name: "CS-13: Unfinished work marker"
+    tier: static
+    forbidden_patterns:
+      - "TODO"
+      - "FIXME"
+      - "XXX"
+    description: |
+      Unfinished-work markers in committed code mean the change is
+      not actually done. The `smell_check` runtime skips comment-only
+      occurrences automatically (CS-13 is the canonical exception).
+    blocks_ingest: true
+    related_axiom: data-flow-clarity
+
+  - _key: smell-print-debugging
+    smell_id: 27
+    name: "CS-27: Print-style debugging left in code"
+    tier: behavioral
+    forbidden_patterns:
+      - "println!"
+      - "eprintln!"
+      - "console.log("
+      - "print("
+    description: |
+      Print-style debugging statements outside intentional CLI output
+      paths suggest live debugging that should have been cleaned up
+      or replaced with `tracing` / structured logging.
+    blocks_ingest: false
+    related_axiom: data-flow-clarity
+
+  - _key: smell-magic-sleep
+    smell_id: 28
+    name: "CS-28: Magic sleep / busy-wait"
+    tier: behavioral
+    forbidden_patterns:
+      - "sleep("
+      - "thread::sleep"
+      - "time.sleep("
+    description: |
+      Sleep calls in production logic almost always paper over a
+      missing synchronization primitive. Prefer channels, condvars,
+      or explicit retry policies with bounded backoff.
+    blocks_ingest: false
+    related_axiom: explicit-dependencies
+
+  - _key: smell-env-in-business-logic
+    smell_id: 31
+    name: "CS-31: Environment read in business logic"
+    tier: architectural
+    forbidden_patterns:
+      - "env::var"
+      - "os.environ"
+      - "process.env"
+    description: |
+      Reading environment variables outside startup/config layers
+      couples business logic to the deployment environment. Read
+      once at boot, pass values through.
+    blocks_ingest: false
+    related_axiom: explicit-dependencies
+
+  - _key: smell-disabled-test
+    smell_id: 32
+    name: "CS-32: Disabled or skipped test"
+    tier: behavioral
+    forbidden_patterns:
+      - "#[ignore]"
+      - "@pytest.mark.skip"
+      - ".skip("
+      - "xit("
+      - "xdescribe("
+    description: |
+      A disabled test silently lowers coverage. Either fix the test,
+      delete it with a note, or move it to a quarantine module that
+      the agent can enumerate.
+    blocks_ingest: false
+    related_axiom: testable-functions
+
+  - _key: smell-singleton-mutation
+    smell_id: 40
+    name: "CS-40: Static mutable state"
+    tier: static
+    forbidden_patterns:
+      - "static mut"
+      - "lazy_static!"
+    scope: ".rs"
+    description: |
+      `static mut` and global lazy_static singletons hide
+      dependencies and create order-of-initialization bugs. Inject
+      state explicitly.
+    blocks_ingest: true
+    related_axiom: explicit-dependencies
+
+# ─── Edge Definitions ────────────────────────────────────────────────
+#
+# `compliance_edges` is the new RACE-layer relation: code (file or
+# symbol) → axiom or smell_spec. Universal-layer edge definitions are
+# redeclared so the named graph below can include them — re-applying
+# this seed is a no-op for collections already created by
+# `codebase ingest`.
+
+edge_definitions:
+  - name: compliance_edges
+    from_collections: [codebase_files, codebase_symbols]
+    to_collections:   [axioms, smell_specs]
+    description: |
+      RACE constraint linkage: a codebase file or symbol either
+      satisfies an axiom or violates a smell. Materialized by
+      `hades smell check` (smells) and `hades smell link` (manual /
+      agent-asserted axiom satisfaction).
+
+  - name: codebase_defines_edges
+    from_collections: [codebase_files]
+    to_collections:   [codebase_symbols]
+    description: "File defines symbol (universal codebase ontology)."
+
+  - name: codebase_calls_edges
+    from_collections: [codebase_symbols]
+    to_collections:   [codebase_symbols]
+    description: "Symbol calls symbol (universal codebase ontology)."
+
+# ─── Named Graphs ─────────────────────────────────────────────────────
+#
+# One graph that traversals can name: code structure (defines, calls)
+# combined with the compliance constraints. An agent asking "what
+# code violates errors-as-data?" walks compliance_edges from
+# axioms/smell_specs back to codebase_files and codebase_symbols, and
+# can pivot through codebase_defines_edges to enumerate siblings.
+
+named_graphs:
+  - name: code_context_compliance
+    edges:
+      - compliance_edges
+      - codebase_defines_edges
+      - codebase_calls_edges
+    description: |
+      Code structure plus compliance constraints in one named graph.
+      Used by `db query` and traversal-based agent prompts.

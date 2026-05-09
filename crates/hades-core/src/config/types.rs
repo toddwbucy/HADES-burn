@@ -126,7 +126,7 @@ impl HadesConfig {
     /// Production databases (e.g. read-only research data) are **read-only**
     /// to prevent accidental data corruption. Only databases in this list
     /// may be targeted by write operations.
-    const WRITABLE_DATABASES: &[&str] = &["bident_burn"];
+    const WRITABLE_DATABASES: &[&str] = &["bident_burn", "hades_burn_self"];
 
     /// Check that the effective database is writable.
     ///

@@ -97,7 +97,6 @@ pub async fn run_create(
     name: &str,
     edge_definitions: Option<&str>,
 ) -> Result<()> {
-    config.require_writable_database()?;
     let edge_defs = edge_definitions
         .map(|s| serde_json::from_str(s).context("invalid --edge-definitions JSON"))
         .transpose()?;
@@ -120,7 +119,6 @@ pub async fn run_materialize(
     dry_run: bool,
     register: bool,
 ) -> Result<()> {
-    config.require_writable_database()?;
 
     dispatch_and_print(
         config,
@@ -147,7 +145,6 @@ pub async fn run_drop(
              This operation is irreversible."
         );
     }
-    config.require_writable_database()?;
 
     dispatch_and_print(
         config,

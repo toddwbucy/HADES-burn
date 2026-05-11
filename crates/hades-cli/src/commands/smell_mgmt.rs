@@ -1,7 +1,6 @@
 //! Native Rust handlers for `hades smell` and `hades link` commands.
 //!
 //! All commands route through dispatch (AQL queries against ArangoDB).
-//! `link` also requires a writable database.
 //!
 //! Convention: JSON to stdout, human-readable diagnostics to stderr.
 
@@ -175,7 +174,6 @@ pub async fn run_link(
     if force {
         anyhow::bail!("--force is not yet implemented for link");
     }
-    config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     let mut results = Vec::with_capacity(claims.len());

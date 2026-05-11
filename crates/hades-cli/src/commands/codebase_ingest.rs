@@ -114,9 +114,6 @@ pub async fn run(
         None => None,
     };
 
-    // Guard: refuse to write to production databases.
-    config.require_writable_database()?;
-
     // Connect to services.
     let db = ArangoPool::from_config(config)
         .context("failed to connect to ArangoDB")?;

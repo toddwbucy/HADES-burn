@@ -243,11 +243,9 @@ fn resolve_export_pool(
     let pool = if let Some(target_db) = export_to {
         let mut export_config = config.clone();
         export_config.database.name = Some(target_db.to_string());
-        export_config.require_writable_database()?;
         ArangoPool::from_config(&export_config)
             .context("failed to connect to export target database")?
     } else {
-        config.require_writable_database()?;
         // Re-use existing source connection
         source_pool.clone()
     };

@@ -47,10 +47,6 @@ pub async fn run_apply(
     dry_run: bool,
     force: bool,
 ) -> Result<()> {
-    if !dry_run {
-        config.require_writable_database()?;
-    }
-
     let yaml = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read schema file {}", file.display()))?;
 

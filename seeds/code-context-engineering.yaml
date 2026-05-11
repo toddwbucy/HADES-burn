@@ -108,7 +108,7 @@ axioms:
 #   architectural  : agent notes a pattern; informational only
 
 smell_specs:
-  - _key: smell-bare-unwrap
+  - _key: smell-010-bare-unwrap
     smell_id: 10
     name: "CS-10: Bare unwrap in library code"
     tier: static
@@ -122,7 +122,7 @@ smell_specs:
     blocks_ingest: true
     related_axiom: errors-as-data
 
-  - _key: smell-bare-panic
+  - _key: smell-011-bare-panic
     smell_id: 11
     name: "CS-11: Bare panic! in library code"
     tier: static
@@ -136,7 +136,7 @@ smell_specs:
     blocks_ingest: true
     related_axiom: errors-as-data
 
-  - _key: smell-todo-marker
+  - _key: smell-013-todo-marker
     smell_id: 13
     name: "CS-13: Unfinished work marker"
     tier: static
@@ -151,7 +151,7 @@ smell_specs:
     blocks_ingest: true
     related_axiom: data-flow-clarity
 
-  - _key: smell-print-debugging
+  - _key: smell-027-print-debugging
     smell_id: 27
     name: "CS-27: Print-style debugging left in code"
     tier: behavioral
@@ -167,7 +167,7 @@ smell_specs:
     blocks_ingest: false
     related_axiom: data-flow-clarity
 
-  - _key: smell-magic-sleep
+  - _key: smell-028-magic-sleep
     smell_id: 28
     name: "CS-28: Magic sleep / busy-wait"
     tier: behavioral
@@ -182,7 +182,7 @@ smell_specs:
     blocks_ingest: false
     related_axiom: explicit-dependencies
 
-  - _key: smell-env-in-business-logic
+  - _key: smell-031-env-in-business-logic
     smell_id: 31
     name: "CS-31: Environment read in business logic"
     tier: architectural
@@ -197,7 +197,7 @@ smell_specs:
     blocks_ingest: false
     related_axiom: explicit-dependencies
 
-  - _key: smell-disabled-test
+  - _key: smell-032-disabled-test
     smell_id: 32
     name: "CS-32: Disabled or skipped test"
     tier: behavioral
@@ -214,7 +214,7 @@ smell_specs:
     blocks_ingest: false
     related_axiom: testable-functions
 
-  - _key: smell-singleton-mutation
+  - _key: smell-040-static-mut
     smell_id: 40
     name: "CS-40: Static mutable state"
     tier: static

@@ -36,6 +36,14 @@ What it adds:
   the runtime `smell_check` recognizes.
 - **`compliance_edges`** edge collection linking code → axioms /
   smells.
+
+> **`_key` convention for smells.** Use `smell-<NNN>-<short-name>`
+> with a zero-padded three-digit smell_id (e.g.
+> `smell-010-bare-unwrap`). The `hades link` command finds smells
+> by `LEFT(_key, len("smell-NNN-"))` per the runtime contract in
+> `dispatch.rs::smell_key_prefix`; `smell check` and `smell verify`
+> work off the `smell_id` field independently. Keys that don't
+> follow the convention silently fail to link.
 - **`code_context_compliance`** named graph combining defines, calls,
   and compliance edges into one traversable view.
 

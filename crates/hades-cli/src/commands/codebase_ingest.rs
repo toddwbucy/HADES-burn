@@ -19,7 +19,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 use hades_core::chunking::ChunkingStrategy;
 use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
@@ -37,11 +37,13 @@ use hades_core::HadesConfig;
 
 use super::output::{self, OutputFormat};
 
-/// Directories to skip during recursive traversal.
+/// Hard floor for directory exclusions — applied even when the project has
+/// no `.gitignore`, no `.ignore`, and no `.hadesignore`. The `ignore` crate's
+/// standard filters (gitignore + hidden-file skipping) already handle most
+/// real repos; this list catches the unfortunate case of a flat directory
+/// dropped onto disk without any ignore files.
 const SKIP_DIRS: &[&str] = &[
-    ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
-    "node_modules", "target", ".tox", ".venv", "venv", ".eggs",
-    "dist", "build", ".cargo",
+    "__pycache__", "node_modules", "target", "venv", "dist", "build",
 ];
 
 /// Per-file result for JSON output.
@@ -476,20 +478,22 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
     }
 
     let mut files = Vec::new();
-    let walker = WalkDir::new(path)
+    let walker = WalkBuilder::new(path)
         .follow_links(false)
-        .into_iter()
+        .add_custom_ignore_filename(".hadesignore")
         .filter_entry(|entry| {
-            if entry.file_type().is_dir() {
-                let name = entry.file_name().to_string_lossy();
-                return !SKIP_DIRS.contains(&name.as_ref());
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = entry.file_name().to_str() {
+                    return !SKIP_DIRS.contains(&name);
+                }
             }
             true
-        });
+        })
+        .build();
 
     for entry in walker {
         let entry = entry.context("error walking directory")?;
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let entry_path = entry.path();

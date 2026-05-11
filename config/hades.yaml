@@ -16,13 +16,19 @@ database:
   # (or set HADES_DATABASE) explicitly. There is no implicit default; an
   # unconfigured command fails with a clear "no database specified" error
   # rather than silently targeting some shared/production database.
-  username: root
+  # Connect as the dedicated `hades` ArangoDB user, not root. HADES is DBA
+  # tooling — it gets broad grants by default (rw on _system, rw on new
+  # databases). Restrictions on specific production databases are managed
+  # by the operator in arangosh, not by HADES code. Bootstrap the user with
+  # scripts/install/setup-arangodb-user.sh (or the manual curl recipe in
+  # the README).
+  username: hades
   # password: always from ARANGO_PASSWORD env var
 
   sockets:
     # metis proxy is planned but not built; talk to arangod directly for now.
-    # Both readonly and readwrite point at the same socket — DB-level ACLs on
-    # the HADES ArangoDB user enforce read-only on production DBs.
+    # Read/write separation is enforced by ArangoDB ACLs on the `hades` user,
+    # not by HADES code — both sockets point at the same socket file.
     readonly: /run/arangodb3/arangodb.sock
     readwrite: /run/arangodb3/arangodb.sock
 

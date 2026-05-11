@@ -62,10 +62,6 @@ pub enum HandlerError {
     #[error("invalid parameter '{name}': {reason}")]
     InvalidParameter { name: String, reason: String },
 
-    /// A write operation was rejected because the target database is read-only.
-    #[error("write denied: {0}")]
-    WriteDenied(String),
-
     /// A database query failed.
     #[error("{context}")]
     Query {
@@ -917,14 +913,6 @@ fn default_metric() -> String { "cosine".to_string() }
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/// Check that the target database is writable, converting the anyhow error
-/// into a typed `DispatchError` for the wire protocol.
-fn require_writable(config: &HadesConfig) -> Result<(), DispatchError> {
-    config
-        .require_writable_database()
-        .map_err(|e| DispatchError::Handler(HandlerError::WriteDenied(e.to_string())))
-}
-
 /// Route a [`DaemonCommand`] to its native handler.
 ///
 /// Returns the handler's JSON result on success.  Commands without a
@@ -1007,31 +995,26 @@ pub async fn dispatch(
 
         // ── Database write commands ───────────��───────────────────────
         DaemonCommand::DbInsert(params) => {
-            require_writable(config)?;
             handlers::db_insert(pool, &params.collection, &params.data)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbUpdate(params) => {
-            require_writable(config)?;
             handlers::db_update(pool, &params.collection, &params.key, &params.data)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbDelete(params) => {
-            require_writable(config)?;
             handlers::db_delete(pool, &params.collection, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbPurge(params) => {
-            require_writable(config)?;
             handlers::db_purge(pool, &params.document_id)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbCreateCollection(params) => {
-            require_writable(config)?;
             handlers::db_create_collection(
                 pool,
                 &params.name,
@@ -1041,7 +1024,6 @@ pub async fn dispatch(
             .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbCreateIndex(params) => {
-            require_writable(config)?;
             handlers::db_create_index(
                 pool,
                 &params.collection,
@@ -1098,13 +1080,11 @@ pub async fn dispatch(
 
         // ── Graph write commands ──────────────────────────────────────
         DaemonCommand::DbGraphCreate(params) => {
-            require_writable(config)?;
             handlers::db_graph_create(pool, &params.name, params.edge_definitions.as_ref())
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbGraphDrop(params) => {
-            require_writable(config)?;
             if !params.force {
                 return Err(DispatchError::Handler(HandlerError::InvalidParameter {
                     name: "force".into(),
@@ -1117,7 +1097,6 @@ pub async fn dispatch(
         }
 
         DaemonCommand::DbGraphMaterialize(params) => {
-            require_writable(config)?;
             handlers::graph_materialize(pool, params.edge.as_deref(), params.dry_run, params.register)
                 .await
                 .map_err(DispatchError::Handler)
@@ -1125,7 +1104,6 @@ pub async fn dispatch(
 
         // ── Schema management ───────────────────────────────────────
         DaemonCommand::DbSchemaInit(params) => {
-            require_writable(config)?;
             handlers::schema_init(pool, &params.seed)
                 .await
                 .map_err(DispatchError::Handler)
@@ -1171,55 +1149,46 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskCreate(params) => {
-            require_writable(config)?;
             handlers::task_create(pool, &params)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskUpdate(params) => {
-            require_writable(config)?;
             handlers::task_update(pool, &params)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskClose(params) => {
-            require_writable(config)?;
             handlers::task_close(pool, &params.key, params.message.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskStart(params) => {
-            require_writable(config)?;
             handlers::task_start(pool, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskReview(params) => {
-            require_writable(config)?;
             handlers::task_review(pool, &params.key, params.message.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskApprove(params) => {
-            require_writable(config)?;
             handlers::task_approve(pool, &params.key, params.human)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskBlock(params) => {
-            require_writable(config)?;
             handlers::task_block(pool, &params.key, params.message.as_deref(), params.blocker.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskUnblock(params) => {
-            require_writable(config)?;
             handlers::task_unblock(pool, &params.key)
                 .await
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::TaskHandoff(params) => {
-            require_writable(config)?;
             handlers::task_handoff(pool, &params.key, params.message.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
@@ -1247,8 +1216,7 @@ pub async fn dispatch(
         }
         DaemonCommand::TaskDep(params) => {
             if params.add.is_some() || params.remove.is_some() {
-                require_writable(config)?;
-            }
+                }
             handlers::task_dep(
                 pool,
                 &params.key,
@@ -1292,7 +1260,6 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
         DaemonCommand::LinkCodeSmell(params) => {
-            require_writable(config)?;
             handlers::link_code_smell(
                 pool,
                 &params.source_id,
@@ -3105,10 +3072,8 @@ mod handlers {
         };
 
         // 3. Config summary
-        let writable = config.require_writable_database().is_ok();
         let config_info = json!({
             "database": config.effective_database().ok(),
-            "writable": writable,
             "arango_socket_ro": config.effective_socket(true),
             "arango_socket_rw": config.effective_socket(false),
             "embedder_socket": socket_path,
@@ -6098,116 +6063,6 @@ mod tests {
         assert!(serde_json::from_value::<DaemonCommand>(json).is_err());
     }
 
-    // -- Write safety guard ---------------------------------------------------
-
-    #[test]
-    fn test_write_denied_on_production_db() {
-        // Default config targets NestedLearning — writes must be rejected.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbInsert(DbInsertParams {
-                collection: "test".into(),
-                data: serde_json::json!({"x": 1}),
-            }),
-        ));
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, DispatchError::Handler(HandlerError::WriteDenied(_))),
-            "expected WriteDenied, got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_update() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbUpdate(DbUpdateParams {
-                collection: "test".into(),
-                key: "k1".into(),
-                data: serde_json::json!({"x": 1}),
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_delete() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbDelete(DbDeleteParams {
-                collection: "test".into(),
-                key: "k1".into(),
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_purge() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbPurge(DbPurgeParams {
-                document_id: "test/k1".into(),
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_create_collection() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbCreateCollection(DbCreateCollectionParams {
-                name: "test".into(),
-                collection_type: None,
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
     // -- Collection type parsing ----------------------------------------------
 
     #[test]
@@ -6430,73 +6285,6 @@ mod tests {
         assert!(handlers::validate_direction("backwards").is_err());
         assert!(handlers::validate_direction("OUTBOUND").is_err());
         assert!(handlers::validate_direction("").is_err());
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_graph_create() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning"); // non-writable
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbGraphCreate(DbGraphCreateParams {
-                name: "test".into(),
-                edge_definitions: None,
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_graph_drop() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning"); // non-writable
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::DbGraphDrop(DbGraphDropParams {
-                name: "test".into(),
-                drop_collections: false,
-                force: true,
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
-    }
-
-    #[test]
-    fn test_write_denied_on_production_db_link_code_smell() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning"); // non-writable
-        let pool = ArangoPool::from_config(&config).unwrap();
-
-        let result = rt.block_on(dispatch(
-            &pool,
-            &config,
-            DaemonCommand::LinkCodeSmell(LinkCodeSmellParams {
-                source_id: "test-doc".into(),
-                smell_id: "CS-32".into(),
-                enforcement: "static".into(),
-                methods: Vec::new(),
-                summary: None,
-            }),
-        ));
-
-        assert!(matches!(
-            result.unwrap_err(),
-            DispatchError::Handler(HandlerError::WriteDenied(_))
-        ));
     }
 
     // ── Task command tests ─────────────────────────────────────────

@@ -48,7 +48,6 @@ pub async fn run_insert(
     data: Option<&str>,
     input: Option<&Path>,
 ) -> Result<()> {
-    config.require_writable_database()?;
     let json_data = resolve_json_input(data, input)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(
@@ -71,7 +70,6 @@ pub async fn run_update(
     key: &str,
     data: Option<&str>,
 ) -> Result<()> {
-    config.require_writable_database()?;
     let json_data = resolve_json_input(data, None)?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(
@@ -101,7 +99,6 @@ pub async fn run_delete(
              This operation is irreversible."
         );
     }
-    config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(
         &pool,
@@ -128,7 +125,6 @@ pub async fn run_purge(
              This deletes the document AND all related chunks/embeddings."
         );
     }
-    config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(
         &pool,
@@ -148,7 +144,6 @@ pub async fn run_create_collection(
     name: &str,
     collection_type: &str,
 ) -> Result<()> {
-    config.require_writable_database()?;
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(
         &pool,
@@ -176,15 +171,6 @@ pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) ->
              will be deleted permanently."
         );
     }
-
-    // Guard: only databases in the writable allow-list may be dropped.
-    // Constructing a temporary HadesConfig with the target name lets us reuse
-    // the existing `require_writable_database` check.
-    let mut target_config = config.clone();
-    target_config.database.name = Some(name.to_string());
-    target_config
-        .require_writable_database()
-        .with_context(|| format!("refusing to drop database '{name}'"))?;
 
     use hades_core::db::ArangoClient;
 
@@ -219,16 +205,6 @@ pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) ->
 /// Uses `ArangoClient::from_config` with the database overridden to `_system`
 /// so that socket/TCP fallback and auth behavior match all other commands.
 pub async fn run_create_database(config: &HadesConfig, name: &str) -> Result<()> {
-    // Guard the *target* name, not the currently-configured database.
-    // Without this, running `hades db create-database bident_burn` from a
-    // session whose default DB is read-only (e.g. NestedLearning) would
-    // wrongly fail the guard.
-    let mut target_config = config.clone();
-    target_config.database.name = Some(name.to_string());
-    target_config
-        .require_writable_database()
-        .with_context(|| format!("refusing to create database '{name}'"))?;
-
     use hades_core::db::ArangoClient;
 
     let mut system_config = config.clone();
@@ -261,7 +237,6 @@ pub async fn run_create_index(
     dimension: Option<u32>,
     metric: Option<&str>,
 ) -> Result<()> {
-    config.require_writable_database()?;
 
     let collection = collection.unwrap_or_else(|| {
         hades_core::db::collections::CollectionProfile::default_profile().embeddings

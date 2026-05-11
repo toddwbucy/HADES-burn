@@ -21,8 +21,6 @@ async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, command_na
 
 /// `hades db schema init --seed SEED`
 pub async fn run_init(config: &HadesConfig, seed: &str) -> Result<()> {
-    config.require_writable_database()?;
-
     dispatch_and_print(
         config,
         DaemonCommand::DbSchemaInit(dispatch::DbSchemaInitParams {

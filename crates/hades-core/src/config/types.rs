@@ -99,8 +99,7 @@ impl HadesConfig {
     ///
     /// Production code should never call this — it sidesteps the YAML/env
     /// loading path. Used by unit tests that need a config with a known
-    /// database name (e.g., to test the writable-database guard against a
-    /// non-writable name).
+    /// database name.
     pub fn with_database(name: &str) -> Self {
         let mut cfg = Self::default();
         cfg.database.name = Some(name.to_string());
@@ -119,31 +118,6 @@ impl HadesConfig {
                  or set HADES_DATABASE in the environment."
             )
         })
-    }
-
-    /// Databases that are allowed to receive writes.
-    ///
-    /// Production databases (e.g. read-only research data) are **read-only**
-    /// to prevent accidental data corruption. Only databases in this list
-    /// may be targeted by write operations.
-    const WRITABLE_DATABASES: &[&str] = &["bident_burn", "hades_burn_self"];
-
-    /// Check that the effective database is writable.
-    ///
-    /// Returns `Ok(())` if the database is in the allow-list, or `Err`
-    /// with a descriptive message otherwise.  Call this before any
-    /// command that writes to ArangoDB.
-    pub fn require_writable_database(&self) -> anyhow::Result<()> {
-        let db = self.effective_database()?;
-        if Self::WRITABLE_DATABASES.contains(&db) {
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "refusing to write to database '{db}': only {:?} are writable. \
-                 Use --database to target a writable database.",
-                Self::WRITABLE_DATABASES,
-            )
-        }
     }
 
     /// Get the effective socket path for ArangoDB connections.

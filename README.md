@@ -78,6 +78,99 @@ cargo clippy             # lint
 
 Binary: `target/debug/hades` or `target/release/hades`.
 
+## Install
+
+> **WIP.** A proper installer is not yet wired up. The steps below document the
+> manual bootstrap that the systemd unit (`services/systemd/hades-daemon.service`)
+> and the CLI both depend on. Treat this as a checklist, not a script.
+> See `scripts/install/setup-arangodb-user.sh` for the (untested) ArangoDB-user
+> bootstrap sketch.
+
+### 1. Install the binary
+
+```bash
+sudo install -m 755 target/release/hades /usr/local/bin/hades
+install -m 755 target/release/hades ~/.local/bin/hades   # for your shell PATH
+```
+
+The systemd daemon execs `/usr/local/bin/hades`; interactive shells usually pick
+up `~/.local/bin/hades` first. If you only update one, the other will silently
+run an older build.
+
+### 2. Create the ArangoDB user
+
+HADES connects to ArangoDB as a dedicated `hades` user (not `root`). Write
+restrictions on specific databases are enforced by ArangoDB ACLs on this user —
+HADES has no source-level allowlist. Bootstrap with arangosh:
+
+```javascript
+const users = require("@arangodb/users");
+users.save("hades", "<pick-a-password>");
+users.grantDatabase("hades", "_system", "rw");
+users.grantDatabase("hades", "*", "rw");   // default for new DBs
+// Tighten specific production databases as needed:
+// users.grantDatabase("hades", "NestedLearning", "ro");
+```
+
+### 3. Install the system config
+
+```bash
+sudo install -m 640 -o root -g hades config/hades.yaml /etc/hades/hades.yaml
+```
+
+The daemon searches `/etc/hades/hades.yaml` after the in-repo paths; the username
+(`hades`) and socket paths live there. Passwords are never stored in YAML.
+
+### 4. Set the daemon environment
+
+`/etc/hades/daemon.conf` is sourced by `hades-daemon.service` via
+`EnvironmentFile=`. Minimum required keys:
+
+```ini
+ARANGO_PASSWORD=<password-you-set-for-the-hades-user>
+HADES_DATABASE=_system          # bootstrap DB; per-command --db overrides this
+ARANGO_RO_SOCKET=/run/arangodb3/arangodb.sock
+ARANGO_RW_SOCKET=/run/arangodb3/arangodb.sock
+HADES_EMBEDDER_SOCKET=http://localhost:8087/v1
+```
+
+The daemon needs `HADES_DATABASE` set because `ArangoPool::from_config` opens a
+connection at startup; `_system` is the right default (always present, neutral)
+and dispatched commands override the target per-request.
+
+### Updating the daemon's ArangoDB password
+
+1. Rotate the password in arangosh:
+   ```javascript
+   require("@arangodb/users").replace("hades", "<new-password>");
+   ```
+2. Edit `/etc/hades/daemon.conf` and replace the `ARANGO_PASSWORD=` value
+   (file is `root:hades 640`, so use `sudoedit` or `sudo $EDITOR`).
+3. Restart the daemon:
+   ```bash
+   sudo systemctl restart hades-daemon.service
+   sudo systemctl status hades-daemon.service --no-pager
+   ```
+
+For interactive CLI use (outside the daemon), export `ARANGO_PASSWORD` in your
+shell — it takes precedence over anything in YAML.
+
+### Systemd units
+
+```bash
+sudo cp services/systemd/hades-daemon.service /etc/systemd/system/
+sudo cp services/systemd/hades-sysusers.conf  /etc/sysusers.d/hades.conf
+sudo cp services/systemd/hades-tmpfiles.conf  /etc/tmpfiles.d/hades.conf
+sudo systemd-sysusers
+sudo systemd-tmpfiles --create
+sudo systemctl daemon-reload
+sudo systemctl enable --now hades-daemon.service
+```
+
+The `hades-embedder.service` and `hades-extractor.service` units cover the
+optional embedder and Docling services — install only if you're using those
+features.
+
 ## Usage
 
 ```bash

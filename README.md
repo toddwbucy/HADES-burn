@@ -4,7 +4,7 @@
 
 HADES-Burn is research infrastructure for low-latency retrieval-augmented generation over persistent, ontology-grounded knowledge graphs. It was developed as the context-management substrate for the Nested Learning research program — a year long effort to implement and validate published work on nested-optimization memory systems from the Mirrokni et al. research group (arXiv:2512.24695, arXiv:2501.00663) — and has been empirically validated through daily use as the retrieval backend for both local inference (24–32B Qwen and Mistral variants) and commercial coding agents (Claude Code) during the project's own development.
 
-The design premise under investigation is that retrieval latency, not model capability, is frequently the binding constraint on sustained agent coherence — and that a Rust daemon connected to ArangoDB over Unix sockets, paired with an ontology-grounded schema and a closed operation vocabulary, can reduce that constraint to a level at which local, on-premises agent workflows become viable.
+The design premise under investigation is that context engineering — the structured construction of what an agent retrieves and reads on each turn — is more often the binding constraint on sustained agent coherence than raw model capability. HADES-Burn pursues this through an ontology-grounded schema and a closed operation vocabulary that together produce traceable, structured retrieval: the kind of context discipline that on-premises agent workflows require to remain coherent across long-horizon tasks.
 
 For the research questions HADES-Burn was built to investigate, see [RESEARCH_GOALS.md](RESEARCH_GOALS.md).
 

@@ -67,7 +67,7 @@ fn parse_module(source: &str) -> Option<ast::ModModule> {
 fn extract_symbols_from_module(module: &ast::ModModule, offsets: &[usize]) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for stmt in &module.body {
-        extract_stmt_symbols(stmt, &mut symbols, &module.body, offsets);
+        extract_stmt_symbols(stmt, &mut symbols, &module.body, offsets, None);
     }
     symbols
 }
@@ -77,13 +77,14 @@ fn extract_stmt_symbols(
     symbols: &mut Vec<Symbol>,
     _parent_body: &[ast::Stmt],
     offsets: &[usize],
+    parent_class: Option<&str>,
 ) {
     match stmt {
         ast::Stmt::FunctionDef(func) => {
-            extract_funcdef(func, false, symbols, offsets);
+            extract_funcdef(func, false, symbols, offsets, parent_class);
         }
         ast::Stmt::AsyncFunctionDef(func) => {
-            extract_async_funcdef(func, symbols, offsets);
+            extract_async_funcdef(func, symbols, offsets, parent_class);
         }
 
         ast::Stmt::ClassDef(class) => {
@@ -122,11 +123,20 @@ fn extract_stmt_symbols(
                 metadata: meta,
             });
 
-            // Extract methods defined inside the class.
+            // Extract methods defined inside the class, threading the class
+            // name so each method's metadata records its parent. Needed for
+            // resolving `self.method` call sites against `ClassName.method`.
+            let class_name = class.name.to_string();
             for body_stmt in &class.body {
                 match body_stmt {
                     ast::Stmt::FunctionDef(_) | ast::Stmt::AsyncFunctionDef(_) => {
-                        extract_stmt_symbols(body_stmt, symbols, &class.body, offsets);
+                        extract_stmt_symbols(
+                            body_stmt,
+                            symbols,
+                            &class.body,
+                            offsets,
+                            Some(&class_name),
+                        );
                     }
                     _ => {}
                 }
@@ -245,6 +255,7 @@ fn extract_funcdef(
     is_async: bool,
     symbols: &mut Vec<Symbol>,
     offsets: &[usize],
+    parent_class: Option<&str>,
 ) {
     let decorators: Vec<String> = func
         .decorator_list
@@ -261,6 +272,7 @@ fn extract_funcdef(
 
     let docstring = extract_docstring(&func.body);
     let (start_line, end_line) = range_lines(&func.range, offsets);
+    let calls = extract_calls(&func.body);
 
     let mut meta = json!({ "is_async": is_async });
     if !decorators.is_empty() {
@@ -271,6 +283,12 @@ fn extract_funcdef(
     }
     if let Some(doc) = &docstring {
         meta["docstring"] = json!(doc);
+    }
+    if let Some(parent) = parent_class {
+        meta["parent_symbol"] = json!(parent);
+    }
+    if !calls.is_empty() {
+        meta["calls"] = json!(calls);
     }
 
     symbols.push(Symbol {
@@ -287,6 +305,7 @@ fn extract_async_funcdef(
     func: &ast::StmtAsyncFunctionDef,
     symbols: &mut Vec<Symbol>,
     offsets: &[usize],
+    parent_class: Option<&str>,
 ) {
     let decorators: Vec<String> = func
         .decorator_list
@@ -303,6 +322,7 @@ fn extract_async_funcdef(
 
     let docstring = extract_docstring(&func.body);
     let (start_line, end_line) = range_lines(&func.range, offsets);
+    let calls = extract_calls(&func.body);
 
     let mut meta = json!({ "is_async": true });
     if !decorators.is_empty() {
@@ -314,6 +334,12 @@ fn extract_async_funcdef(
     if let Some(doc) = &docstring {
         meta["docstring"] = json!(doc);
     }
+    if let Some(parent) = parent_class {
+        meta["parent_symbol"] = json!(parent);
+    }
+    if !calls.is_empty() {
+        meta["calls"] = json!(calls);
+    }
 
     symbols.push(Symbol {
         name: func.name.to_string(),
@@ -322,6 +348,223 @@ fn extract_async_funcdef(
         end_line,
         metadata: meta,
     });
+}
+
+/// Walk a function body and collect call sites.
+///
+/// Each entry is `{name, qualified_name}` where `qualified_name` is the
+/// dotted attribute path when the callee is an attribute access
+/// (e.g. `self.foo`, `os.path.join`) and the bare name otherwise.
+///
+/// Does **not** descend into nested function or class definitions —
+/// their calls belong to those nested symbols, not the enclosing one.
+/// Mirrors `python_ast_extractor._extract_calls` in the legacy Python
+/// implementation.
+fn extract_calls(body: &[ast::Stmt]) -> Vec<serde_json::Value> {
+    let mut calls: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for stmt in body {
+        walk_stmt_for_calls(stmt, &mut calls, &mut seen);
+    }
+    calls
+}
+
+fn walk_stmt_for_calls(
+    stmt: &ast::Stmt,
+    calls: &mut Vec<serde_json::Value>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    // Nested function/class definitions have their own scope — skip.
+    match stmt {
+        ast::Stmt::FunctionDef(_) | ast::Stmt::AsyncFunctionDef(_) | ast::Stmt::ClassDef(_) => {
+            return;
+        }
+        _ => {}
+    }
+
+    // Recurse into children, looking for Expr nodes that contain Call.
+    visit_stmt_exprs(stmt, &mut |expr| record_calls_in_expr(expr, calls, seen));
+
+    // Recurse into nested statements.
+    match stmt {
+        ast::Stmt::If(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::For(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::AsyncFor(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::While(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::With(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::AsyncWith(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+        }
+        ast::Stmt::Try(s) => {
+            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.finalbody { walk_stmt_for_calls(sub, calls, seen); }
+            for handler in &s.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                for sub in &h.body { walk_stmt_for_calls(sub, calls, seen); }
+            }
+        }
+        ast::Stmt::Match(s) => {
+            for case in &s.cases {
+                for sub in &case.body { walk_stmt_for_calls(sub, calls, seen); }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply `f` to each expression directly contained in `stmt` (one level deep).
+fn visit_stmt_exprs(stmt: &ast::Stmt, f: &mut impl FnMut(&ast::Expr)) {
+    match stmt {
+        ast::Stmt::Expr(s) => f(&s.value),
+        ast::Stmt::Assign(s) => {
+            for t in &s.targets { f(t); }
+            f(&s.value);
+        }
+        ast::Stmt::AugAssign(s) => { f(&s.target); f(&s.value); }
+        ast::Stmt::AnnAssign(s) => {
+            f(&s.target);
+            f(&s.annotation);
+            if let Some(v) = &s.value { f(v); }
+        }
+        ast::Stmt::Return(s) => { if let Some(v) = &s.value { f(v); } }
+        ast::Stmt::Raise(s) => {
+            if let Some(e) = &s.exc { f(e); }
+            if let Some(c) = &s.cause { f(c); }
+        }
+        ast::Stmt::Assert(s) => { f(&s.test); if let Some(m) = &s.msg { f(m); } }
+        ast::Stmt::Delete(s) => { for t in &s.targets { f(t); } }
+        ast::Stmt::If(s) => f(&s.test),
+        ast::Stmt::For(s) => { f(&s.target); f(&s.iter); }
+        ast::Stmt::AsyncFor(s) => { f(&s.target); f(&s.iter); }
+        ast::Stmt::While(s) => f(&s.test),
+        ast::Stmt::With(s) => {
+            for item in &s.items {
+                f(&item.context_expr);
+                if let Some(v) = &item.optional_vars { f(v); }
+            }
+        }
+        ast::Stmt::AsyncWith(s) => {
+            for item in &s.items {
+                f(&item.context_expr);
+                if let Some(v) = &item.optional_vars { f(v); }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk an expression recursively, recording every `Call` we encounter.
+fn record_calls_in_expr(
+    expr: &ast::Expr,
+    calls: &mut Vec<serde_json::Value>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let ast::Expr::Call(call) = expr {
+        let (name, qname) = match call.func.as_ref() {
+            ast::Expr::Name(n) => {
+                let s = n.id.to_string();
+                (s.clone(), s)
+            }
+            ast::Expr::Attribute(attr) => {
+                let qname = expr_name(&call.func).unwrap_or_else(|| attr.attr.to_string());
+                (attr.attr.to_string(), qname)
+            }
+            _ => {
+                // Unhandled callee shape (call returning a callable, lambda, etc.) — skip.
+                ("".into(), "".into())
+            }
+        };
+        if !qname.is_empty() && seen.insert(qname.clone()) {
+            calls.push(json!({ "name": name, "qualified_name": qname }));
+        }
+        // Recurse into args/keywords for nested calls (e.g. `f(g(x))`).
+        for arg in &call.args {
+            record_calls_in_expr(arg, calls, seen);
+        }
+        for kw in &call.keywords {
+            record_calls_in_expr(&kw.value, calls, seen);
+        }
+        // Recurse into the callee itself (e.g. `f()(x)` where f() returns a callable).
+        record_calls_in_expr(&call.func, calls, seen);
+        return;
+    }
+
+    // Walk other expression shapes that can contain calls.
+    match expr {
+        ast::Expr::BinOp(e) => { record_calls_in_expr(&e.left, calls, seen); record_calls_in_expr(&e.right, calls, seen); }
+        ast::Expr::UnaryOp(e) => record_calls_in_expr(&e.operand, calls, seen),
+        ast::Expr::BoolOp(e) => { for v in &e.values { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::Compare(e) => {
+            record_calls_in_expr(&e.left, calls, seen);
+            for c in &e.comparators { record_calls_in_expr(c, calls, seen); }
+        }
+        ast::Expr::IfExp(e) => {
+            record_calls_in_expr(&e.test, calls, seen);
+            record_calls_in_expr(&e.body, calls, seen);
+            record_calls_in_expr(&e.orelse, calls, seen);
+        }
+        ast::Expr::Attribute(e) => record_calls_in_expr(&e.value, calls, seen),
+        ast::Expr::Subscript(e) => { record_calls_in_expr(&e.value, calls, seen); record_calls_in_expr(&e.slice, calls, seen); }
+        ast::Expr::Starred(e) => record_calls_in_expr(&e.value, calls, seen),
+        ast::Expr::Await(e) => record_calls_in_expr(&e.value, calls, seen),
+        ast::Expr::Yield(e) => { if let Some(v) = &e.value { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::YieldFrom(e) => record_calls_in_expr(&e.value, calls, seen),
+        ast::Expr::Tuple(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::List(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::Set(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::Dict(e) => {
+            for k in e.keys.iter().flatten() { record_calls_in_expr(k, calls, seen); }
+            for v in &e.values { record_calls_in_expr(v, calls, seen); }
+        }
+        ast::Expr::FormattedValue(e) => record_calls_in_expr(&e.value, calls, seen),
+        ast::Expr::JoinedStr(e) => { for v in &e.values { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::ListComp(e) => {
+            record_calls_in_expr(&e.elt, calls, seen);
+            for g in &e.generators {
+                record_calls_in_expr(&g.iter, calls, seen);
+                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+            }
+        }
+        ast::Expr::SetComp(e) => {
+            record_calls_in_expr(&e.elt, calls, seen);
+            for g in &e.generators {
+                record_calls_in_expr(&g.iter, calls, seen);
+                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+            }
+        }
+        ast::Expr::GeneratorExp(e) => {
+            record_calls_in_expr(&e.elt, calls, seen);
+            for g in &e.generators {
+                record_calls_in_expr(&g.iter, calls, seen);
+                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+            }
+        }
+        ast::Expr::DictComp(e) => {
+            record_calls_in_expr(&e.key, calls, seen);
+            record_calls_in_expr(&e.value, calls, seen);
+            for g in &e.generators {
+                record_calls_in_expr(&g.iter, calls, seen);
+                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Extract a simple name from an expression.
@@ -667,6 +910,79 @@ def process(items: list) -> int:
         assert!(m.comment_lines > 0);
         assert!(m.cyclomatic_complexity >= 5, "complexity: {}", m.cyclomatic_complexity);
         assert!(m.max_nesting_depth >= 2, "depth: {}", m.max_nesting_depth);
+    }
+
+    #[test]
+    fn test_calls_extracted_in_function() {
+        // The `load` method calls `os.path.exists`, `open`, `json.load`.
+        // The `process` function calls `item.is_valid` and `item.is_pending`.
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
+
+        let load = analysis.symbols.iter().find(|s| s.name == "load").unwrap();
+        let calls = load.metadata["calls"].as_array().expect("load should have calls");
+        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
+        assert!(qnames.contains(&"os.path.exists"), "load should call os.path.exists: {qnames:?}");
+        assert!(qnames.contains(&"open"), "load should call open: {qnames:?}");
+        assert!(qnames.contains(&"json.load"), "load should call json.load: {qnames:?}");
+
+        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
+        let calls = process.metadata["calls"].as_array().expect("process should have calls");
+        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
+        assert!(qnames.contains(&"item.is_valid"), "process should call item.is_valid: {qnames:?}");
+        assert!(qnames.contains(&"item.is_pending"), "process should call item.is_pending: {qnames:?}");
+    }
+
+    #[test]
+    fn test_methods_have_parent_symbol() {
+        // Methods defined inside a class should record the class name
+        // so call resolution can rewrite `self.method` to `Class.method`.
+        let analysis = analyze(SAMPLE_PYTHON).unwrap();
+
+        let load = analysis.symbols.iter().find(|s| s.name == "load").unwrap();
+        assert_eq!(load.metadata["parent_symbol"], "Config");
+
+        let init = analysis.symbols.iter().find(|s| s.name == "__init__").unwrap();
+        assert_eq!(init.metadata["parent_symbol"], "Config");
+
+        // Top-level function `process` has no parent.
+        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
+        assert!(process.metadata.get("parent_symbol").is_none());
+    }
+
+    #[test]
+    fn test_calls_skip_nested_definitions() {
+        // Calls inside a nested function belong to that nested function,
+        // not the enclosing one. The outer function should NOT credit
+        // the inner function's calls to itself.
+        let src = r#"
+def outer():
+    x = first()
+    def inner():
+        y = second()
+    return inner
+"#;
+        let analysis = analyze(src).unwrap();
+        let outer = analysis.symbols.iter().find(|s| s.name == "outer").unwrap();
+        let calls = outer.metadata["calls"].as_array().expect("outer should have calls");
+        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
+        assert!(qnames.contains(&"first"), "outer should call first: {qnames:?}");
+        assert!(!qnames.contains(&"second"), "outer should NOT see second (it's inner's call): {qnames:?}");
+    }
+
+    #[test]
+    fn test_calls_deduplicated() {
+        // Calling the same target twice in one function should appear once.
+        let src = r#"
+def f():
+    helper()
+    helper()
+    helper()
+"#;
+        let analysis = analyze(src).unwrap();
+        let f = analysis.symbols.iter().find(|s| s.name == "f").unwrap();
+        let calls = f.metadata["calls"].as_array().expect("f should have calls");
+        let helper_count = calls.iter().filter(|c| c["qualified_name"] == "helper").count();
+        assert_eq!(helper_count, 1, "duplicate calls should be deduplicated");
     }
 
     #[test]

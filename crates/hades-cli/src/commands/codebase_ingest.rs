@@ -26,7 +26,7 @@ use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, S
 use hades_core::code::rust_analyzer::{
     EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
 };
-use hades_core::code::rust_imports;
+use hades_core::code::{python_calls, rust_imports};
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
@@ -243,6 +243,22 @@ pub async fn run(
         }
     }
 
+    // Resolve Python call graph edges (symbol → symbol). Uses the calls + parent_symbol
+    // metadata attached during AST extraction; reuses the bare-name index already built
+    // for imports as the Strategy-3 fallback.
+    let py_qualified_index = python_calls::build_qualified_index(&imports.python_file_symbols);
+    let py_call_edges = python_calls::resolve_python_calls(
+        &imports.python_file_symbols,
+        &py_qualified_index,
+        &py_symbol_index,
+    );
+    if !py_call_edges.is_empty() {
+        info!(edge_count = py_call_edges.len(), "resolved Python call edges");
+        if let Err(e) = crud::insert_documents(&db, CODEBASE.calls_edges, &py_call_edges, true).await {
+            warn!(error = %e, "failed to store Python call edges");
+        }
+    }
+
     // Resolve Rust import graph edges (file → symbol).
     let rust_symbol_index = rust_imports::build_symbol_index(&imports.rust_file_symbols);
     let rs_import_edges = rust_imports::resolve_rust_imports(&imports.rust_imports, &rust_symbol_index);
@@ -306,6 +322,7 @@ pub async fn run(
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
+        "python_call_edges": py_call_edges.len(),
         "rust_analyzer": {
             "symbols": ra_stats.symbols,
             "edges": ra_stats.edges,

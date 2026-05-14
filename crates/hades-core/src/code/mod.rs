@@ -17,6 +17,7 @@ mod rust_ast;
 mod chunking;
 pub mod rust_analyzer;
 pub mod rust_imports;
+pub mod python_calls;
 
 pub use language::Language;
 pub use symbols::{

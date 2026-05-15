@@ -30,6 +30,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # hades-proto pulls in prost-build via tonic-build, which shells out
+      # to `protoc` at build time. Workstations typically have protobuf-compiler
+      # installed system-wide; CI runners don't.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
 

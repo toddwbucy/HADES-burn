@@ -231,6 +231,7 @@ The project is open to collaboration from academic and industry researchers work
 | --- | --- |
 | [RESEARCH_GOALS.md](RESEARCH_GOALS.md) | Research questions, context-management framing, measurement points |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and convention for adding entries |
+| [docs/specs/workstation-specific-tests.md](docs/specs/workstation-specific-tests.md) | Convention for integration tests that depend on workstation-specific resources |
 | [docs/daemon-protocol.md](docs/daemon-protocol.md) | Wire protocol, session model, access tiers, command reference |
 | [docs/model-operation-vocabulary.md](docs/model-operation-vocabulary.md) | Closed operation set for AI model agents |
 | [docs/codebase-graph-ontology.md](docs/codebase-graph-ontology.md) | Universal code ontology — collections, edges, named graph |

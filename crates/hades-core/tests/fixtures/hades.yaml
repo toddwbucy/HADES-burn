@@ -1,11 +1,11 @@
-# Test fixture — mirrors the structure and values of the production hades.yaml.
-# Used by config_integration.rs to verify parsing without a path dependency
-# on the Python HADES checkout.
+# Test fixture — exercises every field that config_integration.rs asserts
+# against. Values are intentionally generic; tests verify YAML parsing, not
+# any specific deployment's data.
 
 database:
   host: localhost
   port: 8529
-  database: NestedLearning
+  database: test_db
   username: root
   sockets:
     readonly: /run/arangodb3/arangodb.sock

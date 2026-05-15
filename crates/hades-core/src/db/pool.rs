@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_pool_accessors() {
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
         // Both should target the same database
         assert_eq!(pool.reader().database(), pool.writer().database());

@@ -364,8 +364,8 @@ mod tests {
 
     #[test]
     fn test_doc_cache_key() {
-        let key = doc_cache_key("arxiv_metadata", "2501_12345");
-        assert_eq!(key, "arxiv_metadata/2501_12345");
+        let key = doc_cache_key("sample_docs", "key_001");
+        assert_eq!(key, "sample_docs/key_001");
     }
 
     #[test]

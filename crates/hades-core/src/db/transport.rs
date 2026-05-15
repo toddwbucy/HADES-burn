@@ -442,10 +442,10 @@ mod tests {
 
     #[test]
     fn test_client_from_config_defaults() {
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         // This will fall through to TCP since no sockets exist in test env
         let client = ArangoClient::from_config(&config, true).unwrap();
-        assert_eq!(client.database(), "NestedLearning");
+        assert_eq!(client.database(), "test_db");
         // No password in default config → no auth header
         assert!(client.auth_header.is_none());
     }

@@ -24,7 +24,7 @@ Binary: `target/debug/hades` (or `target/release/hades`)
 
 ## Critical Rules
 
-1. **Production data is sacrosanct.** Never write to NestedLearning or any production ArangoDB database. Only `bident_burn` is writable for project management. All write-tests use `bident_burn` or a dedicated test database.
+1. **Production data is sacrosanct.** HADES connects to ArangoDB as the dedicated `hades` user; write restrictions on specific databases are enforced by ArangoDB ACL grants on that user (e.g. production research databases get `ro`). HADES has no compiled-in writable allowlist — the ArangoDB layer is the authoritative gate. For HADES's own state, `bident_burn` is the project-management database; use it or a dedicated test database for write-tests rather than any production target.
 2. **Use the HADES CLI** (`hades --db bident_burn`) for all project management tasks.
 3. **ArangoDB socket:** `/run/arangodb3/arangodb.sock` — the existing socks proxy. Do not create new socket infrastructure.
 4. **Embedder service:** OpenAI-compatible HTTP at `http://localhost:8087/v1` (HADES-owned FastAPI service running Jina V4 on dedicated GPU). Per-machine override via `/etc/hades/embedder.conf` and `/etc/hades/hades.yaml`. The contract is formalized in [`docs/persephone-embedding-api.md`](docs/persephone-embedding-api.md) (PE-API v1). The pre-PR-#70 gRPC Unix-socket pattern at `/run/hades/embedder.sock` was deleted; do not reintroduce it. Weaver's per-agent embedders at `/run/weaver/...` are owned by WeaverTools — do not modify.

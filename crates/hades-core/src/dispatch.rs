@@ -5648,13 +5648,13 @@ mod tests {
     fn test_command_roundtrip_db_get() {
         let json = serde_json::json!({
             "command": "db.get",
-            "params": { "collection": "arxiv_metadata", "key": "2409_04701" }
+            "params": { "collection": "sample_docs", "key": "key_001" }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
             DaemonCommand::DbGet(ref p)
-                if p.collection == "arxiv_metadata" && p.key == "2409_04701"
+                if p.collection == "sample_docs" && p.key == "key_001"
         ));
     }
 
@@ -5698,12 +5698,12 @@ mod tests {
     fn test_command_roundtrip_db_check() {
         let json = serde_json::json!({
             "command": "db.check",
-            "params": { "document_id": "arxiv_metadata/2409_04701" }
+            "params": { "document_id": "sample_docs/key_001" }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbCheck(ref p) if p.document_id == "arxiv_metadata/2409_04701"
+            DaemonCommand::DbCheck(ref p) if p.document_id == "sample_docs/key_001"
         ));
     }
 
@@ -5780,7 +5780,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_insert() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5801,7 +5801,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_remove() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5822,7 +5822,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_update() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5843,7 +5843,7 @@ mod tests {
         // "RETURN 1" should pass the read-only check (will fail at AQL execution
         // if ArangoDB is unreachable, but should not fail at validation).
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5871,7 +5871,7 @@ mod tests {
     #[test]
     fn test_db_aql_allows_insert_in_string() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         // The word INSERT appears inside a string literal — should NOT be rejected.
@@ -5896,7 +5896,7 @@ mod tests {
     #[test]
     fn test_db_aql_allows_update_in_comment() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         // The word UPDATE appears inside a comment — should NOT be rejected.
@@ -5923,7 +5923,7 @@ mod tests {
     #[test]
     fn test_db_list_invalid_profile() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -5946,7 +5946,7 @@ mod tests {
     #[test]
     fn test_db_aql_rejects_non_object_bind() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let config = HadesConfig::with_database("NestedLearning");
+        let config = HadesConfig::with_database("test_db");
         let pool = ArangoPool::from_config(&config).unwrap();
 
         let result = rt.block_on(dispatch(
@@ -6006,12 +6006,12 @@ mod tests {
     fn test_command_roundtrip_db_purge() {
         let json = serde_json::json!({
             "command": "db.purge",
-            "params": { "document_id": "arxiv_metadata/2409_04701" }
+            "params": { "document_id": "sample_docs/key_001" }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             cmd,
-            DaemonCommand::DbPurge(ref p) if p.document_id == "arxiv_metadata/2409_04701"
+            DaemonCommand::DbPurge(ref p) if p.document_id == "sample_docs/key_001"
         ));
     }
 

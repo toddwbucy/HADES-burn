@@ -1,9 +1,8 @@
 //! Collection profiles mapping logical names to physical ArangoDB collections.
 //!
 //! Each profile groups three collections: metadata, chunks, and embeddings.
-//! Profiles are intentionally generic — domain-specific schemas (NL papers,
-//! arxiv abstracts, etc.) belong in the database's own `hades_schema`
-//! collection, not as compiled-in profiles.
+//! Profiles are intentionally generic — domain-specific schemas belong in
+//! the database's own `hades_schema` collection, not as compiled-in profiles.
 
 use std::env;
 

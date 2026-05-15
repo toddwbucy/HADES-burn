@@ -9,8 +9,8 @@
 //! - Collection profile selection
 //! - Force re-processing (surgical delete + re-insert)
 //!
-//! Domain-specific orchestration (arxiv API ingest, NL-paper schemas, etc.)
-//! belongs in user scripts that compose this command + `hades db insert` etc.
+//! Domain-specific orchestration (custom source APIs, application-specific
+//! schemas) belongs in user scripts that compose this command + `hades db insert` etc.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

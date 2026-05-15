@@ -155,8 +155,11 @@ run "db delete k2"            "hades --db $DB db delete $TEST_COL k2 --force"
 run "db count after delete"   "[ \"\$(hades --db $DB db count $TEST_COL 2>/dev/null | grep -oE '\"count\": [0-9]+' | awk '{print \$2}')\" = '2' ]"
 run "db export"               "hades --db $DB db export $TEST_COL -o $LOG_DIR/export.jsonl && [ -s $LOG_DIR/export.jsonl ]"
 
-# Refuse to write to non-writable databases
-run "write guard (NestedLearning)" "! hades --db NestedLearning db insert codebase_files --data '{\"_key\":\"shouldfail\"}'"
+# (Write restrictions are enforced by ArangoDB ACLs on the `hades` user, not
+# by an in-process allowlist. The previous "write guard" assertion against a
+# hardcoded read-only DB was removed when the const allowlist was deleted; an
+# ACL-level test would require coordinating with the operator's specific
+# grants and belongs in deployment validation, not the CLI audit.)
 
 # ── DB write — schema mutation ─────────────────────────────────────────
 # Note: schema init was already run during regeneration; skip re-init.

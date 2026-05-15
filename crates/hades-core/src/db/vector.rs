@@ -30,9 +30,9 @@ pub struct SimilarityResult {
     pub total_chunks: Option<u64>,
     /// Title from the metadata document.
     pub title: Option<String>,
-    /// External identifier (arxiv ID, DOI, ISBN, or any source-specific
-    /// identifier) read from the metadata document's `external_id` field.
-    /// User-defined; HADES does not populate this automatically.
+    /// External identifier (DOI, ISBN, or any application-specific identifier)
+    /// read from the metadata document's `external_id` field. User-defined;
+    /// HADES does not populate this automatically.
     pub external_id: Option<String>,
     /// Similarity score (higher = more similar for cosine/innerProduct).
     pub score: f64,

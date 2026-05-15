@@ -47,7 +47,7 @@ Edge collections:
 Orphan collections: [codebase_chunks, codebase_embeddings]
 ```
 
-**Why a named graph?** ArangoDB's graph traversal API (`FOR v, e IN 1..N OUTBOUND/INBOUND`) requires either a named graph or explicit edge collection lists. A named graph also enforces that `_from`/`_to` point only to declared vertex collections — preventing stale references to deleted documents or cross-ontology leaks (e.g., an edge accidentally pointing into `arxiv_metadata`).
+**Why a named graph?** ArangoDB's graph traversal API (`FOR v, e IN 1..N OUTBOUND/INBOUND`) requires either a named graph or explicit edge collection lists. A named graph also enforces that `_from`/`_to` point only to declared vertex collections — preventing stale references to deleted documents or cross-ontology leaks (e.g., an edge accidentally pointing into an unrelated document collection in the same database).
 
 **Why separate edge collections?** Each collection carries its own `_from`/`_to` constraint. ArangoDB rejects a `codebase_defines_edges` document with `_from` pointing to `codebase_symbols` — the graph enforces directionality at insert time. Separate collections also align with the NL graph convention (22 edge collections, collection name = RGCN relation type) and enable collection-level skipping during random walks in `hades-prefetch`.
 

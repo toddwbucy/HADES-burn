@@ -100,8 +100,8 @@ rocchio:
   gamma: 0.15
 
 # -----------------------------------------------------------------------------
-# Sync Settings (generic batch lookback / pagination — used by sync-style
-# ingest workflows; not arxiv-specific)
+# Sync Settings (generic batch lookback / pagination — used by any sync-style
+# ingest workflow that polls a source for new documents)
 # -----------------------------------------------------------------------------
 sync:
   default_lookback_days: 7

@@ -56,8 +56,8 @@ case "$http" in
       -d '{"grant":"rw"}' >/dev/null
 
     # Default grant for newly-created databases. Wildcard '*' is URL-encoded.
-    # Operator tightens specific databases (e.g. NestedLearning -> 'ro') in
-    # arangosh after this runs.
+    # Operator tightens specific databases (e.g. read-only production data
+    # → 'ro') in arangosh after this runs.
     api -X PUT "http://localhost/_api/user/hades/database/%2A" \
       -d '{"grant":"rw"}' >/dev/null
 
@@ -66,7 +66,7 @@ case "$http" in
     echo "  * (default for new databases): rw"
     echo
     echo "Restrict specific databases via arangosh, e.g.:"
-    echo "  require('@arangodb/users').grantDatabase('hades', 'NestedLearning', 'ro')"
+    echo "  require('@arangodb/users').grantDatabase('hades', '<production-db-name>', 'ro')"
     ;;
   409)
     echo "ArangoDB user 'hades' already exists. Leaving grants untouched."

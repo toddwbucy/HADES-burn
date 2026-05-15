@@ -1,7 +1,7 @@
 //! ArangoDB document key normalization.
 //!
-//! Pure functions for transforming raw identifiers (arxiv IDs, file paths)
-//! into valid ArangoDB document keys.
+//! Pure functions for transforming raw identifiers (file paths, external IDs,
+//! anything with dots/slashes/version suffixes) into valid ArangoDB document keys.
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -29,10 +29,8 @@ pub fn normalize_document_key(raw: &str) -> String {
 }
 
 /// Strip a trailing `v\d+` version suffix from an identifier without
-/// replacing other delimiters.
-///
-/// Originally written for arxiv IDs (e.g. `2501.12345v1` → `2501.12345`)
-/// but works on any string with the same versioning convention.
+/// replacing other delimiters. Works on any string with that versioning
+/// convention (e.g. `2501.12345v1` → `2501.12345`, `libfoo-1.0v3` → `libfoo-1.0`).
 ///
 /// # Examples
 /// ```
@@ -218,11 +216,11 @@ mod tests {
 
     #[test]
     fn test_strip_version() {
-        // arxiv-style identifiers (the original use case)
+        // Dotted identifiers with trailing version
         assert_eq!(strip_version("2501.12345v1"), "2501.12345");
         assert_eq!(strip_version("2501.12345v12"), "2501.12345");
         assert_eq!(strip_version("2501.12345"), "2501.12345");
-        // non-arxiv identifiers — function is generic over any `v\d+` suffix
+        // Function is generic over any `v\d+` suffix
         assert_eq!(strip_version("libfoo-1.0v3"), "libfoo-1.0");
         assert_eq!(strip_version("libfoo-1.0"), "libfoo-1.0");
         // version-like substring NOT at the end is left alone

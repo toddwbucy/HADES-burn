@@ -113,7 +113,7 @@ users.save("hades", "<pick-a-password>");
 users.grantDatabase("hades", "_system", "rw");
 users.grantDatabase("hades", "*", "rw");   // default for new DBs
 // Tighten specific production databases as needed:
-// users.grantDatabase("hades", "NestedLearning", "ro");
+// users.grantDatabase("hades", "<production-db-name>", "ro");
 ```
 
 ### 3. Install the system config
@@ -181,7 +181,7 @@ features.
 
 ```
 hades --db <name> db query "attention mechanism" -n 5
-hades --db <name> db graph traverse "papers/arxiv_2501_00663" -d outbound --max-depth 3
+hades --db <name> db graph traverse "papers/example_paper_key" -d outbound --max-depth 3
 hades --db <name> codebase ingest /path/to/project --lang rust
 hades --db <name> db schema init --seed nl
 hades daemon

@@ -1,5 +1,7 @@
 # HADES-Burn
 
+[![CI](https://github.com/toddwbucy/HADES-burn/actions/workflows/ci.yml/badge.svg)](https://github.com/toddwbucy/HADES-burn/actions/workflows/ci.yml)
+
 ## *for ontology-grounded context engineering*
 
 **HADES-Burn** (High-speed ArangoDB Data Embedding System) is research infrastructure for low-latency retrieval-augmented generation over persistent, ontology-grounded knowledge graphs. It was developed as the context-management substrate for the Nested Learning research program — a year-long effort to implement and validate published work on nested-optimization memory systems from the Mirrokni et al. research group (arXiv:2512.24695, arXiv:2501.00663) — and has been empirically validated through daily use as the retrieval backend for both local inference (24–32B Qwen and Mistral variants) and commercial coding agents (Claude Code) during the project's own development.

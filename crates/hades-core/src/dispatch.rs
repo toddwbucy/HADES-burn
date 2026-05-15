@@ -1186,17 +1186,15 @@ pub async fn dispatch(
         DaemonCommand::TaskSessions(params) => handlers::task_sessions(pool, &params.key)
             .await
             .map_err(DispatchError::Handler),
-        DaemonCommand::TaskDep(params) => {
-            handlers::task_dep(
-                pool,
-                &params.key,
-                params.add.as_deref(),
-                params.remove.as_deref(),
-                params.graph,
-            )
-            .await
-            .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::TaskDep(params) => handlers::task_dep(
+            pool,
+            &params.key,
+            params.add.as_deref(),
+            params.remove.as_deref(),
+            params.graph,
+        )
+        .await
+        .map_err(DispatchError::Handler),
         DaemonCommand::TaskUsage(_) => handlers::task_usage(pool)
             .await
             .map_err(DispatchError::Handler),

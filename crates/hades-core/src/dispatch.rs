@@ -2972,18 +2972,22 @@ mod handlers {
             "degraded"
         };
 
-        // 2. Embedder probe — connect + info(), with 5-second timeout
-        let socket_path = &config.embedding.service.socket;
+        // 2. Embedder probe — connect + info(), with 5-second timeout.
+        // The endpoint string may be an HTTP URL (typical: http://localhost:8087/v1)
+        // or a Unix socket path; EmbeddingClient::connect_at auto-detects transport
+        // from the prefix. The config field and JSON output key are still named
+        // `socket` for backwards compatibility with the pre-PR-#70 wire shape.
+        let endpoint = &config.embedding.service.socket;
         let embedder_info = {
             match tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                let client = EmbeddingClient::connect_at(socket_path).await?;
+                let client = EmbeddingClient::connect_at(endpoint).await?;
                 client.info().await
             })
             .await
             {
                 Ok(Ok(info)) => json!({
                     "status": "running",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "model_name": info.model_name,
                     "dimension": info.dimension,
                     "device": info.device,
@@ -2991,12 +2995,12 @@ mod handlers {
                 }),
                 Ok(Err(e)) => json!({
                     "status": "unavailable",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "error": e.to_string(),
                 }),
                 Err(_) => json!({
                     "status": "unavailable",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "error": "connection timed out (5s)",
                 }),
             }
@@ -3007,7 +3011,7 @@ mod handlers {
             "database": config.effective_database().ok(),
             "arango_socket_ro": config.effective_socket(true),
             "arango_socket_rw": config.effective_socket(false),
-            "embedder_socket": socket_path,
+            "embedder_socket": endpoint,
         });
 
         let mut result = json!({

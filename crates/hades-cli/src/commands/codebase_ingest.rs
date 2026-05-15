@@ -63,6 +63,14 @@ struct FileResult {
     num_chunks: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_embeddings: Option<usize>,
+    /// Set when the chunks were stored but the embed call failed. The file
+    /// is structurally ingested (symbols, chunks, edges all present), but
+    /// the chunks have no associated embeddings — typically a transient
+    /// embedder failure (OOM on the embedding service GPU, request timeout,
+    /// etc.). The user-facing summary counts these as
+    /// `partial_embedding_failures` so they don't get lost in a green run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +236,7 @@ pub async fn run(
                     num_symbols: None,
                     num_chunks: None,
                     num_embeddings: None,
+                    embedding_error: None,
                     skipped: None,
                     error: Some(e.to_string()),
                     duration_ms: duration,
@@ -334,6 +343,16 @@ pub async fn run(
         .count();
     let total_embeddings: usize = results.iter().filter_map(|r| r.num_embeddings).sum();
 
+    // Files whose chunks were stored but whose embed call failed (e.g. embedder
+    // GPU OOM, timeout). Their per-file `embedding_error` carries the message;
+    // we surface a count + the affected paths here so a green-looking "completed"
+    // doesn't hide silent vector loss.
+    let embedding_failures: Vec<&str> = results
+        .iter()
+        .filter(|r| r.embedding_error.is_some())
+        .map(|r| r.path.as_str())
+        .collect();
+
     let result_data = json!({
         "total": total,
         "completed": succeeded,
@@ -343,6 +362,8 @@ pub async fn run(
             "service_connected": embedder.is_some(),
             "files_embedded": files_embedded,
             "total_embeddings": total_embeddings,
+            "files_with_embedding_failures": embedding_failures.len(),
+            "embedding_failure_paths": embedding_failures,
         },
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
@@ -590,6 +611,7 @@ async fn ingest_file(
                 num_symbols: None,
                 num_chunks: None,
                 num_embeddings: None,
+                embedding_error: None,
                 skipped: Some(true),
                 error: Some(format!("parse error: {msg}")),
                 duration_ms: 0,
@@ -616,6 +638,7 @@ async fn ingest_file(
             num_symbols: Some(analysis.symbols.len()),
             num_chunks: None,
             num_embeddings: None,
+            embedding_error: None,
             skipped: Some(true),
             error: None,
             duration_ms: 0,
@@ -744,37 +767,40 @@ async fn ingest_file(
 
     // Embed chunks (skipped if embedder is unavailable).
     let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-    let embedding_docs = match embedder {
+    let (embedding_docs, embedding_error): (Vec<Value>, Option<String>) = match embedder {
         Some(emb) if !chunk_texts.is_empty() => {
             match emb
                 .embed(&chunk_texts, "code", Some(config.embedding.batch.size))
                 .await
             {
-                Ok(embed_result) => embed_result
-                    .embeddings
-                    .iter()
-                    .enumerate()
-                    .map(|(i, vec)| {
-                        let ckey = keys::chunk_key(&fkey, i);
-                        let ekey = keys::embedding_key(&ckey);
-                        json!({
-                            "_key": ekey,
-                            "chunk_key": ckey,
-                            "file_key": fkey,
-                            "embedding": vec,
-                            "model": embed_result.model,
-                            "model_hash": keys::model_hash(&embed_result.model),
-                            "dimension": embed_result.dimension,
+                Ok(embed_result) => {
+                    let docs = embed_result
+                        .embeddings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vec)| {
+                            let ckey = keys::chunk_key(&fkey, i);
+                            let ekey = keys::embedding_key(&ckey);
+                            json!({
+                                "_key": ekey,
+                                "chunk_key": ckey,
+                                "file_key": fkey,
+                                "embedding": vec,
+                                "model": embed_result.model,
+                                "model_hash": keys::model_hash(&embed_result.model),
+                                "dimension": embed_result.dimension,
+                            })
                         })
-                    })
-                    .collect::<Vec<Value>>(),
+                        .collect::<Vec<Value>>();
+                    (docs, None)
+                }
                 Err(e) => {
                     warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
-                    Vec::new()
+                    (Vec::new(), Some(e.to_string()))
                 }
             }
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), None),
     };
     let num_embeddings_written = embedding_docs.len();
 
@@ -865,6 +891,7 @@ async fn ingest_file(
         num_symbols: Some(num_sym),
         num_chunks: Some(num_chk),
         num_embeddings: Some(num_embeddings_written),
+        embedding_error,
         skipped: None,
         error: None,
         duration_ms: 0,

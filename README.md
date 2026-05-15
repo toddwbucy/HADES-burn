@@ -47,7 +47,7 @@ For the research questions HADES-Burn was built to investigate, see [RESEARCH_GO
 
 **Ontology as data, not code.** Database ontologies are stored in the `hades_schema` collection and loaded at runtime. Schema evolution is a database operation, not a compile-and-deploy cycle. This makes it practical to run multiple research configurations from a single binary.
 
-**Three-tier access control via SO_PEERCRED.** The query daemon at `/run/hades/hades.sock` uses peer-credential-based sessions with three access tiers — Agent (safe reads and task management), Internal (diagnostics), and Admin (writes, DDL, raw AQL). Tier assignment is a function of Unix peer credentials, not a token exchange. See [docs/daemon-protocol.md](docs/daemon-protocol.md).
+**Tier-aware command dispatch.** The query daemon at `/run/hades/hades.sock` classifies commands into three tiers — Agent (safe reads and task management), Internal (diagnostics), and Admin (writes, DDL, raw AQL) — and supports opt-in client self-restriction via the request's `session` field. An AI-agent harness can declare `"session": "agent"` to have the daemon reject any commands above the Agent tier, preventing accidental admin actions from a model that was only meant to read. The tier metadata is documentation as much as enforcement: it makes the agent-safe command set inspectable. *Security against malicious clients is not the goal here; that is enforced at the ArangoDB layer via ACL grants on the dedicated `hades` ArangoDB user (configured at install time).* See [docs/daemon-protocol.md](docs/daemon-protocol.md).
 
 **AST-level code ingestion.** Rust source is parsed with `syn` and rust-analyzer; Python with `rustpython-parser`. Chunking respects symbol boundaries, and cross-file import resolution produces typed edges in the graph. Embedding is optional and decoupled from structural ingestion.
 
@@ -228,6 +228,7 @@ The project is open to collaboration from academic and industry researchers work
 | Document | Description |
 | --- | --- |
 | [RESEARCH_GOALS.md](RESEARCH_GOALS.md) | Research questions, context-management framing, measurement points |
+| [CHANGELOG.md](CHANGELOG.md) | Release history and convention for adding entries |
 | [docs/daemon-protocol.md](docs/daemon-protocol.md) | Wire protocol, session model, access tiers, command reference |
 | [docs/model-operation-vocabulary.md](docs/model-operation-vocabulary.md) | Closed operation set for AI model agents |
 | [docs/codebase-graph-ontology.md](docs/codebase-graph-ontology.md) | Universal code ontology — collections, edges, named graph |

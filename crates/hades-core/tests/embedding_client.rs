@@ -5,9 +5,7 @@
 
 use std::path::PathBuf;
 
-use hades_core::persephone::embedding::{
-    EmbedResult, EmbeddingClientConfig, EmbeddingEndpoint,
-};
+use hades_core::persephone::embedding::{EmbedResult, EmbeddingClientConfig, EmbeddingEndpoint};
 
 #[test]
 fn test_config_defaults() {
@@ -62,5 +60,8 @@ async fn test_connect_nonexistent_socket_fails() {
     };
 
     let result = EmbeddingClient::connect(config).await;
-    assert!(result.is_err(), "expected connection error for nonexistent socket");
+    assert!(
+        result.is_err(),
+        "expected connection error for nonexistent socket"
+    );
 }

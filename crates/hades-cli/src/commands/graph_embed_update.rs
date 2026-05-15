@@ -28,8 +28,8 @@ pub async fn run(
     checkpoint_dir: &str,
 ) -> Result<()> {
     // ── Source database (read-only) ─────────────────────────────────
-    let source_pool = ArangoPool::from_config(config)
-        .context("failed to connect to source ArangoDB")?;
+    let source_pool =
+        ArangoPool::from_config(config).context("failed to connect to source ArangoDB")?;
 
     info!(db = %source_pool.database(), "connected to source database");
 
@@ -82,8 +82,7 @@ pub async fn run(
 
     // ── Serialize graph for inference ───────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);
-    std::fs::create_dir_all(&safetensors_dir)
-        .context("failed to create checkpoint directory")?;
+    std::fs::create_dir_all(&safetensors_dir).context("failed to create checkpoint directory")?;
     let safetensors_path = safetensors_dir.join("graph_inference.safetensors");
 
     let graph_ref = graph.clone();
@@ -122,8 +121,8 @@ pub async fn run(
     let emb_bytes = tokio::fs::read(&embeddings_path)
         .await
         .context("failed to read embeddings file")?;
-    let embeddings = decode_f32_embeddings(&emb_bytes)
-        .context("failed to decode embedding bytes")?;
+    let embeddings =
+        decode_f32_embeddings(&emb_bytes).context("failed to decode embedding bytes")?;
 
     info!(
         num_nodes = emb_result.num_nodes,

@@ -401,8 +401,8 @@ mod tests {
     fn test_token_spans() {
         let spans = token_spans("hello  world  foo");
         assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0], (0, 5));   // "hello"
-        assert_eq!(spans[1], (7, 12));  // "world"
+        assert_eq!(spans[0], (0, 5)); // "hello"
+        assert_eq!(spans[1], (7, 12)); // "world"
         assert_eq!(spans[2], (14, 17)); // "foo"
     }
 

@@ -94,10 +94,7 @@ mod tests {
         limiter.acquire().await; // second: should wait ~100ms
         let elapsed = start.elapsed();
         // Should be at least ~90ms (allowing some scheduling slack).
-        assert!(
-            elapsed >= Duration::from_millis(80),
-            "elapsed: {elapsed:?}"
-        );
+        assert!(elapsed >= Duration::from_millis(80), "elapsed: {elapsed:?}");
     }
 
     #[tokio::test]

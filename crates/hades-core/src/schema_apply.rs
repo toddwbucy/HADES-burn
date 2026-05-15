@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use serde_yaml::Mapping;
 use tracing::{debug, info};
 
@@ -179,15 +179,24 @@ pub struct ApplyResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
-    CreateCollection { name: String, collection_type: u32 },
-    UpsertDocuments { collection: String, count: usize },
+    CreateCollection {
+        name: String,
+        collection_type: u32,
+    },
+    UpsertDocuments {
+        collection: String,
+        count: usize,
+    },
     /// One edge_definition document into hades_schema. The
     /// `(name, source_field)` pair is the unique identity — a single
     /// edge collection can carry multiple definitions that differ by
     /// source_field (the historical NL pattern, retained for
     /// generality). Edge defs without a source_field use the literal
     /// `"(none)"` so the operation list still distinguishes them.
-    UpsertEdgeDefinition { name: String, source_field: String },
+    UpsertEdgeDefinition {
+        name: String,
+        source_field: String,
+    },
     /// Persist a `schema_meta` document to `hades_schema` so
     /// `RuntimeSchema::load` can find it. Always emitted when
     /// hades_schema is being managed by this apply pass.
@@ -196,8 +205,13 @@ pub enum Operation {
     /// `RuntimeSchema::load` can deserialize it. Distinct from
     /// `CreateNamedGraph` (the gharial API call): one materializes
     /// the graph in ArangoDB, the other records it in `hades_schema`.
-    UpsertNamedGraphDoc { name: String },
-    CreateNamedGraph { name: String, edges: Vec<String> },
+    UpsertNamedGraphDoc {
+        name: String,
+    },
+    CreateNamedGraph {
+        name: String,
+        edges: Vec<String>,
+    },
 }
 
 // ── public API ────────────────────────────────────────────────────────
@@ -244,8 +258,7 @@ pub fn parse(yaml_str: &str) -> Result<SchemaFile, ApplyError> {
         }
     }
 
-    let mut file: SchemaFile =
-        serde_yaml::from_value(serde_yaml::Value::Mapping(reserved_map))?;
+    let mut file: SchemaFile = serde_yaml::from_value(serde_yaml::Value::Mapping(reserved_map))?;
     file.documents = documents;
     Ok(file)
 }
@@ -260,11 +273,11 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
     // Build a set of declared collection names + their types for cross-checks.
     let mut declared: HashMap<&str, CollectionType> = HashMap::new();
     for c in &file.collections {
-        if declared.insert(c.name.as_str(), c.collection_type).is_some() {
-            errors.push(format!(
-                "collection '{}' declared twice",
-                c.name
-            ));
+        if declared
+            .insert(c.name.as_str(), c.collection_type)
+            .is_some()
+        {
+            errors.push(format!("collection '{}' declared twice", c.name));
         }
     }
 
@@ -286,9 +299,7 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
             if let Some(k) = key
                 && !seen.insert(k)
             {
-                errors.push(format!(
-                    "duplicate _key '{k}' in collection '{col}'"
-                ));
+                errors.push(format!("duplicate _key '{k}' in collection '{col}'"));
             }
             if key.is_none() {
                 errors.push(format!(
@@ -416,7 +427,9 @@ pub fn plan(file: &SchemaFile) -> Vec<Operation> {
     // Persist named graph metadata to hades_schema so RuntimeSchema::load
     // can find it. The corresponding gharial creation follows.
     for ng in &file.named_graphs {
-        ops.push(Operation::UpsertNamedGraphDoc { name: ng.name.clone() });
+        ops.push(Operation::UpsertNamedGraphDoc {
+            name: ng.name.clone(),
+        });
     }
 
     // Always emit a schema_meta upsert; it's required by RuntimeSchema::load.
@@ -534,7 +547,13 @@ pub async fn apply(
         "feature_dim": 2048u32,
         "schema_checksum": checksum,
     });
-    crud::insert_documents(pool, "hades_schema", &[meta_doc], /* overwrite= */ true).await?;
+    crud::insert_documents(
+        pool,
+        "hades_schema",
+        &[meta_doc],
+        /* overwrite= */ true,
+    )
+    .await?;
     info!("registered schema_meta document");
 
     // 6. Named graphs via gharial. Idempotent: 409 Conflict (graph
@@ -615,10 +634,7 @@ async fn ensure_collection(
 /// (those collections may exist from prior `codebase ingest` runs
 /// and shouldn't block schema bootstrap — see
 /// `docs/declarative-schema.md` §11).
-async fn check_not_in_use(
-    pool: &ArangoPool,
-    file: &SchemaFile,
-) -> Result<(), ApplyError> {
+async fn check_not_in_use(pool: &ArangoPool, file: &SchemaFile) -> Result<(), ApplyError> {
     let universal: HashSet<&str> = crate::db::collections::CODEBASE
         .all_collections()
         .iter()
@@ -677,7 +693,10 @@ collections:
         let file = parse(yaml).unwrap();
         assert_eq!(file.collections.len(), 1);
         assert_eq!(file.collections[0].name, "axioms");
-        assert_eq!(file.collections[0].collection_type, CollectionType::Document);
+        assert_eq!(
+            file.collections[0].collection_type,
+            CollectionType::Document
+        );
     }
 
     #[test]
@@ -692,10 +711,7 @@ axioms:
         let file = parse(yaml).unwrap();
         assert_eq!(file.collections.len(), 1);
         assert_eq!(file.documents.get("axioms").unwrap().len(), 1);
-        assert_eq!(
-            file.documents["axioms"][0]["_key"].as_str(),
-            Some("foo")
-        );
+        assert_eq!(file.documents["axioms"][0]["_key"].as_str(), Some("foo"));
     }
 
     #[test]
@@ -721,7 +737,9 @@ smell_specs:
 "#;
         let file = parse(yaml).unwrap();
         let err = validate(&file).unwrap_err();
-        assert!(matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("smell_specs"))));
+        assert!(
+            matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("smell_specs")))
+        );
     }
 
     #[test]
@@ -734,7 +752,9 @@ axioms:
 "#;
         let file = parse(yaml).unwrap();
         let err = validate(&file).unwrap_err();
-        assert!(matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("missing required _key"))));
+        assert!(
+            matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("missing required _key")))
+        );
     }
 
     #[test]
@@ -748,7 +768,9 @@ axioms:
 "#;
         let file = parse(yaml).unwrap();
         let err = validate(&file).unwrap_err();
-        assert!(matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("duplicate"))));
+        assert!(
+            matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("duplicate")))
+        );
     }
 
     #[test]
@@ -779,7 +801,9 @@ named_graphs:
 "#;
         let file = parse(yaml).unwrap();
         let err = validate(&file).unwrap_err();
-        assert!(matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("missing_edge"))));
+        assert!(
+            matches!(err, ApplyError::Validation(ref errs) if errs.iter().any(|e| e.contains("missing_edge")))
+        );
     }
 
     #[test]
@@ -803,15 +827,35 @@ named_graphs:
         validate(&file).unwrap();
         let ops = plan(&file);
         // hades_schema first, then user collections, then docs, then edges, then graphs
-        assert!(matches!(&ops[0], Operation::CreateCollection { name, .. } if name == "hades_schema"));
+        assert!(
+            matches!(&ops[0], Operation::CreateCollection { name, .. } if name == "hades_schema")
+        );
         // Find the index of each phase
-        let last_create = ops.iter().rposition(|op| matches!(op, Operation::CreateCollection { .. })).unwrap();
-        let first_upsert = ops.iter().position(|op| matches!(op, Operation::UpsertDocuments { .. })).unwrap();
-        let first_edge_def = ops.iter().position(|op| matches!(op, Operation::UpsertEdgeDefinition { .. })).unwrap();
-        let first_graph = ops.iter().position(|op| matches!(op, Operation::CreateNamedGraph { .. })).unwrap();
-        assert!(last_create < first_upsert, "all collections before any upsert");
+        let last_create = ops
+            .iter()
+            .rposition(|op| matches!(op, Operation::CreateCollection { .. }))
+            .unwrap();
+        let first_upsert = ops
+            .iter()
+            .position(|op| matches!(op, Operation::UpsertDocuments { .. }))
+            .unwrap();
+        let first_edge_def = ops
+            .iter()
+            .position(|op| matches!(op, Operation::UpsertEdgeDefinition { .. }))
+            .unwrap();
+        let first_graph = ops
+            .iter()
+            .position(|op| matches!(op, Operation::CreateNamedGraph { .. }))
+            .unwrap();
+        assert!(
+            last_create < first_upsert,
+            "all collections before any upsert"
+        );
         assert!(first_upsert < first_edge_def, "documents before edge defs");
-        assert!(first_edge_def < first_graph, "edge defs before named graphs");
+        assert!(
+            first_edge_def < first_graph,
+            "edge defs before named graphs"
+        );
     }
 
     #[test]

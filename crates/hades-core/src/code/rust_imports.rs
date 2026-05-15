@@ -156,10 +156,7 @@ pub fn build_symbol_index(
             let entry = (rel_path.clone(), skey);
 
             // Index by symbol name.
-            index
-                .entry(sym.name.clone())
-                .or_default()
-                .push(entry);
+            index.entry(sym.name.clone()).or_default().push(entry);
         }
     }
 
@@ -407,7 +404,10 @@ mod tests {
         let mut symbol_index = HashMap::new();
         symbol_index.insert(
             "Config".to_string(),
-            vec![("src/config.rs".to_string(), "src_config_rs__Config__abcd1234".to_string())],
+            vec![(
+                "src/config.rs".to_string(),
+                "src_config_rs__Config__abcd1234".to_string(),
+            )],
         );
 
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
@@ -430,7 +430,10 @@ mod tests {
         let mut symbol_index = HashMap::new();
         symbol_index.insert(
             "MyStruct".to_string(),
-            vec![("src/lib.rs".to_string(), "src_lib_rs__MyStruct__abcd1234".to_string())],
+            vec![(
+                "src/lib.rs".to_string(),
+                "src_lib_rs__MyStruct__abcd1234".to_string(),
+            )],
         );
 
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
@@ -440,10 +443,7 @@ mod tests {
     #[test]
     fn test_resolve_skips_glob() {
         let mut rust_imports = HashMap::new();
-        rust_imports.insert(
-            "src/main.rs".to_string(),
-            vec!["std::io::*".to_string()],
-        );
+        rust_imports.insert("src/main.rs".to_string(), vec!["std::io::*".to_string()]);
 
         let symbol_index = HashMap::new();
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
@@ -464,7 +464,10 @@ mod tests {
         let mut symbol_index = HashMap::new();
         symbol_index.insert(
             "Config".to_string(),
-            vec![("src/config.rs".to_string(), "src_config_rs__Config__abcd1234".to_string())],
+            vec![(
+                "src/config.rs".to_string(),
+                "src_config_rs__Config__abcd1234".to_string(),
+            )],
         );
 
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
@@ -483,8 +486,14 @@ mod tests {
         symbol_index.insert(
             "file_key".to_string(),
             vec![
-                ("src/utils.rs".to_string(), "src_utils_rs__file_key__aaaa0000".to_string()),
-                ("src/db/keys.rs".to_string(), "src_db_keys_rs__file_key__bbbb1111".to_string()),
+                (
+                    "src/utils.rs".to_string(),
+                    "src_utils_rs__file_key__aaaa0000".to_string(),
+                ),
+                (
+                    "src/db/keys.rs".to_string(),
+                    "src_db_keys_rs__file_key__bbbb1111".to_string(),
+                ),
             ],
         );
 
@@ -505,7 +514,10 @@ mod tests {
         let mut symbol_index = HashMap::new();
         symbol_index.insert(
             "Config".to_string(),
-            vec![("src/config.rs".to_string(), "src_config_rs__Config__abcd1234".to_string())],
+            vec![(
+                "src/config.rs".to_string(),
+                "src_config_rs__Config__abcd1234".to_string(),
+            )],
         );
 
         let edges = resolve_rust_imports(&rust_imports, &symbol_index);
@@ -527,8 +539,14 @@ mod tests {
         symbol_index.insert(
             "Pool".to_string(),
             vec![
-                ("src/debug.rs".to_string(), "src_debug_rs__Pool__aaaa0000".to_string()),
-                ("src/db/pool.rs".to_string(), "src_db_pool_rs__Pool__bbbb1111".to_string()),
+                (
+                    "src/debug.rs".to_string(),
+                    "src_debug_rs__Pool__aaaa0000".to_string(),
+                ),
+                (
+                    "src/db/pool.rs".to_string(),
+                    "src_db_pool_rs__Pool__bbbb1111".to_string(),
+                ),
             ],
         );
 

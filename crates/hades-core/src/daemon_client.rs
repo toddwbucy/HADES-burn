@@ -248,9 +248,7 @@ mod tests {
 
         let mut client = DaemonClient::connect(&sock).await.unwrap();
         let resp = client
-            .request(DaemonCommand::Orient(OrientParams {
-                collection: None,
-            }))
+            .request(DaemonCommand::Orient(OrientParams { collection: None }))
             .await
             .unwrap();
 
@@ -294,7 +292,10 @@ mod tests {
 
         let mut client = DaemonClient::connect(&sock).await.unwrap();
         let resp = client
-            .request_with_id("my-req-1", DaemonCommand::Status(StatusParams { verbose: false }))
+            .request_with_id(
+                "my-req-1",
+                DaemonCommand::Status(StatusParams { verbose: false }),
+            )
             .await
             .unwrap();
 
@@ -308,7 +309,10 @@ mod tests {
     async fn test_connect_nonexistent_socket() {
         let result = DaemonClient::connect("/tmp/hades-nonexistent-test.sock").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DaemonClientError::Connect { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            DaemonClientError::Connect { .. }
+        ));
     }
 
     #[test]

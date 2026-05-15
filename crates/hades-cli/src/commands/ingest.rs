@@ -17,25 +17,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
+use hades_core::HadesConfig;
 use hades_core::batch::{BatchProcessor, BatchProcessorConfig, RateLimiter};
 use hades_core::chunking::{ChunkingStrategy, TokenChunking};
+use hades_core::db::ArangoPool;
 use hades_core::db::collections::CollectionProfile;
 use hades_core::db::keys;
-use hades_core::db::ArangoPool;
 use hades_core::persephone::embedding::EmbeddingClient;
 use hades_core::persephone::extraction::ExtractionClient;
 use hades_core::pipeline::{Pipeline, PipelineConfig};
-use hades_core::HadesConfig;
 
 use super::output::{self, OutputFormat};
 
 /// Code-file extensions for auto-detecting the `code` embedding task.
 const CODE_EXTENSIONS: &[&str] = &[
-    "py", "rs", "cu", "cuh", "cpp", "c", "h", "hpp", "js", "ts",
-    "go", "java", "rb", "swift", "kt",
+    "py", "rs", "cu", "cuh", "cpp", "c", "h", "hpp", "js", "ts", "go", "java", "rb", "swift", "kt",
 ];
 
 /// Keys that user-provided metadata cannot override.
@@ -84,8 +83,7 @@ pub async fn run(
     // Parse custom metadata if provided.
     let extra_metadata: Option<Value> = match metadata_json {
         Some(s) => {
-            let val: Value =
-                serde_json::from_str(s).context("--metadata must be valid JSON")?;
+            let val: Value = serde_json::from_str(s).context("--metadata must be valid JSON")?;
             if !val.is_object() {
                 bail!("--metadata must be a JSON object, got: {}", val);
             }
@@ -104,8 +102,7 @@ pub async fn run(
     let file_paths: Vec<PathBuf> = inputs.to_vec();
 
     // -- Connect to services ---------------------------------------------------
-    let db = ArangoPool::from_config(config)
-        .context("failed to connect to ArangoDB")?;
+    let db = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     let extractor = ExtractionClient::connect_default()
         .await
@@ -125,7 +122,12 @@ pub async fn run(
         overwrite: force,
     };
 
-    let pipeline = Arc::new(Pipeline::new(extractor, embedder, db.clone(), pipeline_config));
+    let pipeline = Arc::new(Pipeline::new(
+        extractor,
+        embedder,
+        db.clone(),
+        pipeline_config,
+    ));
     let chunker = Arc::new(TokenChunking {
         chunk_size: config.embedding.chunking.size_tokens as usize,
         overlap: config.embedding.chunking.overlap_tokens as usize,
@@ -154,9 +156,7 @@ pub async fn run(
         },
         resume,
         reset,
-        progress_interval: Duration::from_secs_f64(
-            config.batch_processing.progress_interval_secs,
-        ),
+        progress_interval: Duration::from_secs_f64(config.batch_processing.progress_interval_secs),
         rate_limiter,
     };
 
@@ -295,7 +295,10 @@ async fn ingest_file(
 
     // Check if already exists (unless --force).
     if !force && document_exists(db, profile.metadata, &doc_key).await? {
-        info!(doc_key, "already ingested, skipping (use --force to re-process)");
+        info!(
+            doc_key,
+            "already ingested, skipping (use --force to re-process)"
+        );
         return Ok(json!({"skipped": true}));
     }
 
@@ -359,11 +362,7 @@ fn merge_extra_metadata(doc: &mut Value, extra: Option<&Value>) {
 }
 
 /// Check if a document key already exists in a collection.
-async fn document_exists(
-    db: &ArangoPool,
-    collection: &str,
-    doc_key: &str,
-) -> Result<bool> {
+async fn document_exists(db: &ArangoPool, collection: &str, doc_key: &str) -> Result<bool> {
     match hades_core::db::crud::get_document(db, collection, doc_key).await {
         Ok(_) => Ok(true),
         Err(e) if e.is_not_found() => Ok(false),

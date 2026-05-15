@@ -45,10 +45,7 @@ pub struct ArangoClient {
     /// The hyper client for Unix socket connections.
     unix_client: Option<Client<UnixConnector, Full<Bytes>>>,
     /// The hyper client for TCP connections.
-    tcp_client: Option<Client<
-        hyper_util::client::legacy::connect::HttpConnector,
-        Full<Bytes>,
-    >>,
+    tcp_client: Option<Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>>,
 }
 
 impl std::fmt::Debug for ArangoClient {
@@ -143,12 +140,7 @@ impl ArangoClient {
     }
 
     /// Create a client with an explicit TCP URL (for testing).
-    pub fn with_url(
-        base_url: &str,
-        database: &str,
-        username: &str,
-        password: &str,
-    ) -> Self {
+    pub fn with_url(base_url: &str, database: &str, username: &str, password: &str) -> Self {
         let credentials = format!("{username}:{password}");
         let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
         let connector = hyper_util::client::legacy::connect::HttpConnector::new();
@@ -270,18 +262,13 @@ impl ArangoClient {
         } else if let Some(ref client) = self.tcp_client {
             client.request(req)
         } else {
-            return Err(ArangoError::Request(
-                "no transport configured".to_string(),
-            ));
+            return Err(ArangoError::Request("no transport configured".to_string()));
         };
 
         let response = tokio::time::timeout(timeout, response_future)
             .await
             .map_err(|_| {
-                ArangoError::Request(format!(
-                    "request timed out after {}s",
-                    timeout.as_secs()
-                ))
+                ArangoError::Request(format!("request timed out after {}s", timeout.as_secs()))
             })??;
 
         let status = response.status();
@@ -421,12 +408,7 @@ mod tests {
 
     #[test]
     fn test_auth_header_encoding() {
-        let client = ArangoClient::with_url(
-            "http://localhost:8529",
-            "test_db",
-            "root",
-            "secret",
-        );
+        let client = ArangoClient::with_url("http://localhost:8529", "test_db", "root", "secret");
         let auth = client.auth_header.unwrap();
         assert!(auth.starts_with("Basic "));
         // Decode and verify

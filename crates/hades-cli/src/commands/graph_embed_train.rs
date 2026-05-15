@@ -19,9 +19,7 @@ use hades_core::persephone::training::{TrainingClient, TrainingClientConfig};
 
 use super::output::{self, OutputFormat};
 
-use hades_prefetch::{
-    Orchestrator, SplitConfig, TrainConfig, prepare_training_data,
-};
+use hades_prefetch::{Orchestrator, SplitConfig, TrainConfig, prepare_training_data};
 
 /// Run the `graph-embed train` command.
 #[allow(clippy::too_many_arguments)]
@@ -60,8 +58,8 @@ pub async fn run(
     }
 
     // ── Source database (read-only) ──────────────────────────────────
-    let source_pool = ArangoPool::from_config(config)
-        .context("failed to connect to source ArangoDB")?;
+    let source_pool =
+        ArangoPool::from_config(config).context("failed to connect to source ArangoDB")?;
 
     info!(db = %source_pool.database(), "connected to source database");
 
@@ -79,8 +77,7 @@ pub async fn run(
 
     // ── Prepare training data ────────────────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);
-    std::fs::create_dir_all(&safetensors_dir)
-        .context("failed to create checkpoint directory")?;
+    std::fs::create_dir_all(&safetensors_dir).context("failed to create checkpoint directory")?;
     let safetensors_path = safetensors_dir.join("graph.safetensors");
 
     let split_config = SplitConfig {
@@ -122,16 +119,15 @@ pub async fn run(
     // ── Train ────────────────────────────────────────────────────────
     // Destructure: graph and split move into the orchestrator,
     // id_map is kept for the export step.
-    let hades_prefetch::TrainingData { graph, id_map, split } = data;
+    let hades_prefetch::TrainingData {
+        graph,
+        id_map,
+        split,
+    } = data;
 
     let orchestrator = Orchestrator::new(training_client.clone(), train_config);
     let result = orchestrator
-        .train(
-            graph,
-            split,
-            &safetensors_path,
-            &safetensors_dir,
-        )
+        .train(graph, split, &safetensors_path, &safetensors_dir)
         .await
         .context("training failed")?;
 
@@ -158,8 +154,8 @@ pub async fn run(
         let emb_bytes = tokio::fs::read(&embeddings_path)
             .await
             .context("failed to read embeddings file")?;
-        let embeddings = decode_f32_embeddings(&emb_bytes)
-            .context("failed to decode embedding bytes")?;
+        let embeddings =
+            decode_f32_embeddings(&emb_bytes).context("failed to decode embedding bytes")?;
 
         info!(
             db = %pool.database(),

@@ -309,11 +309,7 @@ impl Orchestrator {
             let val = if do_val {
                 let eval = self
                     .client
-                    .evaluate(
-                        split.val_idx.clone(),
-                        batch.val_neg.src,
-                        batch.val_neg.dst,
-                    )
+                    .evaluate(split.val_idx.clone(), batch.val_neg.src, batch.val_neg.dst)
                     .await?;
                 Some(eval)
             } else {
@@ -341,11 +337,7 @@ impl Orchestrator {
                         "epoch"
                     );
                 } else {
-                    info!(
-                        epoch,
-                        train_loss = format!("{:.4}", step.loss),
-                        "epoch"
-                    );
+                    info!(epoch, train_loss = format!("{:.4}", step.loss), "epoch");
                 }
             }
 
@@ -381,11 +373,9 @@ impl Orchestrator {
         // ── Phase 6: Test evaluation ─────────────────────────────────
         let graph_ref = Arc::clone(&graph);
         let test_count = split.test_idx.len();
-        let test_neg = tokio::task::spawn_blocking(move || {
-            negative_sample(&graph_ref, test_count)
-        })
-        .await
-        .expect("test negative sampling panicked");
+        let test_neg = tokio::task::spawn_blocking(move || negative_sample(&graph_ref, test_count))
+            .await
+            .expect("test negative sampling panicked");
 
         let test_eval = self
             .client
@@ -559,11 +549,8 @@ mod tests {
     #[test]
     fn test_orchestrator_error_variants() {
         // Verify error conversion compiles (From impls)
-        let io_err: OrchestratorError = std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "missing",
-        )
-        .into();
+        let io_err: OrchestratorError =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
         assert!(matches!(io_err, OrchestratorError::Io(_)));
 
         let pf_err: OrchestratorError = PrefetchError::InvalidDepth.into();

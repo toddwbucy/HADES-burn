@@ -35,10 +35,7 @@ pub enum RustAnalyzerError {
 
     /// JSON-RPC protocol error.
     #[error("JSON-RPC error {code}: {message}")]
-    JsonRpc {
-        code: i64,
-        message: String,
-    },
+    JsonRpc { code: i64, message: String },
 
     /// Request timed out.
     #[error("LSP request timed out: {0}")]

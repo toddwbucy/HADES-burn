@@ -198,10 +198,7 @@ fn resolve_call_target<'a>(
 ///
 /// Prefers same-file matches over cross-file. Falls back to the first entry
 /// when no same-file match exists.
-fn pick_best<'a>(
-    entries: &'a [(String, String)],
-    prefer_file: &str,
-) -> Option<(&'a str, &'a str)> {
+fn pick_best<'a>(entries: &'a [(String, String)], prefer_file: &str) -> Option<(&'a str, &'a str)> {
     if entries.is_empty() {
         return None;
     }
@@ -278,10 +275,7 @@ mod tests {
     #[test]
     fn test_qualified_index_top_level() {
         let mut files = HashMap::new();
-        files.insert(
-            "a.py".to_string(),
-            vec![func("hello", None, json!([]))],
-        );
+        files.insert("a.py".to_string(), vec![func("hello", None, json!([]))]);
         let idx = build_qualified_index(&files);
         assert!(idx.contains_key("hello"));
         assert_eq!(idx["hello"].len(), 1);
@@ -292,15 +286,18 @@ mod tests {
         let mut files = HashMap::new();
         files.insert(
             "a.py".to_string(),
-            vec![
-                klass("Config"),
-                func("load", Some("Config"), json!([])),
-            ],
+            vec![klass("Config"), func("load", Some("Config"), json!([]))],
         );
         let idx = build_qualified_index(&files);
         assert!(idx.contains_key("Config"), "class indexed by bare name");
-        assert!(idx.contains_key("Config.load"), "method indexed as Class.method");
-        assert!(!idx.contains_key("load"), "method should not appear under bare name in qualified index");
+        assert!(
+            idx.contains_key("Config.load"),
+            "method indexed as Class.method"
+        );
+        assert!(
+            !idx.contains_key("load"),
+            "method should not appear under bare name in qualified index"
+        );
     }
 
     #[test]
@@ -327,10 +324,7 @@ mod tests {
                 json!([{"name": "helper", "qualified_name": "mod.helper"}]),
             )],
         );
-        files.insert(
-            "mod.py".to_string(),
-            vec![func("helper", None, json!([]))],
-        );
+        files.insert("mod.py".to_string(), vec![func("helper", None, json!([]))]);
 
         let qual_idx = build_qualified_index(&files);
         let bare_idx = build_bare_index(&files);
@@ -383,10 +377,7 @@ mod tests {
                 json!([{"name": "process", "qualified_name": "process"}]),
             )],
         );
-        files.insert(
-            "b.py".to_string(),
-            vec![func("process", None, json!([]))],
-        );
+        files.insert("b.py".to_string(), vec![func("process", None, json!([]))]);
 
         let qual_idx = build_qualified_index(&files);
         let bare_idx = build_bare_index(&files);
@@ -431,16 +422,17 @@ mod tests {
                 ]),
             )],
         );
-        files.insert(
-            "b.py".to_string(),
-            vec![func("helper", None, json!([]))],
-        );
+        files.insert("b.py".to_string(), vec![func("helper", None, json!([]))]);
 
         let qual_idx = build_qualified_index(&files);
         let bare_idx = build_bare_index(&files);
 
         let edges = resolve_python_calls(&files, &qual_idx, &bare_idx);
-        assert_eq!(edges.len(), 1, "duplicate call sites should produce one edge");
+        assert_eq!(
+            edges.len(),
+            1,
+            "duplicate call sites should produce one edge"
+        );
     }
 
     #[test]
@@ -459,10 +451,7 @@ mod tests {
                 ),
             ],
         );
-        files.insert(
-            "b.py".to_string(),
-            vec![func("helper", None, json!([]))],
-        );
+        files.insert("b.py".to_string(), vec![func("helper", None, json!([]))]);
 
         let qual_idx = build_qualified_index(&files);
         let bare_idx = build_bare_index(&files);
@@ -489,6 +478,9 @@ mod tests {
         let bare_idx = build_bare_index(&files);
 
         let edges = resolve_python_calls(&files, &qual_idx, &bare_idx);
-        assert!(edges.is_empty(), "unresolved external calls must not emit edges");
+        assert!(
+            edges.is_empty(),
+            "unresolved external calls must not emit edges"
+        );
     }
 }

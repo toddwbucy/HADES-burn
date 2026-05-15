@@ -10,20 +10,18 @@
 //! integration can be added alongside these parsers without changing
 //! the public API.
 
-mod language;
-mod symbols;
-mod python;
-mod rust_ast;
 mod chunking;
-pub mod rust_analyzer;
-pub mod rust_imports;
+mod language;
+mod python;
 pub mod python_calls;
+pub mod rust_analyzer;
+mod rust_ast;
+pub mod rust_imports;
+mod symbols;
 
-pub use language::Language;
-pub use symbols::{
-    CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef,
-};
 pub use chunking::AstChunking;
+pub use language::Language;
+pub use symbols::{CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef};
 
 /// Analyze a source file, extracting symbols, metrics, and structure.
 ///
@@ -37,7 +35,10 @@ pub fn analyze(source: &str, file_path: &str) -> Result<FileAnalysis, CodeAnalys
 }
 
 /// Analyze source code with an explicitly specified language.
-pub fn analyze_with_language(source: &str, lang: Language) -> Result<FileAnalysis, CodeAnalysisError> {
+pub fn analyze_with_language(
+    source: &str,
+    lang: Language,
+) -> Result<FileAnalysis, CodeAnalysisError> {
     match lang {
         Language::Python => python::analyze(source),
         Language::Rust => rust_ast::analyze(source),

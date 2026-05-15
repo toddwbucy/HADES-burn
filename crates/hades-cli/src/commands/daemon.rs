@@ -39,16 +39,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Run the HADES daemon, listening on a Unix domain socket.
 pub async fn run(config: &HadesConfig, socket_path: Option<&str>) -> Result<()> {
     let socket = socket_path.unwrap_or(DEFAULT_SOCKET);
-    let pool = Arc::new(
-        ArangoPool::from_config(config).context("failed to connect to ArangoDB")?,
-    );
+    let pool = Arc::new(ArangoPool::from_config(config).context("failed to connect to ArangoDB")?);
     let config = Arc::new(config.clone());
 
     // Clean up stale socket — but only after verifying it's actually a socket
     // and that no live daemon is listening on it.
     if Path::new(socket).exists() {
-        let meta = std::fs::metadata(socket)
-            .with_context(|| format!("failed to stat {socket}"))?;
+        let meta = std::fs::metadata(socket).with_context(|| format!("failed to stat {socket}"))?;
         if !meta.file_type().is_socket() {
             anyhow::bail!("{socket} exists but is not a Unix socket — refusing to overwrite");
         }
@@ -114,7 +111,7 @@ async fn handle_connection(
         match timeout(IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await {
             Ok(Ok(_)) => {}
             Ok(Err(_)) => return Ok(()), // EOF or broken pipe → clean close
-            Err(_) => return Ok(()),      // idle timeout → close
+            Err(_) => return Ok(()),     // idle timeout → close
         }
 
         let len = u32::from_be_bytes(len_buf);
@@ -165,8 +162,7 @@ async fn handle_connection(
         let cmd_value = serde_json::to_value(&cmd).ok();
 
         // Dispatch with per-request timeout — request_id always available.
-        let response = match timeout(REQUEST_TIMEOUT, dispatch::dispatch(pool, config, cmd)).await
-        {
+        let response = match timeout(REQUEST_TIMEOUT, dispatch::dispatch(pool, config, cmd)).await {
             Ok(Ok(data)) => DaemonResponse::ok(data).with_request_id(request_id),
             Ok(Err(DispatchError::NotImplemented(name))) => {
                 let mut resp = DaemonResponse::err(
@@ -180,8 +176,9 @@ async fn handle_connection(
                 DaemonResponse::err(handler_error_code(&e), e.to_string())
                     .with_request_id(request_id)
             }
-            Err(_) => DaemonResponse::err("INTERNAL", "request timed out")
-                .with_request_id(request_id),
+            Err(_) => {
+                DaemonResponse::err("INTERNAL", "request timed out").with_request_id(request_id)
+            }
         };
 
         write_frame(&mut stream, &response).await?;
@@ -235,13 +232,11 @@ fn parse_request(
         Some("admin") => SessionKind::Admin,
         None => SessionKind::Admin,
         Some(other) => {
-            return Err(
-                DaemonResponse::err(
-                    "INVALID_SESSION",
-                    format!("unknown session type '{other}'; expected \"agent\" or \"admin\""),
-                )
-                .with_request_id(request_id),
-            );
+            return Err(DaemonResponse::err(
+                "INVALID_SESSION",
+                format!("unknown session type '{other}'; expected \"agent\" or \"admin\""),
+            )
+            .with_request_id(request_id));
         }
     };
 
@@ -322,7 +317,10 @@ mod tests {
             "INVALID_PARAMS",
         );
         assert_eq!(
-            handler_error_code(&HandlerError::InvalidLimit { limit: 0, max: 1000 }),
+            handler_error_code(&HandlerError::InvalidLimit {
+                limit: 0,
+                max: 1000
+            }),
             "INVALID_PARAMS",
         );
         assert_eq!(
@@ -445,10 +443,7 @@ mod tests {
             resp
         };
 
-        let (resp, _) = tokio::join!(
-            client_task,
-            handle_connection(server, &pool, &config),
-        );
+        let (resp, _) = tokio::join!(client_task, handle_connection(server, &pool, &config),);
 
         assert!(!resp.success);
         assert_eq!(resp.error_code.as_deref(), Some("ACCESS_DENIED"));
@@ -478,5 +473,4 @@ mod tests {
         assert!(got.success);
         assert_eq!(got.data.unwrap()["test"], true);
     }
-
 }

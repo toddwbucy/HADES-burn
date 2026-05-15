@@ -233,12 +233,7 @@ impl TrainingClient {
         let mut req = tonic::Request::new(request);
         req.set_timeout(self.config.slow_timeout);
 
-        let response = self
-            .inner
-            .clone()
-            .init_model(req)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().init_model(req).await?.into_inner();
 
         info!(
             num_parameters = response.num_parameters,
@@ -265,12 +260,7 @@ impl TrainingClient {
         let mut req = tonic::Request::new(request);
         req.set_timeout(self.config.slow_timeout);
 
-        let response = self
-            .inner
-            .clone()
-            .load_graph(req)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().load_graph(req).await?.into_inner();
 
         info!(
             num_nodes = response.num_nodes,
@@ -303,12 +293,7 @@ impl TrainingClient {
             neg_dst,
         };
 
-        let response = self
-            .inner
-            .clone()
-            .train_step(request)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().train_step(request).await?.into_inner();
 
         Ok(StepResult {
             loss: response.loss,
@@ -331,12 +316,7 @@ impl TrainingClient {
             neg_dst,
         };
 
-        let response = self
-            .inner
-            .clone()
-            .evaluate(request)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().evaluate(request).await?.into_inner();
 
         debug!(
             loss = response.loss,
@@ -370,12 +350,7 @@ impl TrainingClient {
         let mut req = tonic::Request::new(request);
         req.set_timeout(self.config.slow_timeout);
 
-        let response = self
-            .inner
-            .clone()
-            .get_embeddings(req)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().get_embeddings(req).await?.into_inner();
 
         info!(
             num_nodes = response.num_nodes,
@@ -406,12 +381,7 @@ impl TrainingClient {
         let mut req = tonic::Request::new(request);
         req.set_timeout(self.config.slow_timeout);
 
-        let response = self
-            .inner
-            .clone()
-            .checkpoint(req)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().checkpoint(req).await?.into_inner();
 
         info!(
             path = %response.path,
@@ -440,12 +410,7 @@ impl TrainingClient {
         let mut req = tonic::Request::new(request);
         req.set_timeout(self.config.slow_timeout);
 
-        let response = self
-            .inner
-            .clone()
-            .load_checkpoint(req)
-            .await?
-            .into_inner();
+        let response = self.inner.clone().load_checkpoint(req).await?.into_inner();
 
         info!(
             num_parameters = response.num_parameters,

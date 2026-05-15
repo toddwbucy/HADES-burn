@@ -8,12 +8,9 @@ pub mod orchestrator;
 pub mod prefetcher;
 pub mod tensor;
 
-pub use orchestrator::{
-    EpochMetrics, Orchestrator, OrchestratorError, TrainConfig, TrainResult,
-};
+pub use orchestrator::{EpochMetrics, Orchestrator, OrchestratorError, TrainConfig, TrainResult};
 pub use prefetcher::{
-    EpochBatch, PrefetchConfig, PrefetchError, Prefetcher, TrainingData,
-    prepare_training_data,
+    EpochBatch, PrefetchConfig, PrefetchError, Prefetcher, TrainingData, prepare_training_data,
 };
 pub use tensor::{
     EdgeSplit, MappedGraph, NegativeSamples, SplitConfig, TensorError, negative_sample,

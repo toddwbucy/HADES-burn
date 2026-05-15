@@ -36,8 +36,8 @@ use hades_core::graph::loader::GraphLoaderError;
 use hades_core::graph::types::{GraphData, IDMap};
 
 use crate::tensor::{
-    EdgeSplit, NegativeSamples, SplitConfig, TensorError, negative_sample,
-    prepare_and_serialize, split_edges,
+    EdgeSplit, NegativeSamples, SplitConfig, TensorError, negative_sample, prepare_and_serialize,
+    split_edges,
 };
 
 // ---------------------------------------------------------------------------
@@ -189,13 +189,10 @@ impl Prefetcher {
     ) -> Result<Self, PrefetchError> {
         config.validate()?;
 
-        let num_train_neg =
-            (split.train_idx.len() as f64 * config.neg_sampling_ratio) as usize;
-        let num_val_neg =
-            (split.val_idx.len() as f64 * config.neg_sampling_ratio) as usize;
+        let num_train_neg = (split.train_idx.len() as f64 * config.neg_sampling_ratio) as usize;
+        let num_val_neg = (split.val_idx.len() as f64 * config.neg_sampling_ratio) as usize;
 
-        let buffer_bytes =
-            config.estimate_buffer_bytes(split.train_idx.len(), split.val_idx.len());
+        let buffer_bytes = config.estimate_buffer_bytes(split.train_idx.len(), split.val_idx.len());
 
         info!(
             prefetch_depth = config.prefetch_depth,
@@ -485,13 +482,7 @@ mod tests {
         let split = Arc::new(split_edges(graph.num_edges, &SplitConfig::default()).unwrap());
         let config = PrefetchConfig::default();
 
-        let mut pf = Prefetcher::start(
-            graph.clone(),
-            split.clone(),
-            config,
-            Some(5),
-        )
-        .unwrap();
+        let mut pf = Prefetcher::start(graph.clone(), split.clone(), config, Some(5)).unwrap();
 
         let mut received = Vec::new();
         while let Some(batch) = pf.next_batch().await {
@@ -520,13 +511,7 @@ mod tests {
         let split = Arc::new(split_edges(graph.num_edges, &SplitConfig::default()).unwrap());
         let config = PrefetchConfig::default();
 
-        let mut pf = Prefetcher::start(
-            graph.clone(),
-            split.clone(),
-            config,
-            Some(3),
-        )
-        .unwrap();
+        let mut pf = Prefetcher::start(graph.clone(), split.clone(), config, Some(3)).unwrap();
 
         let b0 = pf.next_batch().await.unwrap();
         let b1 = pf.next_batch().await.unwrap();
@@ -603,13 +588,7 @@ mod tests {
 
         let expected_train_neg = (split.train_idx.len() as f64 * 2.0) as usize;
 
-        let mut pf = Prefetcher::start(
-            graph.clone(),
-            split.clone(),
-            config,
-            Some(1),
-        )
-        .unwrap();
+        let mut pf = Prefetcher::start(graph.clone(), split.clone(), config, Some(1)).unwrap();
 
         let batch = pf.next_batch().await.unwrap();
         assert_eq!(batch.train_neg.src.len(), expected_train_neg);

@@ -94,7 +94,13 @@ pub async fn run_create(
 
 /// `hades task update KEY [options]`
 pub async fn run_update(config: &HadesConfig, params: TaskUpdateParams) -> Result<()> {
-    dispatch_and_print(config, DaemonCommand::TaskUpdate(params), "task.update", "json").await
+    dispatch_and_print(
+        config,
+        DaemonCommand::TaskUpdate(params),
+        "task.update",
+        "json",
+    )
+    .await
 }
 
 /// `hades task close KEY [--message M]`

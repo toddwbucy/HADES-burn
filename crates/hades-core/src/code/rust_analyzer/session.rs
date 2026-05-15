@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use super::client::LspClient;
 use super::RustAnalyzerError;
+use super::client::LspClient;
 
 /// Default timeout for rust-analyzer indexing (seconds).
 const DEFAULT_INDEX_TIMEOUT_SECS: u64 = 120;
@@ -72,7 +72,9 @@ impl RustAnalyzerSession {
         };
 
         session.initialize().await?;
-        session.wait_for_ready(Duration::from_secs(index_timeout_secs)).await;
+        session
+            .wait_for_ready(Duration::from_secs(index_timeout_secs))
+            .await;
 
         Ok(session)
     }
@@ -100,17 +102,19 @@ impl RustAnalyzerSession {
 
         let content = tokio::fs::read_to_string(&abs_path).await?;
 
-        self.client.notify(
-            "textDocument/didOpen",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": "rust",
-                    "version": 1,
-                    "text": content,
-                }
-            }),
-        ).await?;
+        self.client
+            .notify(
+                "textDocument/didOpen",
+                serde_json::json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "rust",
+                        "version": 1,
+                        "text": content,
+                    }
+                }),
+            )
+            .await?;
 
         debug!("opened file: {}", abs_path.display());
         Ok(uri)
@@ -118,12 +122,14 @@ impl RustAnalyzerSession {
 
     /// Close a previously opened file.
     pub async fn close_file(&self, uri: &str) -> Result<(), RustAnalyzerError> {
-        self.client.notify(
-            "textDocument/didClose",
-            serde_json::json!({
-                "textDocument": { "uri": uri }
-            }),
-        ).await
+        self.client
+            .notify(
+                "textDocument/didClose",
+                serde_json::json!({
+                    "textDocument": { "uri": uri }
+                }),
+            )
+            .await
     }
 
     /// Get hierarchical document symbols for a Rust file.
@@ -133,13 +139,16 @@ impl RustAnalyzerSession {
     ) -> Result<Vec<Value>, RustAnalyzerError> {
         let uri = self.open_file(file_path).await?;
 
-        let result = self.client.request(
-            "textDocument/documentSymbol",
-            serde_json::json!({
-                "textDocument": { "uri": uri }
-            }),
-            self.request_timeout,
-        ).await?;
+        let result = self
+            .client
+            .request(
+                "textDocument/documentSymbol",
+                serde_json::json!({
+                    "textDocument": { "uri": uri }
+                }),
+                self.request_timeout,
+            )
+            .await?;
 
         match result {
             Value::Array(arr) => Ok(arr),
@@ -159,14 +168,17 @@ impl RustAnalyzerSession {
         character: u32,
     ) -> Result<Option<Value>, RustAnalyzerError> {
         for attempt in 0..3 {
-            let result = self.client.request(
-                "textDocument/hover",
-                serde_json::json!({
-                    "textDocument": { "uri": uri },
-                    "position": { "line": line, "character": character },
-                }),
-                Duration::from_secs(10),
-            ).await?;
+            let result = self
+                .client
+                .request(
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": line, "character": character },
+                    }),
+                    Duration::from_secs(10),
+                )
+                .await?;
 
             if !result.is_null() {
                 return Ok(Some(result));
@@ -189,14 +201,17 @@ impl RustAnalyzerSession {
         character: u32,
     ) -> Result<Vec<Value>, RustAnalyzerError> {
         // Step 1: Prepare call hierarchy item.
-        let items = self.client.request(
-            "textDocument/prepareCallHierarchy",
-            serde_json::json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }),
-            self.request_timeout,
-        ).await?;
+        let items = self
+            .client
+            .request(
+                "textDocument/prepareCallHierarchy",
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }),
+                self.request_timeout,
+            )
+            .await?;
 
         let items = match items {
             Value::Array(arr) if !arr.is_empty() => arr,
@@ -204,11 +219,14 @@ impl RustAnalyzerSession {
         };
 
         // Step 2: Get outgoing calls for the first item.
-        let outgoing = self.client.request(
-            "callHierarchy/outgoingCalls",
-            serde_json::json!({ "item": items[0] }),
-            self.request_timeout,
-        ).await?;
+        let outgoing = self
+            .client
+            .request(
+                "callHierarchy/outgoingCalls",
+                serde_json::json!({ "item": items[0] }),
+                self.request_timeout,
+            )
+            .await?;
 
         match outgoing {
             Value::Array(arr) => Ok(arr),
@@ -223,25 +241,31 @@ impl RustAnalyzerSession {
         line: u32,
         character: u32,
     ) -> Result<Vec<Value>, RustAnalyzerError> {
-        let items = self.client.request(
-            "textDocument/prepareCallHierarchy",
-            serde_json::json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": character },
-            }),
-            self.request_timeout,
-        ).await?;
+        let items = self
+            .client
+            .request(
+                "textDocument/prepareCallHierarchy",
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }),
+                self.request_timeout,
+            )
+            .await?;
 
         let items = match items {
             Value::Array(arr) if !arr.is_empty() => arr,
             _ => return Ok(Vec::new()),
         };
 
-        let incoming = self.client.request(
-            "callHierarchy/incomingCalls",
-            serde_json::json!({ "item": items[0] }),
-            self.request_timeout,
-        ).await?;
+        let incoming = self
+            .client
+            .request(
+                "callHierarchy/incomingCalls",
+                serde_json::json!({ "item": items[0] }),
+                self.request_timeout,
+            )
+            .await?;
 
         match incoming {
             Value::Array(arr) => Ok(arr),
@@ -260,48 +284,51 @@ impl RustAnalyzerSession {
     async fn initialize(&mut self) -> Result<(), RustAnalyzerError> {
         let root_uri = format!("file://{}", self.crate_root.display());
 
-        let result = self.client.request(
-            "initialize",
-            serde_json::json!({
-                "processId": null,
-                "rootUri": root_uri,
-                "rootPath": self.crate_root.to_str().unwrap_or(""),
-                "workspaceFolders": [{
-                    "uri": root_uri,
-                    "name": self.crate_root.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("workspace"),
-                }],
-                "capabilities": {
-                    "textDocument": {
-                        "documentSymbol": {
-                            "hierarchicalDocumentSymbolSupport": true,
-                            "symbolKind": {
-                                "valueSet": (1..=26).collect::<Vec<i32>>(),
+        let result = self
+            .client
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "processId": null,
+                    "rootUri": root_uri,
+                    "rootPath": self.crate_root.to_str().unwrap_or(""),
+                    "workspaceFolders": [{
+                        "uri": root_uri,
+                        "name": self.crate_root.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("workspace"),
+                    }],
+                    "capabilities": {
+                        "textDocument": {
+                            "documentSymbol": {
+                                "hierarchicalDocumentSymbolSupport": true,
+                                "symbolKind": {
+                                    "valueSet": (1..=26).collect::<Vec<i32>>(),
+                                },
+                            },
+                            "hover": {
+                                "contentFormat": ["markdown", "plaintext"],
+                            },
+                            "callHierarchy": {
+                                "dynamicRegistration": false,
+                            },
+                            "references": {},
+                            "definition": {},
+                            "publishDiagnostics": {
+                                "relatedInformation": true,
                             },
                         },
-                        "hover": {
-                            "contentFormat": ["markdown", "plaintext"],
-                        },
-                        "callHierarchy": {
-                            "dynamicRegistration": false,
-                        },
-                        "references": {},
-                        "definition": {},
-                        "publishDiagnostics": {
-                            "relatedInformation": true,
+                        "window": {
+                            "workDoneProgress": true,
                         },
                     },
-                    "window": {
+                    "initializationOptions": {
                         "workDoneProgress": true,
                     },
-                },
-                "initializationOptions": {
-                    "workDoneProgress": true,
-                },
-            }),
-            Duration::from_secs(60),
-        ).await?;
+                }),
+                Duration::from_secs(60),
+            )
+            .await?;
 
         debug!(
             "rust-analyzer initialized for {}",
@@ -314,9 +341,14 @@ impl RustAnalyzerSession {
         }
 
         // Send initialized notification.
-        self.client.notify("initialized", serde_json::json!({})).await?;
+        self.client
+            .notify("initialized", serde_json::json!({}))
+            .await?;
 
-        info!("rust-analyzer handshake complete for {}", self.crate_root.display());
+        info!(
+            "rust-analyzer handshake complete for {}",
+            self.crate_root.display()
+        );
         Ok(())
     }
 
@@ -330,9 +362,7 @@ impl RustAnalyzerSession {
 
         while start.elapsed() < timeout {
             // Drain progress notifications.
-            let notifications = self.client
-                .drain_notifications(Some("$/progress"))
-                .await;
+            let notifications = self.client.drain_notifications(Some("$/progress")).await;
 
             for notif in &notifications {
                 if let Some(value) = notif.pointer("/params/value") {
@@ -351,11 +381,15 @@ impl RustAnalyzerSession {
             }
 
             // Readiness probe: can the server respond to workspace/symbol?
-            match self.client.request(
-                "workspace/symbol",
-                serde_json::json!({ "query": "__hades_readiness_probe__" }),
-                Duration::from_secs(3),
-            ).await {
+            match self
+                .client
+                .request(
+                    "workspace/symbol",
+                    serde_json::json!({ "query": "__hades_readiness_probe__" }),
+                    Duration::from_secs(3),
+                )
+                .await
+            {
                 Ok(_) => {
                     self.ready = true;
                     let elapsed = start.elapsed();
@@ -370,9 +404,7 @@ impl RustAnalyzerSession {
             tokio::time::sleep(poll_interval).await;
         }
 
-        warn!(
-            "rust-analyzer did not confirm readiness within {timeout:?}"
-        );
+        warn!("rust-analyzer did not confirm readiness within {timeout:?}");
     }
 }
 
@@ -433,12 +465,18 @@ pub fn find_crate_root(file_path: &Path) -> Option<PathBuf> {
 ///
 /// Returns a map of `crate_root → Vec<file_path>`. Files without a
 /// Cargo.toml ancestor are silently dropped.
-pub fn group_files_by_crate(rs_files: &[PathBuf]) -> std::collections::HashMap<PathBuf, Vec<PathBuf>> {
-    let mut groups: std::collections::HashMap<PathBuf, Vec<PathBuf>> = std::collections::HashMap::new();
+pub fn group_files_by_crate(
+    rs_files: &[PathBuf],
+) -> std::collections::HashMap<PathBuf, Vec<PathBuf>> {
+    let mut groups: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+        std::collections::HashMap::new();
 
     for file_path in rs_files {
         if let Some(crate_root) = find_crate_root(file_path) {
-            groups.entry(crate_root).or_default().push(file_path.clone());
+            groups
+                .entry(crate_root)
+                .or_default()
+                .push(file_path.clone());
         } else {
             tracing::warn!("no Cargo.toml found for {}, skipping", file_path.display());
         }

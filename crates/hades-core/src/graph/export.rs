@@ -169,10 +169,7 @@ pub async fn export_embeddings(
                 .iter()
                 .map(|&(arango_id, idx)| {
                     // Extract document _key from "collection/key"
-                    let key = arango_id
-                        .split('/')
-                        .nth(1)
-                        .unwrap_or(arango_id);
+                    let key = arango_id.split('/').nth(1).unwrap_or(arango_id);
 
                     let start = idx * embed_dim;
                     let emb = &embeddings[start..start + embed_dim];

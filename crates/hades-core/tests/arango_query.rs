@@ -16,27 +16,26 @@ fn arango_socket() -> PathBuf {
 }
 
 fn arango_password() -> String {
-    std::env::var("ARANGO_PASSWORD").expect(
-        "ARANGO_PASSWORD must be set for integration tests.",
-    )
+    std::env::var("ARANGO_PASSWORD").expect("ARANGO_PASSWORD must be set for integration tests.")
 }
 
 fn test_pool() -> Option<ArangoPool> {
     let socket = arango_socket();
     if !socket.exists() {
         if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
-            panic!("ARANGO_TESTS is set but socket not found at {}", socket.display());
+            panic!(
+                "ARANGO_TESTS is set but socket not found at {}",
+                socket.display()
+            );
         }
-        warn!("skipping: ArangoDB socket not found at {}", socket.display());
+        warn!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return None;
     }
 
-    let client = ArangoClient::with_socket(
-        socket,
-        "bident_burn",
-        "root",
-        &arango_password(),
-    );
+    let client = ArangoClient::with_socket(socket, "bident_burn", "root", &arango_password());
     Some(ArangoPool::new(client.clone(), client))
 }
 
@@ -44,9 +43,16 @@ fn test_pool() -> Option<ArangoPool> {
 async fn test_simple_query() {
     let Some(pool) = test_pool() else { return };
 
-    let result = query::query(&pool, "RETURN 1 + 1", None, None, false, ExecutionTarget::Reader)
-        .await
-        .unwrap();
+    let result = query::query(
+        &pool,
+        "RETURN 1 + 1",
+        None,
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await
+    .unwrap();
     assert_eq!(result.results.len(), 1);
     assert_eq!(result.results[0], 2);
 }
@@ -56,9 +62,16 @@ async fn test_query_with_bind_vars() {
     let Some(pool) = test_pool() else { return };
 
     let vars = serde_json::json!({"value": 42});
-    let result = query::query(&pool, "RETURN @value", Some(&vars), None, false, ExecutionTarget::Reader)
-        .await
-        .unwrap();
+    let result = query::query(
+        &pool,
+        "RETURN @value",
+        Some(&vars),
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await
+    .unwrap();
     assert_eq!(result.results.len(), 1);
     assert_eq!(result.results[0], 42);
 }
@@ -95,7 +108,10 @@ async fn test_query_full_count() {
     )
     .await
     .unwrap();
-    assert!(result.full_count.is_some(), "expected full_count with fullCount=true");
+    assert!(
+        result.full_count.is_some(),
+        "expected full_count with fullCount=true"
+    );
     // full_count should be >= the number of results
     assert!(result.full_count.unwrap() >= result.results.len() as u64);
 }
@@ -115,7 +131,11 @@ async fn test_query_pagination() {
     )
     .await
     .unwrap();
-    assert_eq!(result.results.len(), 5, "expected 5 results after pagination");
+    assert_eq!(
+        result.results.len(),
+        5,
+        "expected 5 results after pagination"
+    );
 }
 
 #[tokio::test]
@@ -132,14 +152,9 @@ async fn test_query_single() {
 async fn test_query_single_empty() {
     let Some(pool) = test_pool() else { return };
 
-    let result = query::query_single(
-        &pool,
-        "FOR x IN [] RETURN x",
-        None,
-        ExecutionTarget::Reader,
-    )
-    .await
-    .unwrap();
+    let result = query::query_single(&pool, "FOR x IN [] RETURN x", None, ExecutionTarget::Reader)
+        .await
+        .unwrap();
     assert_eq!(result, None);
 }
 

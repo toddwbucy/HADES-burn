@@ -15,13 +15,13 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::info;
 
 use hades_core::config::HadesConfig;
+use hades_core::db::ArangoPool;
 use hades_core::db::collections::CollectionProfile;
 use hades_core::db::query::{self, ExecutionTarget};
-use hades_core::db::ArangoPool;
 use hades_core::persephone::embedding::EmbeddingClient;
 
 use super::output::{self, OutputFormat};
@@ -110,7 +110,10 @@ pub async fn run_query(
     .await
     .context("failed to fetch embeddings for vector search")?;
 
-    info!(embedding_count = emb_result.results.len(), "fetched embeddings");
+    info!(
+        embedding_count = emb_result.results.len(),
+        "fetched embeddings"
+    );
 
     // Phase 2: Compute cosine similarity in Rust, take top-K.
     let mut scored: Vec<(f64, &Value)> = emb_result
@@ -118,7 +121,10 @@ pub async fn run_query(
         .iter()
         .filter_map(|doc| {
             let emb = doc["embedding"].as_array()?;
-            let stored: Vec<f32> = emb.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+            let stored: Vec<f32> = emb
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
             if stored.len() != query_vec.len() {
                 return None;
             }
@@ -249,23 +255,19 @@ async fn structural_rerank(
                RETURN { _key: key, structural_embedding: doc.structural_embedding }";
     let bind = json!({ "keys": parent_keys, "col": metadata_col });
 
-    let emb_result = query::query(
-        pool,
-        aql,
-        Some(&bind),
-        None,
-        false,
-        ExecutionTarget::Reader,
-    )
-    .await
-    .context("failed to fetch structural embeddings")?;
+    let emb_result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+        .await
+        .context("failed to fetch structural embeddings")?;
 
     // Build a map of key → structural embedding.
     let mut emb_map: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
     for doc in &emb_result.results {
         let key = doc["_key"].as_str().unwrap_or("");
         if let Some(arr) = doc["structural_embedding"].as_array() {
-            let vec: Vec<f32> = arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+            let vec: Vec<f32> = arr
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
             if !vec.is_empty() {
                 emb_map.insert(key.to_string(), vec);
             }
@@ -306,9 +308,7 @@ async fn structural_rerank(
         .map(|r| {
             let mut r = r.clone();
             let current_score = r["score"].as_f64().unwrap_or(0.0);
-            let key = r.get("parent_key")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let key = r.get("parent_key").and_then(|v| v.as_str()).unwrap_or("");
 
             let structural_sim = emb_map
                 .get(key)
@@ -485,9 +485,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_preserves_scores() {
-        let results = vec![
-            json!({ "text": "attention mechanism paper", "score": 0.9 }),
-        ];
+        let results = vec![json!({ "text": "attention mechanism paper", "score": 0.9 })];
         let reranked = hybrid_rerank("attention mechanism", results);
         // Should have vector_score and keyword_score fields
         assert!(reranked[0].get("vector_score").is_some());

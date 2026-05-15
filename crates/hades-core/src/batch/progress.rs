@@ -3,8 +3,8 @@
 //! Emits structured JSON progress events to stderr at configurable
 //! intervals to prevent log spam during large batches.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -162,7 +162,10 @@ mod tests {
         reporter.report("item_2", ProgressStatus::Processing, false);
         let after_second = *reporter.last_report.lock().unwrap();
         // Throttled report must not update last_report.
-        assert_eq!(after_first, after_second, "throttled report should not update last_report");
+        assert_eq!(
+            after_first, after_second,
+            "throttled report should not update last_report"
+        );
     }
 
     #[test]
@@ -185,7 +188,11 @@ mod tests {
         assert_eq!(eta, 80_000); // 80 seconds in milliseconds
 
         // All done: no ETA.
-        assert!(reporter.estimate_eta(10, Duration::from_secs(100)).is_none());
+        assert!(
+            reporter
+                .estimate_eta(10, Duration::from_secs(100))
+                .is_none()
+        );
     }
 
     #[test]

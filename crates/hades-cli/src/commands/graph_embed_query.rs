@@ -19,8 +19,7 @@ use super::output::{self, OutputFormat};
 
 /// Run the `graph-embed embed <node_id>` command.
 pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
-    let pool = ArangoPool::from_config(config)
-        .context("failed to connect to ArangoDB")?;
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     let data = dispatch::dispatch(
         &pool,
@@ -42,8 +41,7 @@ pub async fn run_embed(config: &HadesConfig, node_id: &str) -> Result<()> {
 
 /// Run the `graph-embed neighbors <node_id> --limit N` command.
 pub async fn run_neighbors(config: &HadesConfig, node_id: &str, limit: u32) -> Result<()> {
-    let pool = ArangoPool::from_config(config)
-        .context("failed to connect to ArangoDB")?;
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     let data = dispatch::dispatch(
         &pool,

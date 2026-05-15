@@ -8,7 +8,11 @@ pub mod loader;
 pub mod runtime_schema;
 pub mod types;
 
-pub use export::{ExportConfig, ExportError, ExportResult, decode_f32_embeddings, export_embeddings};
+pub use export::{
+    ExportConfig, ExportError, ExportResult, decode_f32_embeddings, export_embeddings,
+};
 pub use loader::{GraphLoaderError, load};
-pub use runtime_schema::{RuntimeEdgeDef, RuntimeNamedGraph, RuntimeSchema, SchemaMeta, SchemaError};
+pub use runtime_schema::{
+    RuntimeEdgeDef, RuntimeNamedGraph, RuntimeSchema, SchemaError, SchemaMeta,
+};
 pub use types::{GraphData, GraphDataError, IDMap};

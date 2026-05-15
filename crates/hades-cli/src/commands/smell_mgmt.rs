@@ -11,7 +11,10 @@ use anyhow::{Context, Result};
 
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
-use hades_core::dispatch::{self, DaemonCommand, SmellCheckParams, SmellVerifyParams, SmellReportParams, LinkCodeSmellParams};
+use hades_core::dispatch::{
+    self, DaemonCommand, LinkCodeSmellParams, SmellCheckParams, SmellReportParams,
+    SmellVerifyParams,
+};
 
 use super::output::{self, OutputFormat};
 
@@ -46,7 +49,10 @@ pub async fn run_smell_check(
         let smells = result["smells_loaded"].as_u64().unwrap_or(0);
 
         if passed {
-            writeln!(err, "PASSED — {files} files checked, {smells} smells loaded, 0 violations")?;
+            writeln!(
+                err,
+                "PASSED — {files} files checked, {smells} smells loaded, 0 violations"
+            )?;
         } else {
             writeln!(err, "FAILED — {files} files checked, {count} violations")?;
         }
@@ -75,11 +81,7 @@ pub async fn run_smell_check(
 // ── smell verify ────────────────────────────────────────────────────
 
 /// `hades smell verify PATH [--claims CS-NN ...]`
-pub async fn run_smell_verify(
-    config: &HadesConfig,
-    path: &Path,
-    claims: &[String],
-) -> Result<()> {
+pub async fn run_smell_verify(config: &HadesConfig, path: &Path, claims: &[String]) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let cmd = DaemonCommand::SmellVerify(SmellVerifyParams {
         path: path.display().to_string(),
@@ -135,13 +137,23 @@ pub async fn run_smell_report(
 
         let verify = &result["ref_verification"];
         let refs = verify["refs_found"].as_u64().unwrap_or(0);
-        let verified = result.get("ref_verification")
+        let verified = result
+            .get("ref_verification")
             .and_then(|v| v["verified_refs"].as_array())
             .map(|a| a.len())
             .unwrap_or(0);
-        let missing = verify["missing_from_graph"].as_array().map(|a| a.len()).unwrap_or(0);
-        let unlinked = verify["unlinked_claims"].as_array().map(|a| a.len()).unwrap_or(0);
-        writeln!(err, "Refs: {refs} found, {verified} verified, {missing} missing, {unlinked} unlinked")?;
+        let missing = verify["missing_from_graph"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let unlinked = verify["unlinked_claims"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        writeln!(
+            err,
+            "Refs: {refs} found, {verified} verified, {missing} missing, {unlinked} unlinked"
+        )?;
 
         if let Some(probes) = result["embedding_probe"].as_array()
             && !probes.is_empty()
@@ -191,6 +203,10 @@ pub async fn run_link(
         results.push(result);
     }
 
-    output::print_output("link", serde_json::Value::Array(results), &OutputFormat::Json);
+    output::print_output(
+        "link",
+        serde_json::Value::Array(results),
+        &OutputFormat::Json,
+    );
     Ok(())
 }

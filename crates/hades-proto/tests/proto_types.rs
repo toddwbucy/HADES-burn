@@ -2,9 +2,7 @@
 
 use hades_proto::common::{ChunkMetadata, ChunkingStrategy};
 use hades_proto::embedding::{EmbedRequest, EmbedResponse, Embedding, ProviderInfo};
-use hades_proto::extraction::{
-    ExtractRequest, ExtractResponse, ExtractorInfo, SourceType, Table,
-};
+use hades_proto::extraction::{ExtractRequest, ExtractResponse, ExtractorInfo, SourceType, Table};
 use hades_proto::training::{
     CheckpointRequest, EvaluateRequest, GetEmbeddingsRequest, InitModelRequest,
     LoadCheckpointRequest, LoadGraphRequest, ModelConfig, OptimizerConfig, TrainStepRequest,

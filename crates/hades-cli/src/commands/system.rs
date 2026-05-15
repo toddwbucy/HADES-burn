@@ -38,7 +38,11 @@ pub async fn run_status(config: &HadesConfig, verbose: bool, format: &str) -> Re
 }
 
 /// `hades orient [--collection C] [--format F]`
-pub async fn run_orient(config: &HadesConfig, collection: Option<&str>, format: &str) -> Result<()> {
+pub async fn run_orient(
+    config: &HadesConfig,
+    collection: Option<&str>,
+    format: &str,
+) -> Result<()> {
     dispatch_and_print(
         config,
         DaemonCommand::Orient(OrientParams {

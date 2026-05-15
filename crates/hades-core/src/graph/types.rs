@@ -169,14 +169,18 @@ pub enum GraphDataError {
         num_relations: usize,
     },
 
-    #[error("node {node_idx}: collection index {col_idx} >= collection_names length {num_collections}")]
+    #[error(
+        "node {node_idx}: collection index {col_idx} >= collection_names length {num_collections}"
+    )]
     NodeCollectionOutOfBounds {
         node_idx: usize,
         col_idx: u32,
         num_collections: usize,
     },
 
-    #[error("node {node_idx}: collection index unset (sentinel u32::MAX) — call set before validate")]
+    #[error(
+        "node {node_idx}: collection index unset (sentinel u32::MAX) — call set before validate"
+    )]
     NodeCollectionUnset { node_idx: usize },
 }
 
@@ -257,7 +261,12 @@ impl GraphData {
     /// `node_collections` is initialized to `u32::MAX` (sentinel) so that
     /// unset entries are caught by [`validate()`] once `collection_names` is populated.
     pub fn with_capacity(num_nodes: usize, num_edges: usize) -> Self {
-        Self::with_schema_capacity(num_nodes, num_edges, DEFAULT_NUM_RELATIONS, DEFAULT_FEATURE_DIM)
+        Self::with_schema_capacity(
+            num_nodes,
+            num_edges,
+            DEFAULT_NUM_RELATIONS,
+            DEFAULT_FEATURE_DIM,
+        )
     }
 
     /// Allocate a graph with explicit relation count and feature dimension.
@@ -623,7 +632,14 @@ mod tests {
         g.node_collections[1] = 5;
         let err = g.validate().unwrap_err();
         assert!(
-            matches!(err, GraphDataError::NodeCollectionOutOfBounds { node_idx: 1, col_idx: 5, .. }),
+            matches!(
+                err,
+                GraphDataError::NodeCollectionOutOfBounds {
+                    node_idx: 1,
+                    col_idx: 5,
+                    ..
+                }
+            ),
             "expected NodeCollectionOutOfBounds, got: {err}"
         );
     }

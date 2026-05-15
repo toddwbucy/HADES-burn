@@ -34,10 +34,8 @@ static DEFAULT: CollectionProfile = CollectionProfile {
     foreign_key: "parent_key",
 };
 
-static ALL_PROFILES: [(&str, &CollectionProfile); 2] = [
-    ("default", &DEFAULT),
-    ("codebase", &CODEBASE_PROFILE),
-];
+static ALL_PROFILES: [(&str, &CollectionProfile); 2] =
+    [("default", &DEFAULT), ("codebase", &CODEBASE_PROFILE)];
 
 // ---------------------------------------------------------------------------
 // Codebase-specific collections

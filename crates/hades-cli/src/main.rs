@@ -13,9 +13,13 @@ use clap::{Parser, Subcommand};
 use hades_core::config;
 
 use commands::{
-    codebase::CodebaseCmd, db::DbCmd,
+    codebase::CodebaseCmd,
+    db::DbCmd,
     embed::{EmbedCmd, EmbedGpuCmd, EmbedServiceCmd},
-    graph_embed::GraphEmbedCmd, schema::SchemaCmd, smell::SmellCmd, task::TaskCmd,
+    graph_embed::GraphEmbedCmd,
+    schema::SchemaCmd,
+    smell::SmellCmd,
+    task::TaskCmd,
 };
 
 /// HADES-Burn — AI model interface for semantic search over academic papers,
@@ -176,8 +180,7 @@ enum Commands {
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -192,7 +195,9 @@ fn run_codebase_ingest(
 ) -> anyhow::Result<()> {
     init_tracing();
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(commands::codebase_ingest::run(config, path, language, batch));
+    let result = rt.block_on(commands::codebase_ingest::run(
+        config, path, language, batch,
+    ));
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -216,8 +221,17 @@ fn main() -> anyhow::Result<()> {
     // ── Command dispatch ────────────────────────────────────────────────
     match cli.command {
         Commands::Ingest {
-            inputs, id, batch, resume, metadata, task, claims, collection, force,
-            reset, concurrency,
+            inputs,
+            id,
+            batch,
+            resume,
+            metadata,
+            task,
+            claims,
+            collection,
+            force,
+            reset,
+            concurrency,
         } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -238,16 +252,20 @@ fn main() -> anyhow::Result<()> {
             match result {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    if e.downcast_ref::<commands::ingest::IngestFailure>().is_some() {
+                    if e.downcast_ref::<commands::ingest::IngestFailure>()
+                        .is_some()
+                    {
                         process::exit(1);
                     }
                     Err(e)
                 }
             }
         }
-        Commands::Codebase(CodebaseCmd::Ingest { path, language, batch }) => {
-            run_codebase_ingest(&config, path, language.as_deref(), batch)
-        }
+        Commands::Codebase(CodebaseCmd::Ingest {
+            path,
+            language,
+            batch,
+        }) => run_codebase_ingest(&config, path, language.as_deref(), batch),
         Commands::Codebase(CodebaseCmd::Update { path }) => {
             run_codebase_ingest(&config, path, None, false)
         }
@@ -264,9 +282,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::graph_embed_query::run_embed(
-                &config, &node_id,
-            ))
+            rt.block_on(commands::graph_embed_query::run_embed(&config, &node_id))
         }
         Commands::GraphEmbed(GraphEmbedCmd::Neighbors { node_id, limit }) => {
             init_tracing();
@@ -276,9 +292,22 @@ fn main() -> anyhow::Result<()> {
             ))
         }
         Commands::GraphEmbed(GraphEmbedCmd::Train {
-            epochs, dimension, hidden_dim, num_bases, dropout, lr, weight_decay,
-            patience, val_ratio, test_ratio, neg_ratio, export_to, checkpoint_dir,
-            val_every, prefetch_depth, no_export,
+            epochs,
+            dimension,
+            hidden_dim,
+            num_bases,
+            dropout,
+            lr,
+            weight_decay,
+            patience,
+            val_ratio,
+            test_ratio,
+            neg_ratio,
+            export_to,
+            checkpoint_dir,
+            val_every,
+            prefetch_depth,
+            no_export,
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -302,7 +331,10 @@ fn main() -> anyhow::Result<()> {
                 no_export,
             ))
         }
-        Commands::GraphEmbed(GraphEmbedCmd::Update { export_to, checkpoint_dir }) => {
+        Commands::GraphEmbed(GraphEmbedCmd::Update {
+            export_to,
+            checkpoint_dir,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::graph_embed_update::run(
@@ -311,7 +343,11 @@ fn main() -> anyhow::Result<()> {
                 &checkpoint_dir,
             ))
         }
-        Commands::Schema(SchemaCmd::Apply { file, dry_run, force }) => {
+        Commands::Schema(SchemaCmd::Apply {
+            file,
+            dry_run,
+            force,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::schema::run_apply(&config, &file, dry_run, force))
@@ -319,38 +355,59 @@ fn main() -> anyhow::Result<()> {
         Commands::Daemon { socket } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::daemon::run(
-                &config,
-                socket.as_deref(),
-            ))
+            rt.block_on(commands::daemon::run(&config, socket.as_deref()))
         }
         // ── Native DB search (vector + optional hybrid + optional structural)
         Commands::Db(commands::db::DbCmd::Query {
             search_text: Some(ref text),
-            limit, ref collection, hybrid, structural,
-            rerank, ref format, ..
+            limit,
+            ref collection,
+            hybrid,
+            structural,
+            rerank,
+            ref format,
+            ..
         }) => {
             if rerank {
-                eprintln!("error: --rerank requires a cross-encoder model and is not yet available in the native CLI");
+                eprintln!(
+                    "error: --rerank requires a cross-encoder model and is not yet available in the native CLI"
+                );
                 eprintln!("hint: use --hybrid and/or --structural for improved ranking");
                 process::exit(1);
             }
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_search::run_query(
-                &config, text, limit, collection.as_deref(), hybrid, structural, format,
+                &config,
+                text,
+                limit,
+                collection.as_deref(),
+                hybrid,
+                structural,
+                format,
             ))
         }
-        Commands::Db(commands::db::DbCmd::Query { search_text: None, .. }) => {
+        Commands::Db(commands::db::DbCmd::Query {
+            search_text: None, ..
+        }) => {
             eprintln!("error: search text is required for db query");
             eprintln!("usage: hades db query \"search terms\" [--hybrid] [--structural]");
             process::exit(1);
         }
         // ── Native DB read commands ─────────────────────────────────────
-        Commands::Db(commands::db::DbCmd::Get { collection, key, format }) => {
+        Commands::Db(commands::db::DbCmd::Get {
+            collection,
+            key,
+            format,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::db_read::run_get(&config, &collection, &key, &format))
+            rt.block_on(commands::db_read::run_get(
+                &config,
+                &collection,
+                &key,
+                &format,
+            ))
         }
         Commands::Db(commands::db::DbCmd::Count { collection }) => {
             init_tracing();
@@ -372,7 +429,12 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_read::run_recent(&config, limit, &format))
         }
-        Commands::Db(commands::db::DbCmd::List { collection, limit, paper, format }) => {
+        Commands::Db(commands::db::DbCmd::List {
+            collection,
+            limit,
+            paper,
+            format,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_read::run_list(
@@ -383,7 +445,12 @@ fn main() -> anyhow::Result<()> {
                 &format,
             ))
         }
-        Commands::Db(commands::db::DbCmd::Aql { aql, bind, limit, format }) => {
+        Commands::Db(commands::db::DbCmd::Aql {
+            aql,
+            bind,
+            limit,
+            format,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_read::run_aql(
@@ -404,7 +471,12 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_read::run_stats(&config, &format))
         }
-        Commands::Db(commands::db::DbCmd::Export { collection, output, format, limit }) => {
+        Commands::Db(commands::db::DbCmd::Export {
+            collection,
+            output,
+            format,
+            limit,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_read::run_export(
@@ -430,33 +502,52 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(commands::db_read::run_databases(&config, &format))
         }
         // ── Native DB write commands ────────────────────────────────────
-        Commands::Db(commands::db::DbCmd::Insert { collection, data, input }) => {
+        Commands::Db(commands::db::DbCmd::Insert {
+            collection,
+            data,
+            input,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_insert(
-                &config, &collection, data.as_deref(), input.as_deref(),
+                &config,
+                &collection,
+                data.as_deref(),
+                input.as_deref(),
             ))
         }
-        Commands::Db(commands::db::DbCmd::Update { collection, key, data }) => {
+        Commands::Db(commands::db::DbCmd::Update {
+            collection,
+            key,
+            data,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_update(
-                &config, &collection, &key, data.as_deref(),
+                &config,
+                &collection,
+                &key,
+                data.as_deref(),
             ))
         }
-        Commands::Db(commands::db::DbCmd::Delete { collection, key, force }) => {
+        Commands::Db(commands::db::DbCmd::Delete {
+            collection,
+            key,
+            force,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_delete(
-                &config, &collection, &key, force,
+                &config,
+                &collection,
+                &key,
+                force,
             ))
         }
         Commands::Db(commands::db::DbCmd::Purge { document_id, force }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::db_write::run_purge(
-                &config, &document_id, force,
-            ))
+            rt.block_on(commands::db_write::run_purge(&config, &document_id, force))
         }
         Commands::Db(commands::db::DbCmd::Create { name, r#type }) => {
             init_tracing();
@@ -475,39 +566,70 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_drop_database(&config, &name, force))
         }
-        Commands::Db(commands::db::DbCmd::CreateIndex { collection, dimension, metric }) => {
+        Commands::Db(commands::db::DbCmd::CreateIndex {
+            collection,
+            dimension,
+            metric,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_create_index(
-                &config, collection.as_deref(), dimension, metric.as_deref(),
+                &config,
+                collection.as_deref(),
+                dimension,
+                metric.as_deref(),
             ))
         }
         // ── Native DB graph commands ──────────────────────────────────
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Traverse {
-            start, direction, min_depth, max_depth, graph, format: _,
+            start,
+            direction,
+            min_depth,
+            max_depth,
+            graph,
+            format: _,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_traverse(
-                &config, &start, &direction, min_depth, max_depth, graph.as_deref(),
+                &config,
+                &start,
+                &direction,
+                min_depth,
+                max_depth,
+                graph.as_deref(),
             ))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::ShortestPath {
-            source, target, graph, format: _,
+            source,
+            target,
+            graph,
+            format: _,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_shortest_path(
-                &config, &source, &target, graph.as_deref(),
+                &config,
+                &source,
+                &target,
+                graph.as_deref(),
             ))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Neighbors {
-            vertex, direction, limit, graph, format: _,
+            vertex,
+            direction,
+            limit,
+            graph,
+            format: _,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_neighbors(
-                &config, &vertex, &direction, limit, graph.as_deref(),
+                &config,
+                &vertex,
+                &direction,
+                limit,
+                graph.as_deref(),
             ))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::List { format: _ })) => {
@@ -516,30 +638,43 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(commands::db_graph::run_list(&config))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Create {
-            name, edge_definitions,
+            name,
+            edge_definitions,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_create(
-                &config, &name, edge_definitions.as_deref(),
+                &config,
+                &name,
+                edge_definitions.as_deref(),
             ))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Drop {
-            name, drop_collections, force,
+            name,
+            drop_collections,
+            force,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_drop(
-                &config, &name, drop_collections, force,
+                &config,
+                &name,
+                drop_collections,
+                force,
             ))
         }
         Commands::Db(commands::db::DbCmd::Graph(commands::db::DbGraphCmd::Materialize {
-            edge, dry_run, register,
+            edge,
+            dry_run,
+            register,
         })) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_graph::run_materialize(
-                &config, edge.as_deref(), dry_run, register,
+                &config,
+                edge.as_deref(),
+                dry_run,
+                register,
             ))
         }
         // ── Native DB schema commands ────────────────────────────────
@@ -573,17 +708,28 @@ fn main() -> anyhow::Result<()> {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::system::run_orient(
-                &config, collection.as_deref(), &format,
+                &config,
+                collection.as_deref(),
+                &format,
             ))
         }
         // ── Native task commands ───────────────────────────────────────
         Commands::Task(commands::task::TaskCmd::List {
-            status, r#type, parent, limit, format,
+            status,
+            r#type,
+            parent,
+            limit,
+            format,
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_list(
-                &config, status.as_deref(), r#type.as_deref(), parent.as_deref(), limit, &format,
+                &config,
+                status.as_deref(),
+                r#type.as_deref(),
+                parent.as_deref(),
+                limit,
+                &format,
             ))
         }
         Commands::Task(commands::task::TaskCmd::Show { key, format }) => {
@@ -592,17 +738,32 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(commands::task_mgmt::run_show(&config, &key, &format))
         }
         Commands::Task(commands::task::TaskCmd::Create {
-            title, description, r#type, parent, priority, tags,
+            title,
+            description,
+            r#type,
+            parent,
+            priority,
+            tags,
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_create(
-                &config, &title, description.as_deref(), &r#type,
-                parent.as_deref(), priority.as_deref(), &tags,
+                &config,
+                &title,
+                description.as_deref(),
+                &r#type,
+                parent.as_deref(),
+                priority.as_deref(),
+                &tags,
             ))
         }
         Commands::Task(commands::task::TaskCmd::Update {
-            key, title, description, priority, add_tags, remove_tags,
+            key,
+            title,
+            description,
+            priority,
+            add_tags,
+            remove_tags,
         }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
@@ -623,7 +784,9 @@ fn main() -> anyhow::Result<()> {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_close(
-                &config, &key, message.as_deref(),
+                &config,
+                &key,
+                message.as_deref(),
             ))
         }
         Commands::Task(commands::task::TaskCmd::Start { key }) => {
@@ -635,7 +798,9 @@ fn main() -> anyhow::Result<()> {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_review(
-                &config, &key, message.as_deref(),
+                &config,
+                &key,
+                message.as_deref(),
             ))
         }
         Commands::Task(commands::task::TaskCmd::Approve { key, human }) => {
@@ -643,11 +808,18 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_approve(&config, &key, human))
         }
-        Commands::Task(commands::task::TaskCmd::Block { key, message, blocker }) => {
+        Commands::Task(commands::task::TaskCmd::Block {
+            key,
+            message,
+            blocker,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_block(
-                &config, &key, message.as_deref(), blocker.as_deref(),
+                &config,
+                &key,
+                message.as_deref(),
+                blocker.as_deref(),
             ))
         }
         Commands::Task(commands::task::TaskCmd::Unblock { key }) => {
@@ -659,7 +831,9 @@ fn main() -> anyhow::Result<()> {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_handoff(
-                &config, &key, message.as_deref(),
+                &config,
+                &key,
+                message.as_deref(),
             ))
         }
         Commands::Task(commands::task::TaskCmd::HandoffShow { key, format }) => {
@@ -684,11 +858,20 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_sessions(&config, &key))
         }
-        Commands::Task(commands::task::TaskCmd::Dep { key, add, remove, graph }) => {
+        Commands::Task(commands::task::TaskCmd::Dep {
+            key,
+            add,
+            remove,
+            graph,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::task_mgmt::run_dep(
-                &config, &key, add.as_deref(), remove.as_deref(), graph,
+                &config,
+                &key,
+                add.as_deref(),
+                remove.as_deref(),
+                graph,
             ))
         }
         Commands::Task(commands::task::TaskCmd::Usage) => {
@@ -699,9 +882,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Task(commands::task::TaskCmd::GraphIntegration { format }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::task_mgmt::run_graph_integration(
-                &config, &format,
-            ))
+            rt.block_on(commands::task_mgmt::run_graph_integration(&config, &format))
         }
         // All TaskCmd variants are handled natively above.
 
@@ -709,7 +890,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Embed(EmbedCmd::Text { text, format }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::embed_mgmt::run_embed_text(&config, &text, &format))
+            rt.block_on(commands::embed_mgmt::run_embed_text(
+                &config, &text, &format,
+            ))
         }
         Commands::Embed(EmbedCmd::Service(EmbedServiceCmd::Status)) => {
             init_tracing();
@@ -731,21 +914,21 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::embed_mgmt::run_gpu_status(&config))
         }
-        Commands::Embed(EmbedCmd::Gpu(EmbedGpuCmd::List)) => {
-            commands::embed_mgmt::run_gpu_list()
-        }
+        Commands::Embed(EmbedCmd::Gpu(EmbedGpuCmd::List)) => commands::embed_mgmt::run_gpu_list(),
 
         // ── Extract command ───────────────────────────────────────────
-        Commands::Extract { file, format, output } => {
-            commands::embed_mgmt::run_extract(
-                &file,
-                &format,
-                output.as_deref(),
-            )
-        }
+        Commands::Extract {
+            file,
+            format,
+            output,
+        } => commands::embed_mgmt::run_extract(&file, &format, output.as_deref()),
 
         // ── Smell & compliance commands ──────────────────────────────
-        Commands::Smell(SmellCmd::Check { path, format, verbose }) => {
+        Commands::Smell(SmellCmd::Check {
+            path,
+            format,
+            verbose,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::smell_mgmt::run_smell_check(
@@ -759,20 +942,30 @@ fn main() -> anyhow::Result<()> {
                 &config, &path, &claims,
             ))
         }
-        Commands::Smell(SmellCmd::Report { path, output, format }) => {
+        Commands::Smell(SmellCmd::Report {
+            path,
+            output,
+            format,
+        }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::smell_mgmt::run_smell_report(
-                &config, &path, output.as_deref(), &format,
+                &config,
+                &path,
+                output.as_deref(),
+                &format,
             ))
         }
-        Commands::Link { source_id, claims, force } => {
+        Commands::Link {
+            source_id,
+            claims,
+            force,
+        } => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::smell_mgmt::run_link(
                 &config, &source_id, &claims, force,
             ))
         }
-
     }
 }

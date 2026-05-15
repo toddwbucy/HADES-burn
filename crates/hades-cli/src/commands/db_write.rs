@@ -23,8 +23,8 @@ fn resolve_json_input(data: Option<&str>, input: Option<&Path>) -> Result<serde_
         return serde_json::from_str(s).context("invalid --data JSON");
     }
     if let Some(path) = input {
-        let contents =
-            std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         return serde_json::from_str(&contents)
             .with_context(|| format!("invalid JSON in {}", path.display()));
     }
@@ -114,11 +114,7 @@ pub async fn run_delete(
 }
 
 /// `hades db purge <document_id> [--force]`
-pub async fn run_purge(
-    config: &HadesConfig,
-    document_id: &str,
-    force: bool,
-) -> Result<()> {
+pub async fn run_purge(config: &HadesConfig, document_id: &str, force: bool) -> Result<()> {
     if !force {
         anyhow::bail!(
             "refusing to purge '{document_id}' without --force (-y). \
@@ -237,12 +233,10 @@ pub async fn run_create_index(
     dimension: Option<u32>,
     metric: Option<&str>,
 ) -> Result<()> {
-
     let collection = collection.unwrap_or_else(|| {
         hades_core::db::collections::CollectionProfile::default_profile().embeddings
     });
-    let dimension =
-        dimension.context("--dimension is required for create-index")?;
+    let dimension = dimension.context("--dimension is required for create-index")?;
     let metric = metric.unwrap_or("cosine");
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;

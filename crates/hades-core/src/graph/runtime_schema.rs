@@ -185,10 +185,7 @@ impl RuntimeSchema {
         let mut named_graphs: Vec<RuntimeNamedGraph> = Vec::new();
 
         for doc in &docs {
-            let schema_type: &str = doc
-                .get("schema_type")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let schema_type: &str = doc.get("schema_type").and_then(Value::as_str).unwrap_or("");
 
             match schema_type {
                 "schema_meta" => {
@@ -277,8 +274,13 @@ impl RuntimeSchema {
         let ng = self.get_named_graph(graph_name)?;
 
         // Group edge definitions by collection name, merging from/to sets.
-        let mut edge_map: std::collections::BTreeMap<&str, (std::collections::BTreeSet<&str>, std::collections::BTreeSet<&str>)> =
-            std::collections::BTreeMap::new();
+        let mut edge_map: std::collections::BTreeMap<
+            &str,
+            (
+                std::collections::BTreeSet<&str>,
+                std::collections::BTreeSet<&str>,
+            ),
+        > = std::collections::BTreeMap::new();
 
         for edge_name in &ng.edge_definitions {
             if let Some(edef) = self.get_edge_def(edge_name) {
@@ -369,5 +371,4 @@ mod tests {
         let order2 = vec!["b".to_string(), "a".to_string()];
         assert_ne!(compute_checksum(&order1), compute_checksum(&order2));
     }
-
 }

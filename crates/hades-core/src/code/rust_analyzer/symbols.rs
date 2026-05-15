@@ -10,8 +10,8 @@ use serde_json::Value;
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 
-use super::session::RustAnalyzerSession;
 use super::RustAnalyzerError;
+use super::session::RustAnalyzerSession;
 
 /// LSP SymbolKind → human-readable name.
 fn symbol_kind_name(kind: u64) -> &'static str {
@@ -49,8 +49,9 @@ fn symbol_kind_name(kind: u64) -> &'static str {
 /// PyO3 attribute pattern.
 static PYO3_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"#\[(?:pyclass|pymethods|pyfunction|pymodule|pyproto)(?:\([^]]*\))?\]|#\[pyo3\([^]]*\)\]"
-    ).expect("invalid pyo3 regex")
+        r"#\[(?:pyclass|pymethods|pyfunction|pymodule|pyproto)(?:\([^]]*\))?\]|#\[pyo3\([^]]*\)\]",
+    )
+    .expect("invalid pyo3 regex")
 });
 
 /// FFI attribute/keyword pattern.
@@ -66,14 +67,12 @@ static PYO3_NAME: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Regex for Rust code blocks in markdown hover.
-static RUST_CODE_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)```rust\n(.*?)```").expect("invalid code block regex")
-});
+static RUST_CODE_BLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)```rust\n(.*?)```").expect("invalid code block regex"));
 
 /// Regex for `#[derive(...)]` attributes.
-static DERIVE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"#\[derive\(([^)]+)\)\]").expect("invalid derive regex")
-});
+static DERIVE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#\[derive\(([^)]+)\)\]").expect("invalid derive regex"));
 
 /// A symbol extracted from rust-analyzer, enriched and ready for storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +131,10 @@ pub struct RustSymbolExtractor<'a> {
 impl<'a> RustSymbolExtractor<'a> {
     /// Create a new extractor attached to a session.
     pub fn new(session: &'a RustAnalyzerSession, include_calls: bool) -> Self {
-        Self { session, include_calls }
+        Self {
+            session,
+            include_calls,
+        }
     }
 
     /// Extract all symbol data for a single Rust file.
@@ -140,13 +142,13 @@ impl<'a> RustSymbolExtractor<'a> {
         &self,
         file_path: &std::path::Path,
     ) -> Result<FileExtraction, RustAnalyzerError> {
-        let content = tokio::fs::read_to_string(
-            if file_path.is_absolute() {
-                file_path.to_path_buf()
-            } else {
-                self.session.crate_root().join(file_path)
-            }
-        ).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(if file_path.is_absolute() {
+            file_path.to_path_buf()
+        } else {
+            self.session.crate_root().join(file_path)
+        })
+        .await
+        .unwrap_or_default();
 
         let lines: Vec<&str> = content.lines().collect();
 
@@ -159,18 +161,21 @@ impl<'a> RustSymbolExtractor<'a> {
         // Walk and enrich symbols.
         let mut symbols = Vec::new();
         for sym in &raw_symbols {
-            self.walk_symbol(sym, &uri, &lines, None, None, false, false, &mut symbols).await;
+            self.walk_symbol(sym, &uri, &lines, None, None, false, false, &mut symbols)
+                .await;
         }
 
         // Group impl blocks.
         let impl_blocks = extract_impl_blocks(&symbols);
 
-        let pyo3_exports: Vec<String> = symbols.iter()
+        let pyo3_exports: Vec<String> = symbols
+            .iter()
             .filter(|s| s.is_pyo3)
             .map(|s| s.name.clone())
             .collect();
 
-        let ffi_boundaries: Vec<String> = symbols.iter()
+        let ffi_boundaries: Vec<String> = symbols
+            .iter()
             .filter(|s| s.is_ffi)
             .map(|s| s.name.clone())
             .collect();
@@ -200,13 +205,16 @@ impl<'a> RustSymbolExtractor<'a> {
                 }
                 Err(e) => {
                     warn!("failed to extract symbols from {}: {e}", rel);
-                    results.insert(rel, FileExtraction {
-                        symbols: Vec::new(),
-                        impl_blocks: Vec::new(),
-                        pyo3_exports: Vec::new(),
-                        ffi_boundaries: Vec::new(),
-                        analyzed_at: chrono::Utc::now().to_rfc3339(),
-                    });
+                    results.insert(
+                        rel,
+                        FileExtraction {
+                            symbols: Vec::new(),
+                            impl_blocks: Vec::new(),
+                            pyo3_exports: Vec::new(),
+                            ffi_boundaries: Vec::new(),
+                            analyzed_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
                 }
             }
         }
@@ -233,14 +241,22 @@ impl<'a> RustSymbolExtractor<'a> {
         let detail = sym["detail"].as_str().unwrap_or("");
 
         // Range info.
-        let start_line = sym.pointer("/range/start/line")
-            .and_then(Value::as_u64).unwrap_or(0) as u32;
-        let end_line = sym.pointer("/range/end/line")
-            .and_then(Value::as_u64).unwrap_or(0) as u32;
-        let sel_line = sym.pointer("/selectionRange/start/line")
-            .and_then(Value::as_u64).unwrap_or(start_line as u64) as u32;
-        let sel_char = sym.pointer("/selectionRange/start/character")
-            .and_then(Value::as_u64).unwrap_or(0) as u32;
+        let start_line = sym
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let end_line = sym
+            .pointer("/range/end/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let sel_line = sym
+            .pointer("/selectionRange/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(start_line as u64) as u32;
+        let sel_char = sym
+            .pointer("/selectionRange/start/character")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
 
         // Detect impl blocks — rust-analyzer names them "impl Foo" or "impl Bar for Foo".
         let mut current_impl_trait = impl_trait.map(String::from);
@@ -269,12 +285,16 @@ impl<'a> RustSymbolExtractor<'a> {
             if let Some(children) = sym.get("children").and_then(Value::as_array) {
                 for child in children {
                     Box::pin(self.walk_symbol(
-                        child, uri, lines,
+                        child,
+                        uri,
+                        lines,
                         Some(name),
                         current_impl_trait.as_deref(),
-                        is_pyo3, is_ffi,
+                        is_pyo3,
+                        is_ffi,
                         out,
-                    )).await;
+                    ))
+                    .await;
                 }
             }
             return;
@@ -319,7 +339,8 @@ impl<'a> RustSymbolExtractor<'a> {
 
         // Extract python_name from #[pyo3(name = "...")].
         let python_name = if is_pyo3 {
-            attrs.iter()
+            attrs
+                .iter()
                 .find_map(|a| PYO3_NAME.captures(a))
                 .map(|c| c[1].to_string())
                 .or_else(|| Some(name.to_string()))
@@ -342,7 +363,9 @@ impl<'a> RustSymbolExtractor<'a> {
             signature,
             start_line,
             end_line,
-            parent_symbol: impl_self_type.clone().or_else(|| parent_name.map(String::from)),
+            parent_symbol: impl_self_type
+                .clone()
+                .or_else(|| parent_name.map(String::from)),
             impl_trait: current_impl_trait.clone(),
             is_pyo3,
             is_ffi,
@@ -355,31 +378,38 @@ impl<'a> RustSymbolExtractor<'a> {
         // Recurse into children (non-impl containers like struct, enum, module).
         if let Some(children) = sym.get("children").and_then(Value::as_array) {
             let child_parent = if matches!(kind, "struct" | "enum" | "module" | "interface") {
-                Some(out.last().map(|s| s.qualified_name.clone()).unwrap_or_default())
+                Some(
+                    out.last()
+                        .map(|s| s.qualified_name.clone())
+                        .unwrap_or_default(),
+                )
             } else {
                 parent_name.map(String::from)
             };
 
             for child in children {
                 Box::pin(self.walk_symbol(
-                    child, uri, lines,
+                    child,
+                    uri,
+                    lines,
                     child_parent.as_deref(),
                     current_impl_trait.as_deref(),
-                    is_pyo3, is_ffi,
+                    is_pyo3,
+                    is_ffi,
                     out,
-                )).await;
+                ))
+                .await;
             }
         }
     }
 
     /// Get outgoing calls for a symbol.
-    async fn get_outgoing_calls(
-        &self,
-        uri: &str,
-        line: u32,
-        character: u32,
-    ) -> Vec<CallTarget> {
-        let raw = match self.session.call_hierarchy_outgoing(uri, line, character).await {
+    async fn get_outgoing_calls(&self, uri: &str, line: u32, character: u32) -> Vec<CallTarget> {
+        let raw = match self
+            .session
+            .call_hierarchy_outgoing(uri, line, character)
+            .await
+        {
             Ok(calls) => calls,
             Err(e) => {
                 debug!("call hierarchy failed for {uri}:{line}:{character}: {e}");
@@ -387,23 +417,27 @@ impl<'a> RustSymbolExtractor<'a> {
             }
         };
 
-        raw.iter().filter_map(|item| {
-            let to = item.get("to")?;
-            let target_name = to["name"].as_str()?;
-            let target_detail = to["detail"].as_str().unwrap_or(target_name);
-            let target_uri = to["uri"].as_str().unwrap_or("");
-            let target_line = to.pointer("/range/start/line")
-                .and_then(Value::as_u64).unwrap_or(0) as u32;
+        raw.iter()
+            .filter_map(|item| {
+                let to = item.get("to")?;
+                let target_name = to["name"].as_str()?;
+                let target_detail = to["detail"].as_str().unwrap_or(target_name);
+                let target_uri = to["uri"].as_str().unwrap_or("");
+                let target_line = to
+                    .pointer("/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
 
-            let target_file = uri_to_rel_path(target_uri, self.session.crate_root());
+                let target_file = uri_to_rel_path(target_uri, self.session.crate_root());
 
-            Some(CallTarget {
-                qualified_name: target_detail.to_string(),
-                name: target_name.to_string(),
-                file: target_file,
-                line: target_line,
+                Some(CallTarget {
+                    qualified_name: target_detail.to_string(),
+                    name: target_name.to_string(),
+                    file: target_file,
+                    line: target_line,
+                })
             })
-        }).collect()
+            .collect()
     }
 }
 
@@ -480,7 +514,8 @@ fn extract_signature_from_hover(hover: &Value) -> Option<String> {
     } else if let Some(arr) = contents.as_array() {
         arr.iter()
             .filter_map(|c| {
-                c.get("value").and_then(Value::as_str)
+                c.get("value")
+                    .and_then(Value::as_str)
                     .or_else(|| c.as_str())
             })
             .collect::<Vec<_>>()
@@ -490,13 +525,16 @@ fn extract_signature_from_hover(hover: &Value) -> Option<String> {
     };
 
     // Extract Rust code blocks from markdown.
-    let blocks: Vec<String> = RUST_CODE_BLOCK.captures_iter(&value)
+    let blocks: Vec<String> = RUST_CODE_BLOCK
+        .captures_iter(&value)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
         .collect();
 
     if !blocks.is_empty() {
         // Prefer blocks containing fn/struct/enum/trait/const/type/impl.
-        let keywords = ["fn ", "struct ", "enum ", "trait ", "const ", "type ", "impl "];
+        let keywords = [
+            "fn ", "struct ", "enum ", "trait ", "const ", "type ", "impl ",
+        ];
         for block in blocks.iter().rev() {
             if keywords.iter().any(|kw| block.contains(kw)) {
                 return Some(block.clone());
@@ -543,7 +581,8 @@ fn extract_impl_blocks(symbols: &[ExtractedSymbol]) -> Vec<ImplBlock> {
         }
     }
 
-    blocks.into_iter()
+    blocks
+        .into_iter()
         .map(|((self_type, trait_name), methods)| ImplBlock {
             self_type,
             trait_name,

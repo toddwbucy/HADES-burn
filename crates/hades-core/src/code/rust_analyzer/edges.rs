@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::db::{collections::CODEBASE, keys};
 use super::symbols::FileExtraction;
+use crate::db::{collections::CODEBASE, keys};
 
 /// Edge types produced by the resolver.
 ///
@@ -151,10 +151,7 @@ impl RustEdgeResolver {
                     continue;
                 };
 
-                let sk = keys::symbol_key(
-                    &keys::file_key(rel_path),
-                    &sym.qualified_name,
-                );
+                let sk = keys::symbol_key(&keys::file_key(rel_path), &sym.qualified_name);
 
                 documents.push(SymbolDocument {
                     key: sk,
@@ -179,8 +176,11 @@ impl RustEdgeResolver {
             }
         }
 
-        info!("built {} symbol documents from {} files",
-            documents.len(), self.file_data.len());
+        info!(
+            "built {} symbol documents from {} files",
+            documents.len(),
+            self.file_data.len()
+        );
         documents
     }
 
@@ -253,7 +253,11 @@ impl RustEdgeResolver {
             }
         }
 
-        info!("built {} edges from {} files", edges.len(), self.file_data.len());
+        info!(
+            "built {} edges from {} files",
+            edges.len(),
+            self.file_data.len()
+        );
         edges
     }
 
@@ -293,7 +297,11 @@ impl RustEdgeResolver {
         call: &super::symbols::CallTarget,
         caller_file: &str,
     ) -> Option<String> {
-        let prefer_file = if call.file.is_empty() { caller_file } else { &call.file };
+        let prefer_file = if call.file.is_empty() {
+            caller_file
+        } else {
+            &call.file
+        };
 
         // Strategy 1: exact qualified name.
         if let Some(entries) = self.symbol_index.get(&call.qualified_name)
@@ -356,8 +364,8 @@ fn pick_best_match(entries: &[(String, String)], prefer_file: &str) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::symbols::{CallTarget, ExtractedSymbol, FileExtraction};
+    use super::*;
 
     fn make_symbol(name: &str, kind: &str) -> ExtractedSymbol {
         ExtractedSymbol {
@@ -400,7 +408,10 @@ mod tests {
         let resolver = RustEdgeResolver::new(file_data);
         let edges = resolver.build_edges();
 
-        let defines: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Defines).collect();
+        let defines: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Defines)
+            .collect();
         assert_eq!(defines.len(), 1);
         assert!(defines[0].from.starts_with("codebase_files/"));
         assert!(defines[0].to.starts_with("codebase_symbols/"));
@@ -418,10 +429,7 @@ mod tests {
             line: 5,
         }];
 
-        file_data.insert(
-            "src/main.rs".to_string(),
-            make_extraction(vec![caller]),
-        );
+        file_data.insert("src/main.rs".to_string(), make_extraction(vec![caller]));
         file_data.insert(
             "src/config.rs".to_string(),
             make_extraction(vec![make_symbol("Config", "struct")]),
@@ -470,7 +478,8 @@ mod tests {
         let resolver = RustEdgeResolver::new(file_data);
         let edges = resolver.build_edges();
 
-        let implements: Vec<_> = edges.iter()
+        let implements: Vec<_> = edges
+            .iter()
             .filter(|e| e.kind == EdgeKind::Implements)
             .collect();
         assert_eq!(implements.len(), 1);
@@ -505,7 +514,10 @@ mod tests {
         let edges = resolver.build_edges();
 
         // Only one defines edge for Config.
-        let defines: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Defines).collect();
+        let defines: Vec<_> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Defines)
+            .collect();
         assert_eq!(defines.len(), 1);
     }
 
@@ -513,7 +525,10 @@ mod tests {
     fn test_edge_kind_collection_names() {
         assert_eq!(EdgeKind::Defines.collection(), "codebase_defines_edges");
         assert_eq!(EdgeKind::Calls.collection(), "codebase_calls_edges");
-        assert_eq!(EdgeKind::Implements.collection(), "codebase_implements_edges");
+        assert_eq!(
+            EdgeKind::Implements.collection(),
+            "codebase_implements_edges"
+        );
         assert_eq!(EdgeKind::Imports.collection(), "codebase_imports_edges");
     }
 }

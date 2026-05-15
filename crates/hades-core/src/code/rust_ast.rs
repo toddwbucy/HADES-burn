@@ -5,13 +5,13 @@
 //! for AST-aligned chunking.
 
 use serde_json::json;
-use syn::{spanned::Spanned, visit::Visit, Item, Visibility};
+use syn::{Item, Visibility, spanned::Spanned, visit::Visit};
 use tracing::warn;
 
+use super::Language;
 use super::symbols::{
     CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef, compute_symbol_hash,
 };
-use super::Language;
 
 /// Analyze Rust source code, returning symbols, metrics, and structure.
 pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
@@ -109,7 +109,8 @@ impl SymbolCollector {
                 let (start_line, end_line) = self.span_lines(&e.span());
 
                 let derives = extract_derives(&e.attrs);
-                let variants: Vec<String> = e.variants.iter().map(|v| v.ident.to_string()).collect();
+                let variants: Vec<String> =
+                    e.variants.iter().map(|v| v.ident.to_string()).collect();
                 let mut meta = json!({
                     "visibility": vis_str(&e.vis),
                     "variants": variants,
@@ -323,7 +324,6 @@ impl SymbolCollector {
         let end = span.end().line;
         (start.max(1), end.max(start))
     }
-
 }
 
 // ── Top-Level Definitions ──────────────────────────────────────────────
@@ -416,7 +416,11 @@ fn find_item_start(source: &str, keyword_byte: usize) -> usize {
 // ── Code Metrics ───────────────────────────────────────────────────────
 
 fn compute_metrics(source: &str) -> CodeMetrics {
-    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
+    let total_lines = if source.is_empty() {
+        0
+    } else {
+        source.lines().count()
+    };
     let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
     let comment_lines = source
         .lines()
@@ -691,7 +695,10 @@ pub fn run(items: &[String]) -> usize {
         let analysis = analyze(SAMPLE_RUST).unwrap();
         let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
 
-        assert!(names.contains(&"std::collections::HashMap"), "missing HashMap import: {names:?}");
+        assert!(
+            names.contains(&"std::collections::HashMap"),
+            "missing HashMap import: {names:?}"
+        );
         assert!(names.contains(&"MAX_BUF"), "missing MAX_BUF constant");
         assert!(names.contains(&"Config"), "missing Config struct");
         assert!(names.contains(&"AppError"), "missing AppError enum");
@@ -705,23 +712,41 @@ pub fn run(items: &[String]) -> usize {
     fn test_symbol_kinds() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
 
-        let config = analysis.symbols.iter().find(|s| s.name == "Config" && s.kind == SymbolKind::Struct).unwrap();
+        let config = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "Config" && s.kind == SymbolKind::Struct)
+            .unwrap();
         assert_eq!(config.kind, SymbolKind::Struct);
 
-        let app_error = analysis.symbols.iter().find(|s| s.name == "AppError").unwrap();
+        let app_error = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "AppError")
+            .unwrap();
         assert_eq!(app_error.kind, SymbolKind::Enum);
 
-        let processor = analysis.symbols.iter().find(|s| s.name == "Processor").unwrap();
+        let processor = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "Processor")
+            .unwrap();
         assert_eq!(processor.kind, SymbolKind::Trait);
 
-        let max_buf = analysis.symbols.iter().find(|s| s.name == "MAX_BUF").unwrap();
+        let max_buf = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "MAX_BUF")
+            .unwrap();
         assert_eq!(max_buf.kind, SymbolKind::Constant);
     }
 
     #[test]
     fn test_struct_derives() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
-        let config = analysis.symbols.iter()
+        let config = analysis
+            .symbols
+            .iter()
             .find(|s| s.name == "Config" && s.kind == SymbolKind::Struct)
             .unwrap();
         let derives = config.metadata["derives"].as_array().unwrap();
@@ -733,7 +758,11 @@ pub fn run(items: &[String]) -> usize {
     #[test]
     fn test_enum_variants() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
-        let app_error = analysis.symbols.iter().find(|s| s.name == "AppError").unwrap();
+        let app_error = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "AppError")
+            .unwrap();
         let variants = app_error.metadata["variants"].as_array().unwrap();
         let names: Vec<&str> = variants.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(names.contains(&"Io"));
@@ -755,13 +784,22 @@ pub fn run(items: &[String]) -> usize {
     fn test_impl_context() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
         let new_fn = analysis.symbols.iter().find(|s| s.name == "new").unwrap();
-        assert!(new_fn.metadata["impl_context"].as_str().unwrap().contains("Config"));
+        assert!(
+            new_fn.metadata["impl_context"]
+                .as_str()
+                .unwrap()
+                .contains("Config")
+        );
     }
 
     #[test]
     fn test_trait_methods() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
-        let processor = analysis.symbols.iter().find(|s| s.name == "Processor").unwrap();
+        let processor = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "Processor")
+            .unwrap();
         let methods = processor.metadata["methods"].as_array().unwrap();
         assert_eq!(methods[0], "process");
     }
@@ -769,10 +807,23 @@ pub fn run(items: &[String]) -> usize {
     #[test]
     fn test_top_level_defs() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
-        let def_names: Vec<&str> = analysis.top_level_defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(def_names.contains(&"Config"), "missing Config def: {def_names:?}");
-        assert!(def_names.contains(&"AppError"), "missing AppError def: {def_names:?}");
-        assert!(def_names.contains(&"Processor"), "missing Processor def: {def_names:?}");
+        let def_names: Vec<&str> = analysis
+            .top_level_defs
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert!(
+            def_names.contains(&"Config"),
+            "missing Config def: {def_names:?}"
+        );
+        assert!(
+            def_names.contains(&"AppError"),
+            "missing AppError def: {def_names:?}"
+        );
+        assert!(
+            def_names.contains(&"Processor"),
+            "missing Processor def: {def_names:?}"
+        );
         assert!(def_names.contains(&"run"), "missing run def: {def_names:?}");
     }
 

@@ -207,24 +207,56 @@ mod tests {
     #[test]
     fn test_symbol_hash_order_independent() {
         let s1 = vec![
-            Symbol { name: "a".into(), kind: SymbolKind::Function, start_line: 1, end_line: 1, metadata: serde_json::Value::Null },
-            Symbol { name: "b".into(), kind: SymbolKind::Function, start_line: 2, end_line: 2, metadata: serde_json::Value::Null },
+            Symbol {
+                name: "a".into(),
+                kind: SymbolKind::Function,
+                start_line: 1,
+                end_line: 1,
+                metadata: serde_json::Value::Null,
+            },
+            Symbol {
+                name: "b".into(),
+                kind: SymbolKind::Function,
+                start_line: 2,
+                end_line: 2,
+                metadata: serde_json::Value::Null,
+            },
         ];
         let s2 = vec![
-            Symbol { name: "b".into(), kind: SymbolKind::Function, start_line: 2, end_line: 2, metadata: serde_json::Value::Null },
-            Symbol { name: "a".into(), kind: SymbolKind::Function, start_line: 1, end_line: 1, metadata: serde_json::Value::Null },
+            Symbol {
+                name: "b".into(),
+                kind: SymbolKind::Function,
+                start_line: 2,
+                end_line: 2,
+                metadata: serde_json::Value::Null,
+            },
+            Symbol {
+                name: "a".into(),
+                kind: SymbolKind::Function,
+                start_line: 1,
+                end_line: 1,
+                metadata: serde_json::Value::Null,
+            },
         ];
         assert_eq!(compute_symbol_hash(&s1), compute_symbol_hash(&s2));
     }
 
     #[test]
     fn test_symbol_hash_differs_on_name_change() {
-        let s1 = vec![
-            Symbol { name: "foo".into(), kind: SymbolKind::Function, start_line: 1, end_line: 1, metadata: serde_json::Value::Null },
-        ];
-        let s2 = vec![
-            Symbol { name: "bar".into(), kind: SymbolKind::Function, start_line: 1, end_line: 1, metadata: serde_json::Value::Null },
-        ];
+        let s1 = vec![Symbol {
+            name: "foo".into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 1,
+            metadata: serde_json::Value::Null,
+        }];
+        let s2 = vec![Symbol {
+            name: "bar".into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 1,
+            metadata: serde_json::Value::Null,
+        }];
         assert_ne!(compute_symbol_hash(&s1), compute_symbol_hash(&s2));
     }
 

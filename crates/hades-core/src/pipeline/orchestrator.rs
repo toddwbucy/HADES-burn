@@ -3,15 +3,15 @@
 use std::path::Path;
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::chunking::{ChunkingStrategy, TextChunk};
+use crate::db::ArangoPool;
 use crate::db::collections::CollectionProfile;
 use crate::db::crud;
 use crate::db::keys;
 use crate::db::query::{self, ExecutionTarget};
-use crate::db::ArangoPool;
 use crate::persephone::embedding::{EmbedResult, EmbeddingClient, EmbeddingError};
 use crate::persephone::extraction::{
     ExtractOptions, ExtractResult, ExtractionClient, ExtractionError,
@@ -152,7 +152,12 @@ impl Pipeline {
         match self.process_inner(file_path, &doc_key, chunker).await {
             Ok(chunk_count) => {
                 let duration = start.elapsed().as_millis() as u64;
-                info!(doc_key, chunk_count, duration_ms = duration, "document processed");
+                info!(
+                    doc_key,
+                    chunk_count,
+                    duration_ms = duration,
+                    "document processed"
+                );
                 DocumentResult {
                     doc_key,
                     success: true,
@@ -206,7 +211,12 @@ impl Pipeline {
             {
                 Ok(result) => {
                     let extraction_ms = extract_start.elapsed().as_millis() as u64;
-                    debug!(doc_key, text_len = result.full_text.len(), extraction_ms, "extracted");
+                    debug!(
+                        doc_key,
+                        text_len = result.full_text.len(),
+                        extraction_ms,
+                        "extracted"
+                    );
                     extractions.push(Some((doc_key, result, extraction_ms)));
                 }
                 Err(e) => {
@@ -313,7 +323,11 @@ impl Pipeline {
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         let embed_result = self
             .embedder
-            .embed(&texts, &self.config.embed_task, self.config.embed_batch_size)
+            .embed(
+                &texts,
+                &self.config.embed_task,
+                self.config.embed_batch_size,
+            )
             .await?;
 
         if embed_result.embeddings.len() != chunks.len() {
@@ -391,13 +405,9 @@ impl Pipeline {
             })
             .collect();
 
-        let chunk_res = crud::insert_documents(
-            &self.db,
-            profile.chunks,
-            &chunk_docs,
-            self.config.overwrite,
-        )
-        .await?;
+        let chunk_res =
+            crud::insert_documents(&self.db, profile.chunks, &chunk_docs, self.config.overwrite)
+                .await?;
         if chunk_res.errors > 0 {
             return Err(PipelineError::Other(format!(
                 "chunk import had {} errors (created {})",

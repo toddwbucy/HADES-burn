@@ -958,15 +958,20 @@ async fn check_unchanged(
             if stored_hash != new_hash {
                 return Ok(Some(false)); // code changed, must re-process
             }
-            // Code unchanged. Skip only if embeddings aren't needed or already present.
+            // Code unchanged. Skip only if embeddings aren't needed or already complete.
             if embedder_available {
                 // Files with no chunks have nothing to embed — always skip.
                 let chunk_count = doc["chunk_count"].as_u64().unwrap_or(0);
                 if chunk_count == 0 {
                     return Ok(Some(true));
                 }
-                let has_embeddings = doc["embedding_count"].as_u64().is_some_and(|n| n > 0);
-                Ok(Some(has_embeddings)) // skip only if embeddings exist
+                // Skip only if every chunk has an embedding. A partial-success
+                // state (e.g. from a prior ingest that hit embedder OOM on some
+                // batches) must NOT be treated as "done" — the missing chunks
+                // need backfill on this run. Previously this checked only
+                // `embedding_count > 0`, which left partial-success files stuck.
+                let embedding_count = doc["embedding_count"].as_u64().unwrap_or(0);
+                Ok(Some(embedding_count >= chunk_count))
             } else {
                 Ok(Some(true)) // no embedder → nothing to backfill → skip
             }

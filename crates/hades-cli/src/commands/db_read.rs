@@ -123,17 +123,19 @@ pub async fn run_aql(
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let bind_value = match bind {
         Some(s) => {
-            let v: serde_json::Value =
-                serde_json::from_str(s).context("invalid --bind JSON")?;
+            let v: serde_json::Value = serde_json::from_str(s).context("invalid --bind JSON")?;
             if !v.is_object() {
-                anyhow::bail!("invalid --bind: must be a JSON object, got {}", match &v {
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::Bool(_) => "bool",
-                    serde_json::Value::Null => "null",
-                    _ => "non-object",
-                });
+                anyhow::bail!(
+                    "invalid --bind: must be a JSON object, got {}",
+                    match &v {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "bool",
+                        serde_json::Value::Null => "null",
+                        _ => "non-object",
+                    }
+                );
             }
             Some(v)
         }
@@ -223,7 +225,11 @@ pub async fn run_export(
 
     // Cursor creation — route through writer when reader != writer,
     // because cursor state endpoints require the read-write socket.
-    let initial_client = if pool.is_shared() { pool.reader() } else { pool.writer() };
+    let initial_client = if pool.is_shared() {
+        pool.reader()
+    } else {
+        pool.writer()
+    };
     let resp = initial_client
         .post("cursor", &body)
         .await

@@ -680,9 +680,7 @@ pub enum DaemonCommand {
 
     // ── Embeddings ──────────────────────────────────────────────────
     #[serde(rename = "embed.text")]
-    EmbedText {
-        text: String,
-    },
+    EmbedText { text: String },
 
     #[serde(rename = "graph_embed.embed")]
     GraphEmbedEmbed(GraphEmbedEmbedParams),
@@ -902,12 +900,24 @@ impl DaemonCommand {
 }
 
 // Serde defaults
-fn default_direction() -> String { "outbound".to_string() }
-fn default_direction_any() -> String { "any".to_string() }
-fn default_one() -> u32 { 1 }
-fn default_task_type() -> String { "task".to_string() }
-fn default_priority() -> String { "medium".to_string() }
-fn default_metric() -> String { "cosine".to_string() }
+fn default_direction() -> String {
+    "outbound".to_string()
+}
+fn default_direction_any() -> String {
+    "any".to_string()
+}
+fn default_one() -> u32 {
+    1
+}
+fn default_task_type() -> String {
+    "task".to_string()
+}
+fn default_priority() -> String {
+    "medium".to_string()
+}
+fn default_metric() -> String {
+    "cosine".to_string()
+}
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -944,26 +954,18 @@ pub async fn dispatch(
         }
 
         // ── Database read commands ─────────────────────────────────────
-        DaemonCommand::DbGet(params) => {
-            handlers::db_get(pool, &params.collection, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbCount(params) => {
-            handlers::db_count(pool, &params.collection)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbCollections {} => {
-            handlers::db_collections(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbCheck(params) => {
-            handlers::db_check(pool, &params.document_id)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbGet(params) => handlers::db_get(pool, &params.collection, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbCount(params) => handlers::db_count(pool, &params.collection)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbCollections {} => handlers::db_collections(pool)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbCheck(params) => handlers::db_check(pool, &params.document_id)
+            .await
+            .map_err(DispatchError::Handler),
         DaemonCommand::DbRecent(params) => {
             let limit = params.limit.unwrap_or(10).min(MAX_LIMIT);
             handlers::db_recent(pool, limit)
@@ -972,9 +974,14 @@ pub async fn dispatch(
         }
         DaemonCommand::DbList(params) => {
             let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
-            handlers::db_list(pool, params.collection.as_deref(), limit, params.paper.as_deref())
-                .await
-                .map_err(DispatchError::Handler)
+            handlers::db_list(
+                pool,
+                params.collection.as_deref(),
+                limit,
+                params.paper.as_deref(),
+            )
+            .await
+            .map_err(DispatchError::Handler)
         }
         DaemonCommand::DbAql(params) => {
             let limit = params.limit.map(|l| l.min(MAX_LIMIT));
@@ -982,16 +989,12 @@ pub async fn dispatch(
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbHealth(params) => {
-            handlers::db_health(pool, params.verbose)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbStats {} => {
-            handlers::db_stats(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbHealth(params) => handlers::db_health(pool, params.verbose)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbStats {} => handlers::db_stats(pool)
+            .await
+            .map_err(DispatchError::Handler),
 
         // ── Database write commands ───────────��───────────────────────
         DaemonCommand::DbInsert(params) => {
@@ -1009,29 +1012,18 @@ pub async fn dispatch(
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbPurge(params) => {
-            handlers::db_purge(pool, &params.document_id)
+        DaemonCommand::DbPurge(params) => handlers::db_purge(pool, &params.document_id)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbCreateCollection(params) => {
+            handlers::db_create_collection(pool, &params.name, params.collection_type.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbCreateCollection(params) => {
-            handlers::db_create_collection(
-                pool,
-                &params.name,
-                params.collection_type.as_deref(),
-            )
-            .await
-            .map_err(DispatchError::Handler)
-        }
         DaemonCommand::DbCreateIndex(params) => {
-            handlers::db_create_index(
-                pool,
-                &params.collection,
-                params.dimension,
-                &params.metric,
-            )
-            .await
-            .map_err(DispatchError::Handler)
+            handlers::db_create_index(pool, &params.collection, params.dimension, &params.metric)
+                .await
+                .map_err(DispatchError::Handler)
         }
 
         // ── Graph read commands ────────────────────────────────────────
@@ -1049,17 +1041,15 @@ pub async fn dispatch(
             .await
             .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbGraphShortestPath(params) => {
-            handlers::db_graph_shortest_path(
-                pool,
-                &params.source,
-                &params.target,
-                &params.direction,
-                params.graph.as_deref(),
-            )
-            .await
-            .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbGraphShortestPath(params) => handlers::db_graph_shortest_path(
+            pool,
+            &params.source,
+            &params.target,
+            &params.direction,
+            params.graph.as_deref(),
+        )
+        .await
+        .map_err(DispatchError::Handler),
         DaemonCommand::DbGraphNeighbors(params) => {
             let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
             handlers::db_graph_neighbors(
@@ -1072,11 +1062,9 @@ pub async fn dispatch(
             .await
             .map_err(DispatchError::Handler)
         }
-        DaemonCommand::DbGraphList {} => {
-            handlers::db_graph_list(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbGraphList {} => handlers::db_graph_list(pool)
+            .await
+            .map_err(DispatchError::Handler),
 
         // ── Graph write commands ──────────────────────────────────────
         DaemonCommand::DbGraphCreate(params) => {
@@ -1096,78 +1084,67 @@ pub async fn dispatch(
                 .map_err(DispatchError::Handler)
         }
 
-        DaemonCommand::DbGraphMaterialize(params) => {
-            handlers::graph_materialize(pool, params.edge.as_deref(), params.dry_run, params.register)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbGraphMaterialize(params) => handlers::graph_materialize(
+            pool,
+            params.edge.as_deref(),
+            params.dry_run,
+            params.register,
+        )
+        .await
+        .map_err(DispatchError::Handler),
 
         // ── Schema management ───────────────────────────────────────
-        DaemonCommand::DbSchemaInit(params) => {
-            handlers::schema_init(pool, &params.seed)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbSchemaList {} => {
-            handlers::schema_list(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbSchemaShow(params) => {
-            handlers::schema_show(pool, &params.name)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::DbSchemaVersion {} => {
-            handlers::schema_version(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::DbSchemaInit(params) => handlers::schema_init(pool, &params.seed)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbSchemaList {} => handlers::schema_list(pool)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbSchemaShow(params) => handlers::schema_show(pool, &params.name)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::DbSchemaVersion {} => handlers::schema_version(pool)
+            .await
+            .map_err(DispatchError::Handler),
 
         // ── System commands ─────────────────────────────────────────
-        DaemonCommand::Status(params) => {
-            handlers::status(pool, config, params.verbose)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::Orient(params) => {
-            handlers::orient(pool, params.collection.as_deref())
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::Status(params) => handlers::status(pool, config, params.verbose)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::Orient(params) => handlers::orient(pool, params.collection.as_deref())
+            .await
+            .map_err(DispatchError::Handler),
 
         // ── Task commands ───────────────────────────────────────────
         DaemonCommand::TaskList(params) => {
             let limit = params.limit.unwrap_or(50).min(MAX_LIMIT);
-            handlers::task_list(pool, params.status.as_deref(), params.task_type.as_deref(), params.parent.as_deref(), limit)
-                .await
-                .map_err(DispatchError::Handler)
+            handlers::task_list(
+                pool,
+                params.status.as_deref(),
+                params.task_type.as_deref(),
+                params.parent.as_deref(),
+                limit,
+            )
+            .await
+            .map_err(DispatchError::Handler)
         }
-        DaemonCommand::TaskShow(params) => {
-            handlers::task_show(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskCreate(params) => {
-            handlers::task_create(pool, &params)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskUpdate(params) => {
-            handlers::task_update(pool, &params)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::TaskShow(params) => handlers::task_show(pool, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::TaskCreate(params) => handlers::task_create(pool, &params)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::TaskUpdate(params) => handlers::task_update(pool, &params)
+            .await
+            .map_err(DispatchError::Handler),
         DaemonCommand::TaskClose(params) => {
             handlers::task_close(pool, &params.key, params.message.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::TaskStart(params) => {
-            handlers::task_start(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::TaskStart(params) => handlers::task_start(pool, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
         DaemonCommand::TaskReview(params) => {
             handlers::task_review(pool, &params.key, params.message.as_deref())
                 .await
@@ -1178,70 +1155,55 @@ pub async fn dispatch(
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::TaskBlock(params) => {
-            handlers::task_block(pool, &params.key, params.message.as_deref(), params.blocker.as_deref())
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskUnblock(params) => {
-            handlers::task_unblock(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::TaskBlock(params) => handlers::task_block(
+            pool,
+            &params.key,
+            params.message.as_deref(),
+            params.blocker.as_deref(),
+        )
+        .await
+        .map_err(DispatchError::Handler),
+        DaemonCommand::TaskUnblock(params) => handlers::task_unblock(pool, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
         DaemonCommand::TaskHandoff(params) => {
             handlers::task_handoff(pool, &params.key, params.message.as_deref())
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::TaskHandoffShow(params) => {
-            handlers::task_handoff_show(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskContext(params) => {
-            handlers::task_context(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::TaskHandoffShow(params) => handlers::task_handoff_show(pool, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::TaskContext(params) => handlers::task_context(pool, &params.key)
+            .await
+            .map_err(DispatchError::Handler),
         DaemonCommand::TaskLog(params) => {
             let limit = params.limit.unwrap_or(20).min(MAX_LIMIT);
             handlers::task_log(pool, &params.key, limit)
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::TaskSessions(params) => {
-            handlers::task_sessions(pool, &params.key)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskDep(params) => {
-            if params.add.is_some() || params.remove.is_some() {
-                }
-            handlers::task_dep(
-                pool,
-                &params.key,
-                params.add.as_deref(),
-                params.remove.as_deref(),
-                params.graph,
-            )
+        DaemonCommand::TaskSessions(params) => handlers::task_sessions(pool, &params.key)
             .await
-            .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskUsage(_) => {
-            handlers::task_usage(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::TaskGraphIntegration(_) => {
-            Ok(handlers::task_graph_integration())
-        }
+            .map_err(DispatchError::Handler),
+        DaemonCommand::TaskDep(params) => handlers::task_dep(
+            pool,
+            &params.key,
+            params.add.as_deref(),
+            params.remove.as_deref(),
+            params.graph,
+        )
+        .await
+        .map_err(DispatchError::Handler),
+        DaemonCommand::TaskUsage(_) => handlers::task_usage(pool)
+            .await
+            .map_err(DispatchError::Handler),
+        DaemonCommand::TaskGraphIntegration(_) => Ok(handlers::task_graph_integration()),
 
         // ── Embedding ─────────────────────────────────────────────────
-        DaemonCommand::EmbedText { text } => {
-            handlers::embed_text(config, &text)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::EmbedText { text } => handlers::embed_text(config, &text)
+            .await
+            .map_err(DispatchError::Handler),
 
         // ── Smell & Compliance ────────────────────────────────────────
         DaemonCommand::SmellCheck(params) => {
@@ -1254,30 +1216,24 @@ pub async fn dispatch(
                 .await
                 .map_err(DispatchError::Handler)
         }
-        DaemonCommand::SmellReport(params) => {
-            handlers::smell_report(pool, config, &params.path)
-                .await
-                .map_err(DispatchError::Handler)
-        }
-        DaemonCommand::LinkCodeSmell(params) => {
-            handlers::link_code_smell(
-                pool,
-                &params.source_id,
-                &params.smell_id,
-                &params.enforcement,
-                &params.methods,
-                params.summary.as_deref(),
-            )
+        DaemonCommand::SmellReport(params) => handlers::smell_report(pool, config, &params.path)
             .await
-            .map_err(DispatchError::Handler)
-        }
+            .map_err(DispatchError::Handler),
+        DaemonCommand::LinkCodeSmell(params) => handlers::link_code_smell(
+            pool,
+            &params.source_id,
+            &params.smell_id,
+            &params.enforcement,
+            &params.methods,
+            params.summary.as_deref(),
+        )
+        .await
+        .map_err(DispatchError::Handler),
 
         // ── Codebase ─────────────────────────────────────────────────
-        DaemonCommand::CodebaseStats(_) => {
-            handlers::codebase_stats(pool)
-                .await
-                .map_err(DispatchError::Handler)
-        }
+        DaemonCommand::CodebaseStats(_) => handlers::codebase_stats(pool)
+            .await
+            .map_err(DispatchError::Handler),
 
         // All other commands are not yet implemented natively.
         // The daemon (P6.3) will fall back to Python subprocess.
@@ -1295,14 +1251,14 @@ pub async fn dispatch(
 // ---------------------------------------------------------------------------
 
 mod handlers {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::HandlerError;
+    use crate::db::ArangoPool;
     use crate::db::collections::CollectionProfile;
-    use crate::db::crud::{self, list_collections, count_collection, CollectionInfo};
+    use crate::db::crud::{self, CollectionInfo, count_collection, list_collections};
     use crate::db::index;
     use crate::db::query::{self, ExecutionTarget};
-    use crate::db::ArangoPool;
 
     // ── Database read handlers ──────────────────────────────────────
 
@@ -1330,10 +1286,7 @@ mod handlers {
     }
 
     /// Count documents in a collection.
-    pub async fn db_count(
-        pool: &ArangoPool,
-        collection: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_count(pool: &ArangoPool, collection: &str) -> Result<Value, HandlerError> {
         let count = count_collection(pool, collection)
             .await
             .map_err(|e| HandlerError::Query {
@@ -1344,9 +1297,7 @@ mod handlers {
     }
 
     /// List all non-system collections with document counts.
-    pub async fn db_collections(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_collections(pool: &ArangoPool) -> Result<Value, HandlerError> {
         let collections = list_collections(pool, true)
             .await
             .map_err(|e| HandlerError::Query {
@@ -1366,7 +1317,11 @@ mod handlers {
                     });
                 }
             };
-            let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+            let type_name = if col.collection_type == 3 {
+                "edge"
+            } else {
+                "document"
+            };
             entries.push(json!({
                 "name": col.name,
                 "type": type_name,
@@ -1382,10 +1337,7 @@ mod handlers {
     }
 
     /// Check if a document exists by its full _id (collection/key).
-    pub async fn db_check(
-        pool: &ArangoPool,
-        document_id: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_check(pool: &ArangoPool, document_id: &str) -> Result<Value, HandlerError> {
         let (col, key) = parse_node_id(document_id)?;
         let exists = match crud::get_document(pool, col, key).await {
             Ok(_) => true,
@@ -1394,17 +1346,14 @@ mod handlers {
                 return Err(HandlerError::Query {
                     context: format!("failed to check {document_id}"),
                     source: e,
-                })
+                });
             }
         };
         Ok(json!({ "document_id": document_id, "exists": exists }))
     }
 
     /// Return recently created/updated documents across collection profiles.
-    pub async fn db_recent(
-        pool: &ArangoPool,
-        limit: u32,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_recent(pool: &ArangoPool, limit: u32) -> Result<Value, HandlerError> {
         let profile = CollectionProfile::default_profile();
         let aql = "FOR d IN @@col \
                     SORT d.created_at DESC, d._rev DESC \
@@ -1417,15 +1366,8 @@ mod handlers {
             "limit": limit,
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await;
+        let result =
+            query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader).await;
 
         let result = match result {
             Ok(r) => r,
@@ -1460,8 +1402,8 @@ mod handlers {
         paper: Option<&str>,
     ) -> Result<Value, HandlerError> {
         let profile = match collection {
-            Some(name) => CollectionProfile::get(name).ok_or_else(|| {
-                HandlerError::InvalidParameter {
+            Some(name) => {
+                CollectionProfile::get(name).ok_or_else(|| HandlerError::InvalidParameter {
                     name: "collection".into(),
                     reason: format!(
                         "unknown profile '{name}' — valid profiles: {}",
@@ -1471,8 +1413,8 @@ mod handlers {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
-                }
-            })?,
+                })?
+            }
             None => CollectionProfile::default_profile(),
         };
 
@@ -1500,15 +1442,8 @@ mod handlers {
             )
         };
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            true,
-            ExecutionTarget::Reader,
-        )
-        .await;
+        let result =
+            query::query(pool, aql, Some(&bind), None, true, ExecutionTarget::Reader).await;
 
         // Return empty list if the collection doesn't exist in this database.
         let result = match result {
@@ -1587,19 +1522,12 @@ mod handlers {
             aql.to_string()
         };
 
-        let result = query::query(
-            pool,
-            &full_aql,
-            bind,
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: "AQL execution failed".into(),
-            source: e,
-        })?;
+        let result = query::query(pool, &full_aql, bind, None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "AQL execution failed".into(),
+                source: e,
+            })?;
 
         Ok(json!({
             "results": result.results,
@@ -1608,10 +1536,7 @@ mod handlers {
     }
 
     /// Health check — ArangoDB connectivity + optional integrity checks.
-    pub async fn db_health(
-        pool: &ArangoPool,
-        verbose: bool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_health(pool: &ArangoPool, verbose: bool) -> Result<Value, HandlerError> {
         let status = pool.health_check().await;
 
         let mut result = json!({
@@ -1627,12 +1552,13 @@ mod handlers {
 
         if verbose {
             // Add per-collection info for verbose mode.
-            let collections = list_collections(pool, true)
-                .await
-                .map_err(|e| HandlerError::Query {
-                    context: "failed to list collections for health check".into(),
-                    source: e,
-                })?;
+            let collections =
+                list_collections(pool, true)
+                    .await
+                    .map_err(|e| HandlerError::Query {
+                        context: "failed to list collections for health check".into(),
+                        source: e,
+                    })?;
             let mut col_details = Vec::new();
             for col in &collections {
                 let count = match count_collection(pool, &col.name).await {
@@ -1655,7 +1581,11 @@ mod handlers {
                         });
                     }
                 };
-                let type_name = if col.collection_type == 3 { "edge" } else { "document" };
+                let type_name = if col.collection_type == 3 {
+                    "edge"
+                } else {
+                    "document"
+                };
                 col_details.push(json!({
                     "name": col.name,
                     "type": type_name,
@@ -1671,9 +1601,7 @@ mod handlers {
     }
 
     /// Aggregate statistics across all collection profiles.
-    pub async fn db_stats(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_stats(pool: &ArangoPool) -> Result<Value, HandlerError> {
         let mut profiles_data = Vec::new();
         let mut total_docs: u64 = 0;
         let mut total_chunks: u64 = 0;
@@ -1802,10 +1730,7 @@ mod handlers {
     }
 
     /// Cascade-delete a document and its related chunks/embeddings.
-    pub async fn db_purge(
-        pool: &ArangoPool,
-        document_id: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_purge(pool: &ArangoPool, document_id: &str) -> Result<Value, HandlerError> {
         let (col, key) = parse_node_id(document_id)?;
 
         let profile = CollectionProfile::find_by_metadata(col).ok_or_else(|| {
@@ -1838,17 +1763,12 @@ mod handlers {
             "key": key,
         });
 
-        let result = query::query_single(
-            pool,
-            &aql,
-            Some(&bind),
-            ExecutionTarget::Writer,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("purge AQL failed for '{document_id}'"),
-            source: e,
-        })?;
+        let result = query::query_single(pool, &aql, Some(&bind), ExecutionTarget::Writer)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("purge AQL failed for '{document_id}'"),
+                source: e,
+            })?;
 
         let counts = result.unwrap_or(json!({"metadata": 0, "chunks": 0, "embeddings": 0}));
         let total = counts["metadata"].as_u64().unwrap_or(0)
@@ -1967,13 +1887,12 @@ mod handlers {
                 node_id: node_id.to_string(),
             })?;
 
-        let embed_dim = embedding
-            .as_array()
-            .map(|a| a.len())
-            .ok_or_else(|| HandlerError::InvalidEmbedding {
+        let embed_dim = embedding.as_array().map(|a| a.len()).ok_or_else(|| {
+            HandlerError::InvalidEmbedding {
                 node_id: node_id.to_string(),
                 reason: "not an array".into(),
-            })?;
+            }
+        })?;
 
         if embed_dim == 0 {
             return Err(HandlerError::InvalidEmbedding {
@@ -2026,13 +1945,12 @@ mod handlers {
             });
         }
 
-        let embed_dim = emb_value
-            .as_array()
-            .map(|a| a.len())
-            .ok_or_else(|| HandlerError::InvalidEmbedding {
+        let embed_dim = emb_value.as_array().map(|a| a.len()).ok_or_else(|| {
+            HandlerError::InvalidEmbedding {
                 node_id: node_id.to_string(),
                 reason: "not an array".into(),
-            })?;
+            }
+        })?;
 
         if embed_dim == 0 {
             return Err(HandlerError::InvalidEmbedding {
@@ -2055,8 +1973,7 @@ mod handlers {
         // Search each collection — fail fast on first error.
         let mut all_neighbors: Vec<serde_json::Value> = Vec::new();
 
-        let search_aql =
-            "LET te = @target_emb \
+        let search_aql = "LET te = @target_emb \
              FOR d IN @@col \
                FILTER d.structural_embedding != null \
                FILTER LENGTH(d.structural_embedding) == @dim \
@@ -2092,10 +2009,7 @@ mod handlers {
             )
             .await
             .map_err(|e| HandlerError::Query {
-                context: format!(
-                    "neighbor search failed on collection '{}'",
-                    col_info.name,
-                ),
+                context: format!("neighbor search failed on collection '{}'", col_info.name,),
                 source: e,
             })?;
 
@@ -2261,9 +2175,7 @@ mod handlers {
             "any" => Ok("ANY"),
             other => Err(HandlerError::InvalidParameter {
                 name: "direction".into(),
-                reason: format!(
-                    "must be 'outbound', 'inbound', or 'any', got '{other}'"
-                ),
+                reason: format!("must be 'outbound', 'inbound', or 'any', got '{other}'"),
             }),
         }
     }
@@ -2293,9 +2205,7 @@ mod handlers {
         if min_depth > MAX_TRAVERSAL_DEPTH {
             return Err(HandlerError::InvalidParameter {
                 name: "min_depth".into(),
-                reason: format!(
-                    "min_depth ({min_depth}) exceeds maximum ({MAX_TRAVERSAL_DEPTH})"
-                ),
+                reason: format!("min_depth ({min_depth}) exceeds maximum ({MAX_TRAVERSAL_DEPTH})"),
             });
         }
         let max_depth = max_depth.min(MAX_TRAVERSAL_DEPTH);
@@ -2303,9 +2213,7 @@ mod handlers {
         if max_depth < min_depth {
             return Err(HandlerError::InvalidParameter {
                 name: "max_depth".into(),
-                reason: format!(
-                    "max_depth ({max_depth}) must be >= min_depth ({min_depth})"
-                ),
+                reason: format!("max_depth ({max_depth}) must be >= min_depth ({min_depth})"),
             });
         }
 
@@ -2405,10 +2313,8 @@ mod handlers {
         limit: u32,
         graph: Option<&str>,
     ) -> Result<Value, HandlerError> {
-        let traverse_result = db_graph_traverse(
-            pool, vertex, direction, 1, 1, limit, graph,
-        )
-        .await?;
+        let traverse_result =
+            db_graph_traverse(pool, vertex, direction, 1, 1, limit, graph).await?;
 
         Ok(json!({
             "results": traverse_result["results"],
@@ -2418,9 +2324,7 @@ mod handlers {
     }
 
     /// List all named graphs via the Gharial API.
-    pub async fn db_graph_list(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn db_graph_list(pool: &ArangoPool) -> Result<Value, HandlerError> {
         let resp = pool
             .reader()
             .get("gharial")
@@ -2555,15 +2459,17 @@ mod handlers {
         dry_run: bool,
         register: bool,
     ) -> Result<Value, HandlerError> {
-        use std::collections::HashSet;
         use crate::db::crud;
         use crate::graph::runtime_schema::RuntimeSchema;
+        use std::collections::HashSet;
 
         // 1. Load schema from hades_schema.
-        let schema = RuntimeSchema::load(pool).await.map_err(|e| HandlerError::Query {
-            context: "load runtime schema for materialization".into(),
-            source: crate::db::ArangoError::Request(e.to_string()),
-        })?;
+        let schema = RuntimeSchema::load(pool)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "load runtime schema for materialization".into(),
+                source: crate::db::ArangoError::Request(e.to_string()),
+            })?;
 
         // 2. Fetch existing collections once.
         let existing: HashSet<String> = crud::list_collections(pool, true)
@@ -2637,9 +2543,17 @@ mod handlers {
                     && let Err(e) = crud::create_collection(pool, &edef.name, Some(3)).await
                 {
                     // 1207 = duplicate name (created concurrently) — not an error.
-                    let is_dup = matches!(&e, crate::db::ArangoError::Api { error_num: 1207, .. });
+                    let is_dup = matches!(
+                        &e,
+                        crate::db::ArangoError::Api {
+                            error_num: 1207,
+                            ..
+                        }
+                    );
                     if !is_dup {
-                        stats.errors.push(format!("create collection {}: {e}", edef.name));
+                        stats
+                            .errors
+                            .push(format!("create collection {}: {e}", edef.name));
                     }
                 }
 
@@ -2651,7 +2565,9 @@ mod handlers {
                             if result.errors > 0 {
                                 stats.errors.push(format!(
                                     "import {}: {} of {} documents failed",
-                                    edef.name, result.errors, chunk.len()
+                                    edef.name,
+                                    result.errors,
+                                    chunk.len()
                                 ));
                             }
                         }
@@ -2694,7 +2610,13 @@ mod handlers {
                         Ok(_) => graphs_registered.push(ng.name.clone()),
                         Err(e) => {
                             // 1925 = graph already exists.
-                            let is_exists = matches!(&e, crate::db::ArangoError::Api { error_num: 1925, .. });
+                            let is_exists = matches!(
+                                &e,
+                                crate::db::ArangoError::Api {
+                                    error_num: 1925,
+                                    ..
+                                }
+                            );
                             if is_exists {
                                 graphs_registered.push(ng.name.clone());
                             } else {
@@ -2748,11 +2670,7 @@ mod handlers {
 
     /// Build an edge `_key` from `_from` and `_to` IDs.
     fn edge_key(from_id: &str, to_id: &str) -> String {
-        format!(
-            "{}__{}",
-            from_id.replace('/', "_"),
-            to_id.replace('/', "_"),
-        )
+        format!("{}__{}", from_id.replace('/', "_"), to_id.replace('/', "_"),)
     }
 
     /// Strategy A: Standard references (single or array field).
@@ -2782,7 +2700,8 @@ mod handlers {
 
             // Scan for documents with the source field set.
             // Include edge_attributes in the projection so they can be copied onto edges.
-            let attr_fields: String = edef.edge_attributes
+            let attr_fields: String = edef
+                .edge_attributes
                 .iter()
                 .map(|a| format!(", `{a}`: d.`{a}`"))
                 .collect();
@@ -2790,13 +2709,14 @@ mod handlers {
                 "FOR d IN `{from_coll}` FILTER d.`{field}` != null RETURN {{ _id: d._id, _key: d._key, ref: d.`{field}`{attr_fields} }}"
             );
 
-            let docs = match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
-                Ok(r) => r.results,
-                Err(e) => {
-                    stats.errors.push(format!("{from_coll}: {e}"));
-                    continue;
-                }
-            };
+            let docs =
+                match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
+                    Ok(r) => r.results,
+                    Err(e) => {
+                        stats.errors.push(format!("{from_coll}: {e}"));
+                        continue;
+                    }
+                };
 
             for doc in &docs {
                 let from_id = match doc["_id"].as_str() {
@@ -2822,8 +2742,9 @@ mod handlers {
                 for to_id in refs {
                     // Validate target collection exists and is declared in schema.
                     match to_id.split('/').next() {
-                        Some(c) if existing.contains(c)
-                            && edef.to_collections.iter().any(|tc| tc == c) => {}
+                        Some(c)
+                            if existing.contains(c)
+                                && edef.to_collections.iter().any(|tc| tc == c) => {}
                         _ => {
                             stats.edges_skipped += 1;
                             continue;
@@ -2874,22 +2795,20 @@ mod handlers {
             stats.collections_scanned += 1;
 
             // Build RETURN clause with edge_attributes.
-            let attr_fields: String = attrs
-                .iter()
-                .map(|a| format!(", {a}: d.`{a}`"))
-                .collect();
+            let attr_fields: String = attrs.iter().map(|a| format!(", {a}: d.`{a}`")).collect();
             let aql = format!(
                 "FOR d IN `{from_coll}` FILTER d.chain != null AND LENGTH(d.chain) >= 1 \
                  RETURN {{ _id: d._id, _key: d._key, chain: d.chain{attr_fields} }}"
             );
 
-            let docs = match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
-                Ok(r) => r.results,
-                Err(e) => {
-                    stats.errors.push(format!("{from_coll}: {e}"));
-                    continue;
-                }
-            };
+            let docs =
+                match query::query(pool, &aql, None, None, false, ExecutionTarget::Reader).await {
+                    Ok(r) => r.results,
+                    Err(e) => {
+                        stats.errors.push(format!("{from_coll}: {e}"));
+                        continue;
+                    }
+                };
 
             for doc in &docs {
                 let lineage_id = match doc["_id"].as_str() {
@@ -2908,8 +2827,9 @@ mod handlers {
                 // Validates each member's collection exists and is in edef.to_collections.
                 for (i, &member) in chain.iter().enumerate() {
                     match member.split('/').next() {
-                        Some(c) if existing.contains(c)
-                            && edef.to_collections.iter().any(|tc| tc == c) => {}
+                        Some(c)
+                            if existing.contains(c)
+                                && edef.to_collections.iter().any(|tc| tc == c) => {}
                         _ => {
                             stats.edges_skipped += 1;
                             continue;
@@ -2969,17 +2889,31 @@ mod handlers {
             // Validate document handles (reject empty parts, multi-slash).
             let from_node = match doc["from_node"].as_str().and_then(|s| {
                 let (col, key) = s.split_once('/')?;
-                if col.is_empty() || key.is_empty() || key.contains('/') { None } else { Some((s, col)) }
+                if col.is_empty() || key.is_empty() || key.contains('/') {
+                    None
+                } else {
+                    Some((s, col))
+                }
             }) {
                 Some((s, _)) => s,
-                None => { stats.edges_skipped += 1; continue; }
+                None => {
+                    stats.edges_skipped += 1;
+                    continue;
+                }
             };
             let to_node = match doc["to_node"].as_str().and_then(|s| {
                 let (col, key) = s.split_once('/')?;
-                if col.is_empty() || key.is_empty() || key.contains('/') { None } else { Some((s, col)) }
+                if col.is_empty() || key.is_empty() || key.contains('/') {
+                    None
+                } else {
+                    Some((s, col))
+                }
             }) {
                 Some((s, _)) => s,
-                None => { stats.edges_skipped += 1; continue; }
+                None => {
+                    stats.edges_skipped += 1;
+                    continue;
+                }
             };
 
             // Validate collections exist and are declared in the schema.
@@ -3038,21 +2972,22 @@ mod handlers {
             "degraded"
         };
 
-        // 2. Embedder probe — connect + info(), with 5-second timeout
-        let socket_path = &config.embedding.service.socket;
+        // 2. Embedder probe — connect + info(), with 5-second timeout.
+        // The endpoint string may be an HTTP URL (typical: http://localhost:8087/v1)
+        // or a Unix socket path; EmbeddingClient::connect_at auto-detects transport
+        // from the prefix. The config field and JSON output key are still named
+        // `socket` for backwards compatibility with the pre-PR-#70 wire shape.
+        let endpoint = &config.embedding.service.socket;
         let embedder_info = {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                async {
-                    let client = EmbeddingClient::connect_at(socket_path).await?;
-                    client.info().await
-                },
-            )
+            match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let client = EmbeddingClient::connect_at(endpoint).await?;
+                client.info().await
+            })
             .await
             {
                 Ok(Ok(info)) => json!({
                     "status": "running",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "model_name": info.model_name,
                     "dimension": info.dimension,
                     "device": info.device,
@@ -3060,12 +2995,12 @@ mod handlers {
                 }),
                 Ok(Err(e)) => json!({
                     "status": "unavailable",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "error": e.to_string(),
                 }),
                 Err(_) => json!({
                     "status": "unavailable",
-                    "socket": socket_path,
+                    "socket": endpoint,
                     "error": "connection timed out (5s)",
                 }),
             }
@@ -3076,7 +3011,7 @@ mod handlers {
             "database": config.effective_database().ok(),
             "arango_socket_ro": config.effective_socket(true),
             "arango_socket_rw": config.effective_socket(false),
-            "embedder_socket": socket_path,
+            "embedder_socket": endpoint,
         });
 
         let mut result = json!({
@@ -3219,10 +3154,7 @@ mod handlers {
     }
 
     /// Single-collection detail: count, schema sample, recent docs, indexes.
-    async fn orient_collection(
-        pool: &ArangoPool,
-        collection: &str,
-    ) -> Result<Value, HandlerError> {
+    async fn orient_collection(pool: &ArangoPool, collection: &str) -> Result<Value, HandlerError> {
         let count = match count_collection(pool, collection).await {
             Ok(n) => n,
             Err(e) if e.is_not_found() => 0,
@@ -3265,10 +3197,12 @@ mod handlers {
             .unwrap_or_default();
         let index_info: Vec<Value> = indexes
             .into_iter()
-            .map(|idx| json!({
-                "type": idx.index_type,
-                "fields": idx.fields,
-            }))
+            .map(|idx| {
+                json!({
+                    "type": idx.index_type,
+                    "fields": idx.fields,
+                })
+            })
             .collect();
 
         Ok(json!({
@@ -3371,10 +3305,7 @@ mod handlers {
     }
 
     /// Get a single task by key.
-    pub async fn task_show(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_show(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         crud::get_document(pool, TASK_COLLECTION, key)
             .await
             .map_err(|e| {
@@ -3607,10 +3538,7 @@ mod handlers {
     }
 
     /// Start a task (transition to in_progress).
-    pub async fn task_start(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_start(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         let existing = crud::get_document(pool, TASK_COLLECTION, key)
             .await
             .map_err(|e| {
@@ -3699,7 +3627,12 @@ mod handlers {
     }
 
     /// Best-effort activity log: insert into persephone_logs, ignoring errors.
-    async fn log_activity(pool: &ArangoPool, action: &str, task_key: &str, details: Option<&Value>) {
+    async fn log_activity(
+        pool: &ArangoPool,
+        action: &str,
+        task_key: &str,
+        details: Option<&Value>,
+    ) {
         use rand::Rng;
         let key = format!("log_{:06x}", rand::rng().random::<u32>() & 0xFFFFFF);
         let now = chrono::Utc::now().to_rfc3339();
@@ -3883,10 +3816,7 @@ mod handlers {
     }
 
     /// Unblock a task (blocked → in_progress).
-    pub async fn task_unblock(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_unblock(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         let extra = json!({ "block_reason": null });
         let updated = transition_task(pool, key, "in_progress", Some(&extra)).await?;
         Ok(json!({ "task": updated }))
@@ -3911,7 +3841,8 @@ mod handlers {
         // Require at least one content field (note via --message).
         let note = message.ok_or_else(|| HandlerError::InvalidParameter {
             name: "message".into(),
-            reason: "a --message is required for handoff (at least one content field needed)".into(),
+            reason: "a --message is required for handoff (at least one content field needed)"
+                .into(),
         })?;
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -3949,7 +3880,9 @@ mod handlers {
 
                     if let Err(e) = crud::insert_document(pool, EDGE_COLLECTION, &edge).await {
                         // Clean up the orphaned handoff document.
-                        if let Err(del_err) = crud::delete_document(pool, HANDOFF_COLLECTION, &handoff_key).await {
+                        if let Err(del_err) =
+                            crud::delete_document(pool, HANDOFF_COLLECTION, &handoff_key).await
+                        {
                             tracing::warn!(
                                 handoff_key = %handoff_key,
                                 "failed to clean up orphaned handoff after edge insert failure: {del_err}"
@@ -3991,10 +3924,7 @@ mod handlers {
     }
 
     /// Show the latest handoff for a task.
-    pub async fn task_handoff_show(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_handoff_show(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         let aql = "\
             FOR e IN @@edges \
                 FILTER e._to == @task_id \
@@ -4011,19 +3941,12 @@ mod handlers {
             "task_id": format!("{TASK_COLLECTION}/{key}"),
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("failed to query handoffs for task '{key}'"),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to query handoffs for task '{key}'"),
+                source: e,
+            })?;
 
         let handoff = result.results.into_iter().next().unwrap_or(Value::Null);
         Ok(json!({ "handoff": handoff }))
@@ -4032,10 +3955,7 @@ mod handlers {
     // ── Query/meta handlers ────────────────────────────────────────
 
     /// Rich context dump for a task: task + handoff + sessions + deps + logs.
-    pub async fn task_context(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_context(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         let aql = "\
             LET task = DOCUMENT(@@tasks, @key) \
             LET latest_handoff = FIRST( \
@@ -4087,19 +4007,12 @@ mod handlers {
             "key": key,
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("failed to query context for task '{key}'"),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to query context for task '{key}'"),
+                source: e,
+            })?;
 
         let ctx = result.results.into_iter().next().unwrap_or(Value::Null);
 
@@ -4115,11 +4028,7 @@ mod handlers {
     }
 
     /// Activity log entries for a task.
-    pub async fn task_log(
-        pool: &ArangoPool,
-        key: &str,
-        limit: u32,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_log(pool: &ArangoPool, key: &str, limit: u32) -> Result<Value, HandlerError> {
         let aql = "\
             FOR doc IN @@col \
                 FILTER doc.task_key == @key \
@@ -4133,19 +4042,12 @@ mod handlers {
             "limit": limit,
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("failed to query logs for task '{key}'"),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to query logs for task '{key}'"),
+                source: e,
+            })?;
 
         Ok(json!({
             "logs": result.results,
@@ -4154,10 +4056,7 @@ mod handlers {
     }
 
     /// Sessions linked to a task via edge traversal.
-    pub async fn task_sessions(
-        pool: &ArangoPool,
-        key: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_sessions(pool: &ArangoPool, key: &str) -> Result<Value, HandlerError> {
         let aql = "\
             FOR e IN @@edges \
                 FILTER e._to == @task_id \
@@ -4172,19 +4071,12 @@ mod handlers {
             "task_id": format!("{TASK_COLLECTION}/{key}"),
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("failed to query sessions for task '{key}'"),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to query sessions for task '{key}'"),
+                source: e,
+            })?;
 
         Ok(json!({
             "task_key": key,
@@ -4247,7 +4139,9 @@ mod handlers {
                 && !matches!(e.kind(), ArangoErrorKind::Conflict)
             {
                 return Err(HandlerError::Query {
-                    context: format!("failed to create dependency edge from '{key}' to '{dep_key}'"),
+                    context: format!(
+                        "failed to create dependency edge from '{key}' to '{dep_key}'"
+                    ),
                     source: e,
                 });
             }
@@ -4314,19 +4208,12 @@ mod handlers {
             "task_id": format!("{TASK_COLLECTION}/{key}"),
         });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: format!("failed to query dependencies for task '{key}'"),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("failed to query dependencies for task '{key}'"),
+                source: e,
+            })?;
 
         let mut response = json!({
             "task_key": key,
@@ -4364,9 +4251,7 @@ mod handlers {
     }
 
     /// Aggregation statistics for the task system.
-    pub async fn task_usage(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn task_usage(pool: &ArangoPool) -> Result<Value, HandlerError> {
         let aql = "\
             LET by_status = ( \
                 FOR doc IN @@tasks \
@@ -4388,19 +4273,12 @@ mod handlers {
 
         let bind = json!({ "@tasks": TASK_COLLECTION });
 
-        let result = query::query(
-            pool,
-            aql,
-            Some(&bind),
-            None,
-            false,
-            ExecutionTarget::Reader,
-        )
-        .await
-        .map_err(|e| HandlerError::Query {
-            context: "failed to query task usage statistics".into(),
-            source: e,
-        })?;
+        let result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to query task usage statistics".into(),
+                source: e,
+            })?;
 
         let stats = result.results.into_iter().next().unwrap_or(json!({
             "total": 0,
@@ -4443,10 +4321,9 @@ mod handlers {
             .await
             .map_err(|e| HandlerError::ServiceError(e.to_string()))?;
 
-        let embedding = result.embeddings.first()
-            .ok_or_else(|| HandlerError::ServiceError(
-                "embedder returned empty embeddings array".into(),
-            ))?;
+        let embedding = result.embeddings.first().ok_or_else(|| {
+            HandlerError::ServiceError("embedder returned empty embeddings array".into())
+        })?;
         let preview_len = 10.min(embedding.len());
         let text_preview: String = if text.chars().count() > 100 {
             let mut s: String = text.chars().take(100).collect();
@@ -4471,8 +4348,8 @@ mod handlers {
 
     /// Source file extensions to scan.
     const SOURCE_EXTENSIONS: &[&str] = &[
-        ".py", ".rs", ".cu", ".cpp", ".c", ".ts", ".js",
-        ".toml", ".yaml", ".yml", ".sh", ".bash", ".md", ".txt", ".json",
+        ".py", ".rs", ".cu", ".cpp", ".c", ".ts", ".js", ".toml", ".yaml", ".yml", ".sh", ".bash",
+        ".md", ".txt", ".json",
     ];
 
     /// Allowed enforcement types for compliance edges.
@@ -4482,7 +4359,11 @@ mod handlers {
     /// classification (which is now read from each smell_spec
     /// document's `tier` field).
     const ALLOWED_ENFORCEMENT: &[&str] = &[
-        "static", "behavioral", "architectural", "review", "documentation",
+        "static",
+        "behavioral",
+        "architectural",
+        "review",
+        "documentation",
     ];
 
     pub(crate) fn comment_prefixes(ext: &str) -> &'static [&'static str] {
@@ -4562,8 +4443,7 @@ mod handlers {
         use regex::Regex;
         use std::sync::LazyLock;
 
-        static CS_REF_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\bCS-(\d+)\b").unwrap());
+        static CS_REF_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bCS-(\d+)\b").unwrap());
 
         let mut refs = std::collections::HashMap::new();
         let content = match std::fs::read_to_string(path) {
@@ -4571,7 +4451,8 @@ mod handlers {
             Err(_) => return refs,
         };
 
-        let ext = path.extension()
+        let ext = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| format!(".{e}"))
             .unwrap_or_default();
@@ -4597,7 +4478,10 @@ mod handlers {
             LazyLock::new(|| Regex::new(r"(?i)^CS-(\d+)$").unwrap());
 
         CS_NUM_RE.captures(cs_number).and_then(|cap| {
-            cap[1].parse::<u32>().ok().map(|num| format!("smell-{num:03}-"))
+            cap[1]
+                .parse::<u32>()
+                .ok()
+                .map(|num| format!("smell-{num:03}-"))
         })
     }
 
@@ -4665,16 +4549,15 @@ mod handlers {
         }
 
         // Basename-derived fallbacks (legacy / heuristic keys).
-        let stem = path.file_stem()
+        let stem = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
         if stem.is_empty() {
             return keys;
         }
-        let ext_label = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext_label = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         keys.push(stem.clone());
         if !ext_label.is_empty() {
@@ -4727,12 +4610,11 @@ mod handlers {
 
         // Collect source files.
         let scan_path = std::path::Path::new(path);
-        let files = collect_source_files(scan_path).map_err(|e| {
-            HandlerError::InvalidParameter {
+        let files =
+            collect_source_files(scan_path).map_err(|e| HandlerError::InvalidParameter {
                 name: "path".into(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         let files_checked = files.len();
 
         // Scan for forbidden patterns.
@@ -4744,7 +4626,8 @@ mod handlers {
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let ext = file.extension()
+            let ext = file
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| format!(".{e}"))
                 .unwrap_or_default();
@@ -4820,12 +4703,11 @@ mod handlers {
             claims.iter().map(|s| s.as_str()).collect();
 
         let scan_path = std::path::Path::new(path);
-        let files = collect_source_files(scan_path).map_err(|e| {
-            HandlerError::InvalidParameter {
+        let files =
+            collect_source_files(scan_path).map_err(|e| HandlerError::InvalidParameter {
                 name: "path".into(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         // Extract all CS-NN refs from comment lines.
         let mut all_refs: Vec<(std::path::PathBuf, String, Vec<usize>)> = Vec::new();
@@ -4844,7 +4726,8 @@ mod handlers {
         }
 
         // Batch-lookup smell nodes by CS number.
-        let mut smell_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut smell_map: std::collections::HashMap<String, Value> =
+            std::collections::HashMap::new();
         for cs_id in &unique_cs {
             // Extract numeric part: "CS-32" → "32"
             let num_str = cs_id.strip_prefix("CS-").unwrap_or(cs_id);
@@ -4857,7 +4740,12 @@ mod handlers {
             "#;
             let bind_vars = json!({ "num": num_str, "prefix": format!("{cs_id}:") });
             let result = query::query(
-                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+                pool,
+                aql,
+                Some(&bind_vars),
+                None,
+                false,
+                ExecutionTarget::Reader,
             )
             .await
             .map_err(|e| HandlerError::Query {
@@ -4921,7 +4809,12 @@ mod handlers {
             "#;
             let bind_vars = json!({ "froms": froms, "to": smell_id });
             let result = query::query(
-                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+                pool,
+                aql,
+                Some(&bind_vars),
+                None,
+                false,
+                ExecutionTarget::Reader,
             )
             .await
             .map_err(|e| HandlerError::Query {
@@ -5076,18 +4969,15 @@ mod handlers {
         methods: &[String],
         summary: Option<&str>,
     ) -> Result<Value, HandlerError> {
-        use crate::db::crud;
         use crate::db::ArangoErrorKind;
+        use crate::db::crud;
         use crate::db::query::{self, ExecutionTarget};
 
         // Validate enforcement type.
         if !ALLOWED_ENFORCEMENT.contains(&enforcement) {
             return Err(HandlerError::InvalidParameter {
                 name: "enforcement".into(),
-                reason: format!(
-                    "must be one of: {}",
-                    ALLOWED_ENFORCEMENT.join(", "),
-                ),
+                reason: format!("must be one of: {}", ALLOWED_ENFORCEMENT.join(", "),),
             });
         }
 
@@ -5144,7 +5034,12 @@ mod handlers {
             "#;
             let bind_vars = json!({ "prefix": prefix, "prefix_len": prefix_len });
             let result = query::query(
-                pool, aql, Some(&bind_vars), None, false, ExecutionTarget::Reader,
+                pool,
+                aql,
+                Some(&bind_vars),
+                None,
+                false,
+                ExecutionTarget::Reader,
             )
             .await
             .map_err(|e| HandlerError::Query {
@@ -5180,11 +5075,8 @@ mod handlers {
         // `("codebase","files_foo_bar")` collided. The helper hashes
         // null-separated components so the (collection, key) pair is
         // unambiguous.
-        let edge_key = crate::db::keys::compliance_edge_key(
-            source_collection,
-            source_key,
-            smell_key,
-        );
+        let edge_key =
+            crate::db::keys::compliance_edge_key(source_collection, source_key, smell_key);
         let from_id = format!("{source_collection}/{source_key}");
         let to_id = format!("smell_specs/{smell_key}");
 
@@ -5203,9 +5095,8 @@ mod handlers {
         }
 
         // Insert edge — treat 409 Conflict as idempotent success.
-        let already_exists = match crud::insert_document(
-            pool, "compliance_edges", &edge_doc,
-        ).await {
+        let already_exists = match crud::insert_document(pool, "compliance_edges", &edge_doc).await
+        {
             Ok(_) => false,
             Err(e) if e.kind() == ArangoErrorKind::Conflict => true,
             Err(e) => {
@@ -5270,10 +5161,7 @@ mod handlers {
     // ── Schema management handlers ──────────────────────────────────────
 
     /// Initialize the `hades_schema` collection with a seed.
-    pub async fn schema_init(
-        pool: &ArangoPool,
-        seed: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn schema_init(pool: &ArangoPool, seed: &str) -> Result<Value, HandlerError> {
         use crate::db::crud;
         use crate::graph::runtime_schema;
 
@@ -5289,12 +5177,13 @@ mod handlers {
         };
 
         // Create hades_schema collection if not exists.
-        let collections = crud::list_collections(pool, false)
-            .await
-            .map_err(|e| HandlerError::Query {
-                context: "list collections for schema init".into(),
-                source: e,
-            })?;
+        let collections =
+            crud::list_collections(pool, false)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: "list collections for schema init".into(),
+                    source: e,
+                })?;
 
         if !collections.iter().any(|c| c.name == "hades_schema") {
             crud::create_collection(pool, "hades_schema", None)
@@ -5307,7 +5196,8 @@ mod handlers {
 
         // Truncate existing schema so init is a clean reset.
         let truncate_path = "collection/hades_schema/truncate";
-        pool.writer().put(truncate_path, &json!({}))
+        pool.writer()
+            .put(truncate_path, &json!({}))
             .await
             .map_err(|e| HandlerError::Query {
                 context: "truncate hades_schema before seed".into(),
@@ -5344,17 +5234,15 @@ mod handlers {
     }
 
     /// List all edge definitions and named graphs in `hades_schema`.
-    pub async fn schema_list(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn schema_list(pool: &ArangoPool) -> Result<Value, HandlerError> {
         use crate::graph::runtime_schema::RuntimeSchema;
 
-        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
-            HandlerError::Query {
+        let schema = RuntimeSchema::load(pool)
+            .await
+            .map_err(|e| HandlerError::Query {
                 context: "load runtime schema".into(),
                 source: crate::db::ArangoError::Request(e.to_string()),
-            }
-        })?;
+            })?;
 
         let edge_defs: Vec<Value> = schema
             .edge_definitions
@@ -5392,18 +5280,15 @@ mod handlers {
     }
 
     /// Show a single edge definition or named graph by name.
-    pub async fn schema_show(
-        pool: &ArangoPool,
-        name: &str,
-    ) -> Result<Value, HandlerError> {
+    pub async fn schema_show(pool: &ArangoPool, name: &str) -> Result<Value, HandlerError> {
         use crate::graph::runtime_schema::RuntimeSchema;
 
-        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
-            HandlerError::Query {
+        let schema = RuntimeSchema::load(pool)
+            .await
+            .map_err(|e| HandlerError::Query {
                 context: "load runtime schema".into(),
                 source: crate::db::ArangoError::Request(e.to_string()),
-            }
-        })?;
+            })?;
 
         // Collect all matching edge definitions (there can be multiple with
         // the same name but different source_field, e.g. nl_hecate_trace_edges).
@@ -5436,17 +5321,15 @@ mod handlers {
     }
 
     /// Show schema version and checksum.
-    pub async fn schema_version(
-        pool: &ArangoPool,
-    ) -> Result<Value, HandlerError> {
+    pub async fn schema_version(pool: &ArangoPool) -> Result<Value, HandlerError> {
         use crate::graph::runtime_schema::RuntimeSchema;
 
-        let schema = RuntimeSchema::load(pool).await.map_err(|e| {
-            HandlerError::Query {
+        let schema = RuntimeSchema::load(pool)
+            .await
+            .map_err(|e| HandlerError::Query {
                 context: "load runtime schema".into(),
                 source: crate::db::ArangoError::Request(e.to_string()),
-            }
-        })?;
+            })?;
 
         Ok(json!({
             "command": "db.schema.version",
@@ -5469,13 +5352,17 @@ mod tests {
 
     #[test]
     fn test_command_roundtrip_orient_with_collection() {
-        let cmd = DaemonCommand::Orient(OrientParams { collection: Some("test".into()) });
+        let cmd = DaemonCommand::Orient(OrientParams {
+            collection: Some("test".into()),
+        });
         let json = serde_json::to_value(&cmd).unwrap();
         assert_eq!(json["command"], "orient");
         assert_eq!(json["params"]["collection"], "test");
 
         let back: DaemonCommand = serde_json::from_value(json).unwrap();
-        assert!(matches!(back, DaemonCommand::Orient(ref p) if p.collection.as_deref() == Some("test")));
+        assert!(
+            matches!(back, DaemonCommand::Orient(ref p) if p.collection.as_deref() == Some("test"))
+        );
     }
 
     #[test]
@@ -5534,7 +5421,9 @@ mod tests {
             "params": { "text": "attention", "hybrid": true }
         });
         let cmd: DaemonCommand = serde_json::from_value(json).unwrap();
-        assert!(matches!(cmd, DaemonCommand::DbQuery { ref text, hybrid: true, .. } if text == "attention"));
+        assert!(
+            matches!(cmd, DaemonCommand::DbQuery { ref text, hybrid: true, .. } if text == "attention")
+        );
     }
 
     #[test]
@@ -5599,8 +5488,7 @@ mod tests {
 
     #[test]
     fn test_response_with_request_id() {
-        let resp = DaemonResponse::ok(serde_json::json!({}))
-            .with_request_id(Some("req-1".into()));
+        let resp = DaemonResponse::ok(serde_json::json!({})).with_request_id(Some("req-1".into()));
         assert_eq!(resp.request_id.as_deref(), Some("req-1"));
     }
 
@@ -5795,7 +5683,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+        assert!(matches!(
+            err,
+            DispatchError::Handler(HandlerError::InvalidParameter { .. })
+        ));
     }
 
     #[test]
@@ -5816,7 +5707,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+        assert!(matches!(
+            err,
+            DispatchError::Handler(HandlerError::InvalidParameter { .. })
+        ));
     }
 
     #[test]
@@ -5858,12 +5752,10 @@ mod tests {
 
         // This will fail with a connection error (ArangoDB not running in test),
         // NOT with InvalidParameter — that's the important assertion.
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("RETURN 1 should not be rejected as mutating AQL");
-            }
-            _ => {} // Connection error or success — both acceptable.
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("RETURN 1 should not be rejected as mutating AQL");
         }
+        // Otherwise: connection error or success — both acceptable.
     }
 
     // -- AQL string stripping -------------------------------------------------
@@ -5885,12 +5777,10 @@ mod tests {
             }),
         ));
 
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("INSERT inside a string literal should not be rejected");
-            }
-            _ => {} // Connection error or success — both acceptable.
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("INSERT inside a string literal should not be rejected");
         }
+        // Otherwise: connection error or success — both acceptable.
     }
 
     #[test]
@@ -5910,11 +5800,8 @@ mod tests {
             }),
         ));
 
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("UPDATE inside a comment should not be rejected");
-            }
-            _ => {}
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("UPDATE inside a comment should not be rejected");
         }
     }
 
@@ -5938,7 +5825,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { .. })));
+        assert!(matches!(
+            err,
+            DispatchError::Handler(HandlerError::InvalidParameter { .. })
+        ));
     }
 
     // -- db_aql bind validation ------------------------------------------------
@@ -5961,7 +5851,9 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { ref name, .. }) if name == "bind"));
+        assert!(
+            matches!(err, DispatchError::Handler(HandlerError::InvalidParameter { ref name, .. }) if name == "bind")
+        );
     }
 
     // -- Write command serde roundtrips ----------------------------------------
@@ -6275,10 +6167,7 @@ mod tests {
             handlers::validate_direction("outbound").unwrap(),
             "OUTBOUND"
         );
-        assert_eq!(
-            handlers::validate_direction("inbound").unwrap(),
-            "INBOUND"
-        );
+        assert_eq!(handlers::validate_direction("inbound").unwrap(), "INBOUND");
         assert_eq!(handlers::validate_direction("any").unwrap(), "ANY");
 
         // Invalid directions.
@@ -6819,10 +6708,22 @@ mod tests {
     #[test]
     fn test_smell_key_prefix() {
         use super::handlers;
-        assert_eq!(handlers::smell_key_prefix("CS-32"), Some("smell-032-".into()));
-        assert_eq!(handlers::smell_key_prefix("CS-1"), Some("smell-001-".into()));
-        assert_eq!(handlers::smell_key_prefix("CS-100"), Some("smell-100-".into()));
-        assert_eq!(handlers::smell_key_prefix("cs-10"), Some("smell-010-".into()));
+        assert_eq!(
+            handlers::smell_key_prefix("CS-32"),
+            Some("smell-032-".into())
+        );
+        assert_eq!(
+            handlers::smell_key_prefix("CS-1"),
+            Some("smell-001-".into())
+        );
+        assert_eq!(
+            handlers::smell_key_prefix("CS-100"),
+            Some("smell-100-".into())
+        );
+        assert_eq!(
+            handlers::smell_key_prefix("cs-10"),
+            Some("smell-010-".into())
+        );
         assert_eq!(handlers::smell_key_prefix("not-a-smell"), None);
         assert_eq!(handlers::smell_key_prefix("CS-"), None);
         assert_eq!(handlers::smell_key_prefix(""), None);
@@ -6864,22 +6765,22 @@ mod tests {
 
         // Single-file scan (root and file are the same): canonical key
         // is the file_key form. Basename variants follow as fallbacks.
-        let keys = handlers::candidate_doc_keys(
-            Path::new("conductor.rs"),
-            Path::new("conductor.rs"),
+        let keys =
+            handlers::candidate_doc_keys(Path::new("conductor.rs"), Path::new("conductor.rs"));
+        assert!(
+            keys.contains(&"conductor_rs".into()),
+            "canonical file_key form missing from {keys:?}"
         );
-        assert!(keys.contains(&"conductor_rs".into()),
-                "canonical file_key form missing from {keys:?}");
         assert!(keys.contains(&"conductor".into()));
         assert!(keys.contains(&"conductor-rs".into()));
 
         // Underscore-bearing stem: dashed-variant fallback exists.
-        let keys2 = handlers::candidate_doc_keys(
-            Path::new("my_module.py"),
-            Path::new("my_module.py"),
+        let keys2 =
+            handlers::candidate_doc_keys(Path::new("my_module.py"), Path::new("my_module.py"));
+        assert!(
+            keys2.contains(&"my_module_py".into()),
+            "canonical file_key form missing from {keys2:?}"
         );
-        assert!(keys2.contains(&"my_module_py".into()),
-                "canonical file_key form missing from {keys2:?}");
         assert!(keys2.contains(&"my_module".into()));
         assert!(keys2.contains(&"my_module-py".into()));
         assert!(keys2.contains(&"my-module".into()));
@@ -6889,12 +6790,11 @@ mod tests {
         // relative path. This is the case that was broken before —
         // verify on `src/lib.rs` would only check `lib`/`lib-rs` and
         // never match the actually-stored `src_lib_rs` key.
-        let keys3 = handlers::candidate_doc_keys(
-            Path::new("/proj"),
-            Path::new("/proj/src/lib.rs"),
+        let keys3 = handlers::candidate_doc_keys(Path::new("/proj"), Path::new("/proj/src/lib.rs"));
+        assert!(
+            keys3.contains(&"src_lib_rs".into()),
+            "canonical file_key form missing from {keys3:?}"
         );
-        assert!(keys3.contains(&"src_lib_rs".into()),
-                "canonical file_key form missing from {keys3:?}");
         // Basename fallbacks still present.
         assert!(keys3.contains(&"lib".into()));
         assert!(keys3.contains(&"lib-rs".into()));
@@ -6903,15 +6803,21 @@ mod tests {
         // path-suffix candidates so verify can match whichever
         // depth the file was ingested at.
         let keys4 = handlers::candidate_doc_keys(
-            Path::new("/proj/src/lib.rs"),  // scan_root == path
+            Path::new("/proj/src/lib.rs"), // scan_root == path
             Path::new("/proj/src/lib.rs"),
         );
-        assert!(keys4.contains(&"lib_rs".into()),
-                "shallow suffix missing from {keys4:?}");
-        assert!(keys4.contains(&"src_lib_rs".into()),
-                "deeper suffix missing from {keys4:?}");
-        assert!(keys4.contains(&"proj_src_lib_rs".into()),
-                "full-path suffix missing from {keys4:?}");
+        assert!(
+            keys4.contains(&"lib_rs".into()),
+            "shallow suffix missing from {keys4:?}"
+        );
+        assert!(
+            keys4.contains(&"src_lib_rs".into()),
+            "deeper suffix missing from {keys4:?}"
+        );
+        assert!(
+            keys4.contains(&"proj_src_lib_rs".into()),
+            "full-path suffix missing from {keys4:?}"
+        );
     }
 
     #[test]

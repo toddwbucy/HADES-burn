@@ -62,10 +62,16 @@ mod tests {
     #[test]
     fn test_from_path() {
         assert_eq!(Language::from_path("src/main.rs"), Some(Language::Rust));
-        assert_eq!(Language::from_path("core/models.py"), Some(Language::Python));
+        assert_eq!(
+            Language::from_path("core/models.py"),
+            Some(Language::Python)
+        );
         assert_eq!(Language::from_path("README.md"), None);
         assert_eq!(Language::from_path("Makefile"), None);
-        assert_eq!(Language::from_path("src/__init__.pyi"), Some(Language::Python));
+        assert_eq!(
+            Language::from_path("src/__init__.pyi"),
+            Some(Language::Python)
+        );
     }
 
     #[test]

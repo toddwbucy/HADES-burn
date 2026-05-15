@@ -24,9 +24,9 @@ impl OutputFormat {
             "json" => Ok(Self::Json),
             "jsonl" => Ok(Self::Jsonl),
             "table" => Ok(Self::Table),
-            other => anyhow::bail!(
-                "unsupported format '{other}' — supported values: json, table, jsonl"
-            ),
+            other => {
+                anyhow::bail!("unsupported format '{other}' — supported values: json, table, jsonl")
+            }
         }
     }
 }
@@ -69,10 +69,7 @@ pub fn print_output(command: &str, data: Value, format: &OutputFormat) {
         }
         OutputFormat::Jsonl => {
             let wrapped = envelope(command, data);
-            println!(
-                "{}",
-                serde_json::to_string(&wrapped).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string(&wrapped).unwrap_or_default());
         }
         OutputFormat::Table => {
             print_table(&data);
@@ -108,17 +105,26 @@ fn print_table(value: &Value) {
             print_array_table(arr);
         }
         _ => {
-            println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value).unwrap_or_default()
+            );
         }
     }
 }
 
 /// Find the primary array field in an object for table rendering.
-fn find_primary_array(
-    map: &serde_json::Map<String, Value>,
-) -> Option<(&str, &Vec<Value>)> {
+fn find_primary_array(map: &serde_json::Map<String, Value>) -> Option<(&str, &Vec<Value>)> {
     // Prefer known field names.
-    for name in &["collections", "tasks", "results", "documents", "entries", "edges", "symbols"] {
+    for name in &[
+        "collections",
+        "tasks",
+        "results",
+        "documents",
+        "entries",
+        "edges",
+        "symbols",
+    ] {
         if let Some(Value::Array(arr)) = map.get(*name) {
             return Some((name, arr));
         }
@@ -189,7 +195,11 @@ fn print_array_table(arr: &[Value]) {
         .collect::<Vec<_>>()
         .join("  ");
     println!("{header}");
-    let separator: String = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  ");
+    let separator: String = widths
+        .iter()
+        .map(|w| "-".repeat(*w))
+        .collect::<Vec<_>>()
+        .join("  ");
     println!("{separator}");
 
     // Print rows.

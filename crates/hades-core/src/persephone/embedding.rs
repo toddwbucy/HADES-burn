@@ -165,10 +165,7 @@ pub struct ProviderInfo {
 pub struct EmbeddingClient {
     config: EmbeddingClientConfig,
     unix_client: Option<Client<UnixConnector, Full<Bytes>>>,
-    tcp_client: Option<Client<
-        hyper_util::client::legacy::connect::HttpConnector,
-        Full<Bytes>,
-    >>,
+    tcp_client: Option<Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>>,
 }
 
 impl EmbeddingClient {
@@ -275,7 +272,9 @@ impl EmbeddingClient {
         }
 
         let started = std::time::Instant::now();
-        let resp = self.request(Method::POST, "/embeddings", Some(&body)).await?;
+        let resp = self
+            .request(Method::POST, "/embeddings", Some(&body))
+            .await?;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         // OpenAI shape: { "object": "list", "data": [{"object":"embedding","embedding":[...],"index":N}], "model": "...", "usage": {...} }
@@ -314,10 +313,7 @@ impl EmbeddingClient {
         }
 
         // Derive dimension from first non-empty embedding; verify all match.
-        let dimension = embeddings
-            .first()
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
+        let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
         for (i, emb) in embeddings.iter().enumerate() {
             if emb.len() as u32 != dimension {
                 return Err(EmbeddingError::InvalidResponse(format!(
@@ -353,14 +349,8 @@ impl EmbeddingClient {
     }
 
     /// Embed a single text string.
-    pub async fn embed_one(
-        &self,
-        text: &str,
-        task: &str,
-    ) -> Result<Vec<f32>, EmbeddingError> {
-        let result = self
-            .embed(&[text.to_string()], task, None)
-            .await?;
+    pub async fn embed_one(&self, text: &str, task: &str) -> Result<Vec<f32>, EmbeddingError> {
+        let result = self.embed(&[text.to_string()], task, None).await?;
         Ok(result.embeddings.into_iter().next().unwrap())
     }
 
@@ -463,8 +453,7 @@ impl EmbeddingClient {
             builder = builder.header(CONTENT_TYPE, "application/json");
         }
 
-        let req = builder
-            .body(Full::new(Bytes::copy_from_slice(&body_bytes)))?;
+        let req = builder.body(Full::new(Bytes::copy_from_slice(&body_bytes)))?;
 
         let timeout = self.config.timeout;
         let response_future = if let Some(ref client) = self.unix_client {
@@ -498,9 +487,7 @@ impl EmbeddingClient {
         }
 
         serde_json::from_slice(&resp_bytes).map_err(|e| {
-            EmbeddingError::InvalidResponse(format!(
-                "failed to parse response JSON: {e}"
-            ))
+            EmbeddingError::InvalidResponse(format!("failed to parse response JSON: {e}"))
         })
     }
 

@@ -110,7 +110,11 @@ impl ArangoPool {
             // Same endpoint — only check once
             match self.check_client(&self.reader, "reader").await {
                 Ok(v) => {
-                    debug!(role = "reader", latency_ms = start.elapsed().as_millis() as u64, "healthy");
+                    debug!(
+                        role = "reader",
+                        latency_ms = start.elapsed().as_millis() as u64,
+                        "healthy"
+                    );
                     version = v;
                     reader_ok = true;
                 }
@@ -174,11 +178,7 @@ impl ArangoPool {
     }
 
     /// Ping a single client and extract the version string.
-    async fn check_client(
-        &self,
-        client: &ArangoClient,
-        role: &str,
-    ) -> Result<String, ArangoError> {
+    async fn check_client(&self, client: &ArangoClient, role: &str) -> Result<String, ArangoError> {
         let resp = client.get("version").await?;
         let version = resp
             .get("version")
@@ -221,9 +221,7 @@ fn endpoints_equal(
                 _ => a == b,
             }
         }
-        (None, None) => {
-            base_url_a.trim_end_matches('/') == base_url_b.trim_end_matches('/')
-        }
+        (None, None) => base_url_a.trim_end_matches('/') == base_url_b.trim_end_matches('/'),
         _ => false,
     }
 }

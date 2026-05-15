@@ -77,9 +77,7 @@ pub async fn list_indexes(
         .get("indexes")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            ArangoError::Request(
-                "index list response missing 'indexes' array".to_string(),
-            )
+            ArangoError::Request("index list response missing 'indexes' array".to_string())
         })?;
 
     let mut result = Vec::with_capacity(indexes.len());
@@ -111,16 +109,9 @@ pub async fn create_vector_index(
         None => {
             // Auto-calculate from collection size
             let aql = format!("RETURN LENGTH({collection})");
-            let result = query::query_single(
-                pool,
-                &aql,
-                None,
-                query::ExecutionTarget::Reader,
-            )
-            .await?;
-            let doc_count = result
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let result =
+                query::query_single(pool, &aql, None, query::ExecutionTarget::Reader).await?;
+            let doc_count = result.and_then(|v| v.as_u64()).unwrap_or(0);
             (doc_count / 15).max(1) as u32
         }
     };
@@ -157,10 +148,7 @@ pub async fn create_vector_index(
 
 /// Drop an index by its full ID (e.g. `"collection/12345"`).
 #[instrument(skip(pool), fields(db = %pool.database()))]
-pub async fn drop_index(
-    pool: &ArangoPool,
-    index_id: &str,
-) -> Result<(), ArangoError> {
+pub async fn drop_index(pool: &ArangoPool, index_id: &str) -> Result<(), ArangoError> {
     let path = format!("index/{index_id}");
     pool.writer().delete(&path).await?;
     debug!(index_id, "index dropped");

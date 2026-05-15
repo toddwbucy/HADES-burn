@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use hades_core::db::{crud, ArangoClient, ArangoPool};
+use hades_core::db::{ArangoClient, ArangoPool, crud};
 
 fn arango_socket() -> PathBuf {
     PathBuf::from(
@@ -25,9 +25,7 @@ fn arango_socket() -> PathBuf {
 }
 
 fn arango_password() -> String {
-    std::env::var("ARANGO_PASSWORD").expect(
-        "ARANGO_PASSWORD must be set for integration tests.",
-    )
+    std::env::var("ARANGO_PASSWORD").expect("ARANGO_PASSWORD must be set for integration tests.")
 }
 
 /// Whether integration tests are required to run (ARANGO_TESTS=1).
@@ -44,16 +42,14 @@ fn test_pool() -> Option<ArangoPool> {
                 socket.display()
             );
         }
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return None;
     }
 
-    let client = ArangoClient::with_socket(
-        socket,
-        "bident_burn",
-        "root",
-        &arango_password(),
-    );
+    let client = ArangoClient::with_socket(socket, "bident_burn", "root", &arango_password());
     Some(ArangoPool::new(client.clone(), client))
 }
 
@@ -81,8 +77,14 @@ async fn test_list_collections() {
     let collections = crud::list_collections(&pool, true).await.unwrap();
     let names: Vec<&str> = collections.iter().map(|c| c.name.as_str()).collect();
 
-    assert!(names.contains(&"persephone_tasks"), "collections: {names:?}");
-    assert!(!names.iter().any(|n| n.starts_with('_')), "system collections not excluded");
+    assert!(
+        names.contains(&"persephone_tasks"),
+        "collections: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with('_')),
+        "system collections not excluded"
+    );
 }
 
 #[tokio::test]
@@ -91,7 +93,10 @@ async fn test_list_collections_include_system() {
 
     let collections = crud::list_collections(&pool, false).await.unwrap();
     let has_system = collections.iter().any(|c| c.name.starts_with('_'));
-    assert!(has_system, "expected system collections when exclude_system=false");
+    assert!(
+        has_system,
+        "expected system collections when exclude_system=false"
+    );
 }
 
 #[tokio::test]
@@ -100,9 +105,7 @@ async fn test_drop_collection_ignore_missing() {
 
     // Use a unique name to avoid any collision
     let name = format!("nonexistent_{}", std::process::id());
-    let resp = crud::drop_collection(&pool, &name, true)
-        .await
-        .unwrap();
+    let resp = crud::drop_collection(&pool, &name, true).await.unwrap();
     assert_eq!(resp["dropped"], false);
 }
 
@@ -110,7 +113,9 @@ async fn test_drop_collection_ignore_missing() {
 async fn test_count_collection() {
     let Some(pool) = test_pool() else { return };
 
-    let count = crud::count_collection(&pool, "persephone_tasks").await.unwrap();
+    let count = crud::count_collection(&pool, "persephone_tasks")
+        .await
+        .unwrap();
     assert!(count > 0, "expected at least one task, got {count}");
 }
 
@@ -153,7 +158,9 @@ async fn test_document_crud_lifecycle() {
         "title": "Test Document",
         "value": 42
     })];
-    let result = crud::insert_documents(&pool, col, &docs, false).await.unwrap();
+    let result = crud::insert_documents(&pool, col, &docs, false)
+        .await
+        .unwrap();
     assert_eq!(result.created, 1);
 
     // Get
@@ -163,7 +170,9 @@ async fn test_document_crud_lifecycle() {
 
     // Update (merge-patch)
     let update = serde_json::json!({"value": 99, "extra": "field"});
-    crud::update_document(&pool, col, "test_doc_1", &update).await.unwrap();
+    crud::update_document(&pool, col, "test_doc_1", &update)
+        .await
+        .unwrap();
 
     let doc = crud::get_document(&pool, col, "test_doc_1").await.unwrap();
     assert_eq!(doc["value"], 99);
@@ -171,7 +180,9 @@ async fn test_document_crud_lifecycle() {
     assert_eq!(doc["title"], "Test Document"); // preserved by PATCH
 
     // Delete
-    crud::delete_document(&pool, col, "test_doc_1").await.unwrap();
+    crud::delete_document(&pool, col, "test_doc_1")
+        .await
+        .unwrap();
 
     let result = crud::get_document(&pool, col, "test_doc_1").await;
     assert!(result.is_err());
@@ -191,12 +202,18 @@ async fn test_replace_document() {
         "title": "Original",
         "extra": "will_be_removed"
     })];
-    crud::insert_documents(&pool, col, &docs, false).await.unwrap();
+    crud::insert_documents(&pool, col, &docs, false)
+        .await
+        .unwrap();
 
     let replacement = serde_json::json!({"title": "Replaced"});
-    crud::replace_document(&pool, col, "replace_test", &replacement).await.unwrap();
+    crud::replace_document(&pool, col, "replace_test", &replacement)
+        .await
+        .unwrap();
 
-    let doc = crud::get_document(&pool, col, "replace_test").await.unwrap();
+    let doc = crud::get_document(&pool, col, "replace_test")
+        .await
+        .unwrap();
     assert_eq!(doc["title"], "Replaced");
     assert!(doc.get("extra").is_none() || doc["extra"].is_null());
 
@@ -217,7 +234,9 @@ async fn test_bulk_insert() {
         .map(|i| serde_json::json!({"_key": format!("bulk_{i}"), "index": i}))
         .collect();
 
-    let result = crud::bulk_insert(&pool, col, &docs, Some(10), false).await.unwrap();
+    let result = crud::bulk_insert(&pool, col, &docs, Some(10), false)
+        .await
+        .unwrap();
     assert_eq!(result.created, 25);
 
     let count = crud::count_collection(&pool, col).await.unwrap();
@@ -233,10 +252,14 @@ async fn test_insert_with_overwrite() {
     setup(&pool, col).await;
 
     let docs = vec![serde_json::json!({"_key": "ow_test", "version": 1})];
-    crud::insert_documents(&pool, col, &docs, false).await.unwrap();
+    crud::insert_documents(&pool, col, &docs, false)
+        .await
+        .unwrap();
 
     let docs = vec![serde_json::json!({"_key": "ow_test", "version": 2})];
-    let result = crud::insert_documents(&pool, col, &docs, true).await.unwrap();
+    let result = crud::insert_documents(&pool, col, &docs, true)
+        .await
+        .unwrap();
     assert!(result.created > 0 || result.updated > 0);
 
     let doc = crud::get_document(&pool, col, "ow_test").await.unwrap();

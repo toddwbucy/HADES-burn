@@ -12,10 +12,10 @@ use rustpython_parser::{self as parser, ast};
 use serde_json::json;
 use tracing::warn;
 
+use super::Language;
 use super::symbols::{
     CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef, compute_symbol_hash,
 };
-use super::Language;
 
 /// Analyze Python source code, returning symbols, metrics, and structure.
 pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
@@ -88,17 +88,10 @@ fn extract_stmt_symbols(
         }
 
         ast::Stmt::ClassDef(class) => {
-            let decorators: Vec<String> = class
-                .decorator_list
-                .iter()
-                .filter_map(expr_name)
-                .collect();
+            let decorators: Vec<String> =
+                class.decorator_list.iter().filter_map(expr_name).collect();
 
-            let bases: Vec<String> = class
-                .bases
-                .iter()
-                .filter_map(expr_name)
-                .collect();
+            let bases: Vec<String> = class.bases.iter().filter_map(expr_name).collect();
 
             let docstring = extract_docstring(&class.body);
 
@@ -151,10 +144,7 @@ fn extract_stmt_symbols(
                 let bound_name = if let Some(ref asname) = alias.asname {
                     asname.to_string()
                 } else {
-                    alias.name.split('.')
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
+                    alias.name.split('.').next().unwrap_or("").to_string()
                 };
                 if bound_name.is_empty() {
                     continue;
@@ -257,11 +247,7 @@ fn extract_funcdef(
     offsets: &[usize],
     parent_class: Option<&str>,
 ) {
-    let decorators: Vec<String> = func
-        .decorator_list
-        .iter()
-        .filter_map(expr_name)
-        .collect();
+    let decorators: Vec<String> = func.decorator_list.iter().filter_map(expr_name).collect();
 
     let params: Vec<String> = func
         .args
@@ -307,11 +293,7 @@ fn extract_async_funcdef(
     offsets: &[usize],
     parent_class: Option<&str>,
 ) {
-    let decorators: Vec<String> = func
-        .decorator_list
-        .iter()
-        .filter_map(expr_name)
-        .collect();
+    let decorators: Vec<String> = func.decorator_list.iter().filter_map(expr_name).collect();
 
     let params: Vec<String> = func
         .args
@@ -389,39 +371,69 @@ fn walk_stmt_for_calls(
     // Recurse into nested statements.
     match stmt {
         ast::Stmt::If(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.orelse {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::For(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.orelse {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::AsyncFor(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.orelse {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::While(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.orelse {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::With(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::AsyncWith(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
         }
         ast::Stmt::Try(s) => {
-            for sub in &s.body { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.orelse { walk_stmt_for_calls(sub, calls, seen); }
-            for sub in &s.finalbody { walk_stmt_for_calls(sub, calls, seen); }
+            for sub in &s.body {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.orelse {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
+            for sub in &s.finalbody {
+                walk_stmt_for_calls(sub, calls, seen);
+            }
             for handler in &s.handlers {
                 let ast::ExceptHandler::ExceptHandler(h) = handler;
-                for sub in &h.body { walk_stmt_for_calls(sub, calls, seen); }
+                for sub in &h.body {
+                    walk_stmt_for_calls(sub, calls, seen);
+                }
             }
         }
         ast::Stmt::Match(s) => {
             for case in &s.cases {
-                for sub in &case.body { walk_stmt_for_calls(sub, calls, seen); }
+                for sub in &case.body {
+                    walk_stmt_for_calls(sub, calls, seen);
+                }
             }
         }
         _ => {}
@@ -433,36 +445,70 @@ fn visit_stmt_exprs(stmt: &ast::Stmt, f: &mut impl FnMut(&ast::Expr)) {
     match stmt {
         ast::Stmt::Expr(s) => f(&s.value),
         ast::Stmt::Assign(s) => {
-            for t in &s.targets { f(t); }
+            for t in &s.targets {
+                f(t);
+            }
             f(&s.value);
         }
-        ast::Stmt::AugAssign(s) => { f(&s.target); f(&s.value); }
+        ast::Stmt::AugAssign(s) => {
+            f(&s.target);
+            f(&s.value);
+        }
         ast::Stmt::AnnAssign(s) => {
             f(&s.target);
             f(&s.annotation);
-            if let Some(v) = &s.value { f(v); }
+            if let Some(v) = &s.value {
+                f(v);
+            }
         }
-        ast::Stmt::Return(s) => { if let Some(v) = &s.value { f(v); } }
+        ast::Stmt::Return(s) => {
+            if let Some(v) = &s.value {
+                f(v);
+            }
+        }
         ast::Stmt::Raise(s) => {
-            if let Some(e) = &s.exc { f(e); }
-            if let Some(c) = &s.cause { f(c); }
+            if let Some(e) = &s.exc {
+                f(e);
+            }
+            if let Some(c) = &s.cause {
+                f(c);
+            }
         }
-        ast::Stmt::Assert(s) => { f(&s.test); if let Some(m) = &s.msg { f(m); } }
-        ast::Stmt::Delete(s) => { for t in &s.targets { f(t); } }
+        ast::Stmt::Assert(s) => {
+            f(&s.test);
+            if let Some(m) = &s.msg {
+                f(m);
+            }
+        }
+        ast::Stmt::Delete(s) => {
+            for t in &s.targets {
+                f(t);
+            }
+        }
         ast::Stmt::If(s) => f(&s.test),
-        ast::Stmt::For(s) => { f(&s.target); f(&s.iter); }
-        ast::Stmt::AsyncFor(s) => { f(&s.target); f(&s.iter); }
+        ast::Stmt::For(s) => {
+            f(&s.target);
+            f(&s.iter);
+        }
+        ast::Stmt::AsyncFor(s) => {
+            f(&s.target);
+            f(&s.iter);
+        }
         ast::Stmt::While(s) => f(&s.test),
         ast::Stmt::With(s) => {
             for item in &s.items {
                 f(&item.context_expr);
-                if let Some(v) = &item.optional_vars { f(v); }
+                if let Some(v) = &item.optional_vars {
+                    f(v);
+                }
             }
         }
         ast::Stmt::AsyncWith(s) => {
             for item in &s.items {
                 f(&item.context_expr);
-                if let Some(v) = &item.optional_vars { f(v); }
+                if let Some(v) = &item.optional_vars {
+                    f(v);
+                }
             }
         }
         _ => {}
@@ -507,12 +553,21 @@ fn record_calls_in_expr(
 
     // Walk other expression shapes that can contain calls.
     match expr {
-        ast::Expr::BinOp(e) => { record_calls_in_expr(&e.left, calls, seen); record_calls_in_expr(&e.right, calls, seen); }
+        ast::Expr::BinOp(e) => {
+            record_calls_in_expr(&e.left, calls, seen);
+            record_calls_in_expr(&e.right, calls, seen);
+        }
         ast::Expr::UnaryOp(e) => record_calls_in_expr(&e.operand, calls, seen),
-        ast::Expr::BoolOp(e) => { for v in &e.values { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::BoolOp(e) => {
+            for v in &e.values {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
         ast::Expr::Compare(e) => {
             record_calls_in_expr(&e.left, calls, seen);
-            for c in &e.comparators { record_calls_in_expr(c, calls, seen); }
+            for c in &e.comparators {
+                record_calls_in_expr(c, calls, seen);
+            }
         }
         ast::Expr::IfExp(e) => {
             record_calls_in_expr(&e.test, calls, seen);
@@ -520,39 +575,72 @@ fn record_calls_in_expr(
             record_calls_in_expr(&e.orelse, calls, seen);
         }
         ast::Expr::Attribute(e) => record_calls_in_expr(&e.value, calls, seen),
-        ast::Expr::Subscript(e) => { record_calls_in_expr(&e.value, calls, seen); record_calls_in_expr(&e.slice, calls, seen); }
+        ast::Expr::Subscript(e) => {
+            record_calls_in_expr(&e.value, calls, seen);
+            record_calls_in_expr(&e.slice, calls, seen);
+        }
         ast::Expr::Starred(e) => record_calls_in_expr(&e.value, calls, seen),
         ast::Expr::Await(e) => record_calls_in_expr(&e.value, calls, seen),
-        ast::Expr::Yield(e) => { if let Some(v) = &e.value { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::Yield(e) => {
+            if let Some(v) = &e.value {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
         ast::Expr::YieldFrom(e) => record_calls_in_expr(&e.value, calls, seen),
-        ast::Expr::Tuple(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
-        ast::Expr::List(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
-        ast::Expr::Set(e) => { for v in &e.elts { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::Tuple(e) => {
+            for v in &e.elts {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
+        ast::Expr::List(e) => {
+            for v in &e.elts {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
+        ast::Expr::Set(e) => {
+            for v in &e.elts {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
         ast::Expr::Dict(e) => {
-            for k in e.keys.iter().flatten() { record_calls_in_expr(k, calls, seen); }
-            for v in &e.values { record_calls_in_expr(v, calls, seen); }
+            for k in e.keys.iter().flatten() {
+                record_calls_in_expr(k, calls, seen);
+            }
+            for v in &e.values {
+                record_calls_in_expr(v, calls, seen);
+            }
         }
         ast::Expr::FormattedValue(e) => record_calls_in_expr(&e.value, calls, seen),
-        ast::Expr::JoinedStr(e) => { for v in &e.values { record_calls_in_expr(v, calls, seen); } }
+        ast::Expr::JoinedStr(e) => {
+            for v in &e.values {
+                record_calls_in_expr(v, calls, seen);
+            }
+        }
         ast::Expr::ListComp(e) => {
             record_calls_in_expr(&e.elt, calls, seen);
             for g in &e.generators {
                 record_calls_in_expr(&g.iter, calls, seen);
-                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+                for c in &g.ifs {
+                    record_calls_in_expr(c, calls, seen);
+                }
             }
         }
         ast::Expr::SetComp(e) => {
             record_calls_in_expr(&e.elt, calls, seen);
             for g in &e.generators {
                 record_calls_in_expr(&g.iter, calls, seen);
-                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+                for c in &g.ifs {
+                    record_calls_in_expr(c, calls, seen);
+                }
             }
         }
         ast::Expr::GeneratorExp(e) => {
             record_calls_in_expr(&e.elt, calls, seen);
             for g in &e.generators {
                 record_calls_in_expr(&g.iter, calls, seen);
-                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+                for c in &g.ifs {
+                    record_calls_in_expr(c, calls, seen);
+                }
             }
         }
         ast::Expr::DictComp(e) => {
@@ -560,7 +648,9 @@ fn record_calls_in_expr(
             record_calls_in_expr(&e.value, calls, seen);
             for g in &e.generators {
                 record_calls_in_expr(&g.iter, calls, seen);
-                for c in &g.ifs { record_calls_in_expr(c, calls, seen); }
+                for c in &g.ifs {
+                    record_calls_in_expr(c, calls, seen);
+                }
             }
         }
         _ => {}
@@ -598,19 +688,16 @@ fn extract_docstring(body: &[ast::Stmt]) -> Option<String> {
 
 // ── Top-Level Definitions ──────────────────────────────────────────────
 
-fn extract_top_level_defs_from_module(module: &ast::ModModule, offsets: &[usize]) -> Vec<TopLevelDef> {
+fn extract_top_level_defs_from_module(
+    module: &ast::ModModule,
+    offsets: &[usize],
+) -> Vec<TopLevelDef> {
     let mut defs = Vec::new();
     for stmt in &module.body {
         let (name, kind, range) = match stmt {
-            ast::Stmt::FunctionDef(f) => {
-                (f.name.to_string(), SymbolKind::Function, &f.range)
-            }
-            ast::Stmt::AsyncFunctionDef(f) => {
-                (f.name.to_string(), SymbolKind::Function, &f.range)
-            }
-            ast::Stmt::ClassDef(c) => {
-                (c.name.to_string(), SymbolKind::Class, &c.range)
-            }
+            ast::Stmt::FunctionDef(f) => (f.name.to_string(), SymbolKind::Function, &f.range),
+            ast::Stmt::AsyncFunctionDef(f) => (f.name.to_string(), SymbolKind::Function, &f.range),
+            ast::Stmt::ClassDef(c) => (c.name.to_string(), SymbolKind::Class, &c.range),
             _ => continue,
         };
 
@@ -633,7 +720,11 @@ fn extract_top_level_defs_from_module(module: &ast::ModModule, offsets: &[usize]
 // ── Code Metrics ───────────────────────────────────────────────────────
 
 fn compute_metrics_from_module(source: &str, module: &ast::ModModule) -> CodeMetrics {
-    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
+    let total_lines = if source.is_empty() {
+        0
+    } else {
+        source.lines().count()
+    };
     let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
     let comment_lines = source
         .lines()
@@ -657,7 +748,11 @@ fn compute_metrics_from_module(source: &str, module: &ast::ModModule) -> CodeMet
 
 /// Fallback metrics when parsing fails (line counting only).
 fn compute_metrics_fallback(source: &str) -> CodeMetrics {
-    let total_lines = if source.is_empty() { 0 } else { source.lines().count() };
+    let total_lines = if source.is_empty() {
+        0
+    } else {
+        source.lines().count()
+    };
     let blank_lines = source.lines().filter(|l| l.trim().is_empty()).count();
     let comment_lines = source
         .lines()
@@ -778,10 +873,16 @@ fn build_line_offsets(source: &str) -> Vec<usize> {
 }
 
 /// Convert a TextRange to (start_line, end_line), both 1-based.
-fn range_lines(range: &rustpython_parser::text_size::TextRange, offsets: &[usize]) -> (usize, usize) {
+fn range_lines(
+    range: &rustpython_parser::text_size::TextRange,
+    offsets: &[usize],
+) -> (usize, usize) {
     let start_byte = range.start().to_usize();
     let end_byte = range.end().to_usize();
-    (byte_to_line(offsets, start_byte), byte_to_line(offsets, end_byte))
+    (
+        byte_to_line(offsets, start_byte),
+        byte_to_line(offsets, end_byte),
+    )
 }
 
 /// Convert a byte offset to a 1-based line number.
@@ -850,13 +951,25 @@ def process(items: list) -> int:
     fn test_symbol_kinds() {
         let analysis = analyze(SAMPLE_PYTHON).unwrap();
 
-        let config = analysis.symbols.iter().find(|s| s.name == "Config").unwrap();
+        let config = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "Config")
+            .unwrap();
         assert_eq!(config.kind, SymbolKind::Class);
 
-        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
+        let process = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "process")
+            .unwrap();
         assert_eq!(process.kind, SymbolKind::Function);
 
-        let max_size = analysis.symbols.iter().find(|s| s.name == "MAX_SIZE").unwrap();
+        let max_size = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "MAX_SIZE")
+            .unwrap();
         assert_eq!(max_size.kind, SymbolKind::Constant);
 
         let os_import = analysis.symbols.iter().find(|s| s.name == "os").unwrap();
@@ -869,7 +982,11 @@ def process(items: list) -> int:
         let save = analysis.symbols.iter().find(|s| s.name == "save").unwrap();
         assert_eq!(save.metadata["is_async"], true);
 
-        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
+        let process = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "process")
+            .unwrap();
         assert_eq!(process.metadata["is_async"], false);
         let params = process.metadata["parameters"].as_array().unwrap();
         assert_eq!(params[0], "items");
@@ -878,7 +995,11 @@ def process(items: list) -> int:
     #[test]
     fn test_class_metadata() {
         let analysis = analyze(SAMPLE_PYTHON).unwrap();
-        let config = analysis.symbols.iter().find(|s| s.name == "Config").unwrap();
+        let config = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "Config")
+            .unwrap();
         assert!(config.metadata.get("docstring").is_some());
     }
 
@@ -893,7 +1014,12 @@ def process(items: list) -> int:
     #[test]
     fn test_top_level_defs() {
         let analysis = analyze(SAMPLE_PYTHON).unwrap();
-        assert_eq!(analysis.top_level_defs.len(), 2, "defs: {:?}", analysis.top_level_defs);
+        assert_eq!(
+            analysis.top_level_defs.len(),
+            2,
+            "defs: {:?}",
+            analysis.top_level_defs
+        );
         assert_eq!(analysis.top_level_defs[0].name, "Config");
         assert_eq!(analysis.top_level_defs[0].kind, SymbolKind::Class);
         assert_eq!(analysis.top_level_defs[1].name, "process");
@@ -908,7 +1034,11 @@ def process(items: list) -> int:
         assert!(m.lines_of_code > 0);
         assert!(m.blank_lines > 0);
         assert!(m.comment_lines > 0);
-        assert!(m.cyclomatic_complexity >= 5, "complexity: {}", m.cyclomatic_complexity);
+        assert!(
+            m.cyclomatic_complexity >= 5,
+            "complexity: {}",
+            m.cyclomatic_complexity
+        );
         assert!(m.max_nesting_depth >= 2, "depth: {}", m.max_nesting_depth);
     }
 
@@ -919,17 +1049,46 @@ def process(items: list) -> int:
         let analysis = analyze(SAMPLE_PYTHON).unwrap();
 
         let load = analysis.symbols.iter().find(|s| s.name == "load").unwrap();
-        let calls = load.metadata["calls"].as_array().expect("load should have calls");
-        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
-        assert!(qnames.contains(&"os.path.exists"), "load should call os.path.exists: {qnames:?}");
-        assert!(qnames.contains(&"open"), "load should call open: {qnames:?}");
-        assert!(qnames.contains(&"json.load"), "load should call json.load: {qnames:?}");
+        let calls = load.metadata["calls"]
+            .as_array()
+            .expect("load should have calls");
+        let qnames: Vec<&str> = calls
+            .iter()
+            .map(|c| c["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            qnames.contains(&"os.path.exists"),
+            "load should call os.path.exists: {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"open"),
+            "load should call open: {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"json.load"),
+            "load should call json.load: {qnames:?}"
+        );
 
-        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
-        let calls = process.metadata["calls"].as_array().expect("process should have calls");
-        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
-        assert!(qnames.contains(&"item.is_valid"), "process should call item.is_valid: {qnames:?}");
-        assert!(qnames.contains(&"item.is_pending"), "process should call item.is_pending: {qnames:?}");
+        let process = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "process")
+            .unwrap();
+        let calls = process.metadata["calls"]
+            .as_array()
+            .expect("process should have calls");
+        let qnames: Vec<&str> = calls
+            .iter()
+            .map(|c| c["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            qnames.contains(&"item.is_valid"),
+            "process should call item.is_valid: {qnames:?}"
+        );
+        assert!(
+            qnames.contains(&"item.is_pending"),
+            "process should call item.is_pending: {qnames:?}"
+        );
     }
 
     #[test]
@@ -941,11 +1100,19 @@ def process(items: list) -> int:
         let load = analysis.symbols.iter().find(|s| s.name == "load").unwrap();
         assert_eq!(load.metadata["parent_symbol"], "Config");
 
-        let init = analysis.symbols.iter().find(|s| s.name == "__init__").unwrap();
+        let init = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "__init__")
+            .unwrap();
         assert_eq!(init.metadata["parent_symbol"], "Config");
 
         // Top-level function `process` has no parent.
-        let process = analysis.symbols.iter().find(|s| s.name == "process").unwrap();
+        let process = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "process")
+            .unwrap();
         assert!(process.metadata.get("parent_symbol").is_none());
     }
 
@@ -963,10 +1130,21 @@ def outer():
 "#;
         let analysis = analyze(src).unwrap();
         let outer = analysis.symbols.iter().find(|s| s.name == "outer").unwrap();
-        let calls = outer.metadata["calls"].as_array().expect("outer should have calls");
-        let qnames: Vec<&str> = calls.iter().map(|c| c["qualified_name"].as_str().unwrap()).collect();
-        assert!(qnames.contains(&"first"), "outer should call first: {qnames:?}");
-        assert!(!qnames.contains(&"second"), "outer should NOT see second (it's inner's call): {qnames:?}");
+        let calls = outer.metadata["calls"]
+            .as_array()
+            .expect("outer should have calls");
+        let qnames: Vec<&str> = calls
+            .iter()
+            .map(|c| c["qualified_name"].as_str().unwrap())
+            .collect();
+        assert!(
+            qnames.contains(&"first"),
+            "outer should call first: {qnames:?}"
+        );
+        assert!(
+            !qnames.contains(&"second"),
+            "outer should NOT see second (it's inner's call): {qnames:?}"
+        );
     }
 
     #[test]
@@ -981,7 +1159,10 @@ def f():
         let analysis = analyze(src).unwrap();
         let f = analysis.symbols.iter().find(|s| s.name == "f").unwrap();
         let calls = f.metadata["calls"].as_array().expect("f should have calls");
-        let helper_count = calls.iter().filter(|c| c["qualified_name"] == "helper").count();
+        let helper_count = calls
+            .iter()
+            .filter(|c| c["qualified_name"] == "helper")
+            .count();
         assert_eq!(helper_count, 1, "duplicate calls should be deduplicated");
     }
 

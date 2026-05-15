@@ -179,7 +179,12 @@ pub fn split_edges(num_edges: usize, config: &SplitConfig) -> Result<EdgeSplit, 
     let val_idx = perm[train_size..train_size + val_size].to_vec();
     let test_idx = perm[train_size + val_size..].to_vec();
 
-    info!(train = train_size, val = val_size, test = test_size, "edge split");
+    info!(
+        train = train_size,
+        val = val_size,
+        test = test_size,
+        "edge split"
+    );
 
     Ok(EdgeSplit {
         train_idx,
@@ -206,8 +211,7 @@ pub fn negative_sample(graph: &GraphData, num_neg: usize) -> NegativeSamples {
     }
 
     // Build existing edge set for O(1) lookup
-    let mut existing: HashSet<(u32, u32)> =
-        HashSet::with_capacity(graph.num_edges);
+    let mut existing: HashSet<(u32, u32)> = HashSet::with_capacity(graph.num_edges);
     for (&s, &d) in graph.edge_src.iter().zip(&graph.edge_dst) {
         existing.insert((s, d));
     }
@@ -265,10 +269,13 @@ pub fn negative_sample(graph: &GraphData, num_neg: usize) -> NegativeSamples {
 /// on little-endian platforms (x86, ARM LE, RISC-V LE). The compile-time
 /// assertion below prevents silent corruption on big-endian targets.
 fn as_bytes<T>(slice: &[T]) -> &[u8] {
-    const { assert!(cfg!(target_endian = "little"), "safetensors requires little-endian") }
-    unsafe {
-        std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
+    const {
+        assert!(
+            cfg!(target_endian = "little"),
+            "safetensors requires little-endian"
+        )
     }
+    unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
 /// Serialize a graph with edge splits and negative samples to safetensors format.
@@ -283,7 +290,12 @@ pub fn serialize_graph(
 ) -> Result<Vec<u8>, TensorError> {
     // Validate split indices are within edge bounds
     let num_edges = graph.num_edges as u32;
-    for &idx in split.train_idx.iter().chain(&split.val_idx).chain(&split.test_idx) {
+    for &idx in split
+        .train_idx
+        .iter()
+        .chain(&split.val_idx)
+        .chain(&split.test_idx)
+    {
         if idx >= num_edges {
             return Err(TensorError::ValidationFailed {
                 message: format!("split index {idx} >= num_edges {}", graph.num_edges),
@@ -305,9 +317,7 @@ pub fn serialize_graph(
     for (&s, &d) in neg.src.iter().zip(&neg.dst) {
         if s >= num_nodes || d >= num_nodes {
             return Err(TensorError::ValidationFailed {
-                message: format!(
-                    "negative sample ({s}, {d}) out of bounds for {num_nodes} nodes"
-                ),
+                message: format!("negative sample ({s}, {d}) out of bounds for {num_nodes} nodes"),
             });
         }
     }
@@ -338,19 +348,11 @@ pub fn serialize_graph(
         ),
         (
             "edge_src",
-            TensorView::new(
-                Dtype::U32,
-                vec![graph.num_edges],
-                as_bytes(&graph.edge_src),
-            )?,
+            TensorView::new(Dtype::U32, vec![graph.num_edges], as_bytes(&graph.edge_src))?,
         ),
         (
             "edge_dst",
-            TensorView::new(
-                Dtype::U32,
-                vec![graph.num_edges],
-                as_bytes(&graph.edge_dst),
-            )?,
+            TensorView::new(Dtype::U32, vec![graph.num_edges], as_bytes(&graph.edge_dst))?,
         ),
         (
             "edge_type",
@@ -386,19 +388,11 @@ pub fn serialize_graph(
         ),
         (
             "neg_src",
-            TensorView::new(
-                Dtype::U32,
-                vec![neg.src.len()],
-                as_bytes(&neg.src),
-            )?,
+            TensorView::new(Dtype::U32, vec![neg.src.len()], as_bytes(&neg.src))?,
         ),
         (
             "neg_dst",
-            TensorView::new(
-                Dtype::U32,
-                vec![neg.dst.len()],
-                as_bytes(&neg.dst),
-            )?,
+            TensorView::new(Dtype::U32, vec![neg.dst.len()], as_bytes(&neg.dst))?,
         ),
     ];
 
@@ -429,9 +423,7 @@ pub fn serialize_graph(
 /// the GPU service reads the core tensors (`node_features`, `edge_src`,
 /// `edge_dst`, `edge_type`, `has_embedding`, `node_collections`) and
 /// metadata, then runs a forward pass through a loaded checkpoint.
-pub fn serialize_graph_for_inference(
-    graph: &GraphData,
-) -> Result<Vec<u8>, TensorError> {
+pub fn serialize_graph_for_inference(graph: &GraphData) -> Result<Vec<u8>, TensorError> {
     let has_emb_u8: Vec<u8> = graph.has_embedding.iter().map(|&b| b as u8).collect();
 
     let tensors: Vec<(&str, TensorView<'_>)> = vec![
@@ -457,19 +449,11 @@ pub fn serialize_graph_for_inference(
         ),
         (
             "edge_src",
-            TensorView::new(
-                Dtype::U32,
-                vec![graph.num_edges],
-                as_bytes(&graph.edge_src),
-            )?,
+            TensorView::new(Dtype::U32, vec![graph.num_edges], as_bytes(&graph.edge_src))?,
         ),
         (
             "edge_dst",
-            TensorView::new(
-                Dtype::U32,
-                vec![graph.num_edges],
-                as_bytes(&graph.edge_dst),
-            )?,
+            TensorView::new(Dtype::U32, vec![graph.num_edges], as_bytes(&graph.edge_dst))?,
         ),
         (
             "edge_type",
@@ -775,7 +759,10 @@ mod tests {
     #[test]
     fn test_split_edges_ratios() {
         let split = split_edges(100, &SplitConfig::default()).unwrap();
-        assert_eq!(split.train_idx.len() + split.val_idx.len() + split.test_idx.len(), 100);
+        assert_eq!(
+            split.train_idx.len() + split.val_idx.len() + split.test_idx.len(),
+            100
+        );
         assert_eq!(split.val_idx.len(), 10);
         assert_eq!(split.test_idx.len(), 10);
         assert_eq!(split.train_idx.len(), 80);

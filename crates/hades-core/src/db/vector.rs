@@ -13,7 +13,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use super::collections::CollectionProfile;
 use super::error::ArangoError;
-use super::index::{detect_vector_index, VectorMetric};
+use super::index::{VectorMetric, detect_vector_index};
 use super::pool::ArangoPool;
 use super::query::{self, ExecutionTarget};
 
@@ -104,7 +104,11 @@ async fn query_ann(
     metric: VectorMetric,
 ) -> Result<Vec<SimilarityResult>, ArangoError> {
     let func = approx_fn(metric);
-    let sort_order = if sort_descending(metric) { "DESC" } else { "ASC" };
+    let sort_order = if sort_descending(metric) {
+        "DESC"
+    } else {
+        "ASC"
+    };
 
     // Build the options argument for nProbe if specified
     let options_fragment = if n_probe.is_some() {
@@ -206,7 +210,11 @@ async fn query_brute_force(
         bind_vars["parent_key"] = serde_json::json!(filter);
     }
 
-    debug!(limit, has_filter = doc_filter.is_some(), "executing brute-force search");
+    debug!(
+        limit,
+        has_filter = doc_filter.is_some(),
+        "executing brute-force search"
+    );
 
     // Large batch_size avoids cursor pagination — the read-only proxy
     // doesn't support cursor continuation.
@@ -234,10 +242,7 @@ async fn query_brute_force(
             }
         };
 
-        let emb_vec: Vec<f64> = embedding
-            .iter()
-            .filter_map(|v| v.as_f64())
-            .collect();
+        let emb_vec: Vec<f64> = embedding.iter().filter_map(|v| v.as_f64()).collect();
 
         if emb_vec.len() != query_embedding.len() {
             trace!(
@@ -274,7 +279,10 @@ async fn query_brute_force(
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
             title: doc.get("title").and_then(|v| v.as_str()).map(String::from),
-            external_id: doc.get("external_id").and_then(|v| v.as_str()).map(String::from),
+            external_id: doc
+                .get("external_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             score,
         });
     }
@@ -310,10 +318,7 @@ fn parse_search_results(docs: Vec<Value>) -> Result<Vec<SimilarityResult>, Arang
             warn!("skipping search result: missing or non-string parent_key");
             continue;
         };
-        let score = doc
-            .get("score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let score = doc.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         results.push(SimilarityResult {
             parent_key: parent_key.to_string(),
@@ -321,7 +326,10 @@ fn parse_search_results(docs: Vec<Value>) -> Result<Vec<SimilarityResult>, Arang
             chunk_index: doc.get("chunk_index").and_then(|v| v.as_u64()),
             total_chunks: doc.get("total_chunks").and_then(|v| v.as_u64()),
             title: doc.get("title").and_then(|v| v.as_str()).map(String::from),
-            external_id: doc.get("external_id").and_then(|v| v.as_str()).map(String::from),
+            external_id: doc
+                .get("external_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             score,
         });
     }
@@ -365,7 +373,10 @@ mod tests {
         let a = l2_normalize(&v);
         let b = l2_normalize(&v);
         let sim = dot_product(&a, &b);
-        assert!((sim - 1.0).abs() < 1e-6, "identical vectors should have cosine ~1.0");
+        assert!(
+            (sim - 1.0).abs() < 1e-6,
+            "identical vectors should have cosine ~1.0"
+        );
     }
 
     #[test]
@@ -373,14 +384,20 @@ mod tests {
         let a = l2_normalize(&[1.0, 0.0]);
         let b = l2_normalize(&[0.0, 1.0]);
         let sim = dot_product(&a, &b);
-        assert!(sim.abs() < 1e-6, "orthogonal vectors should have cosine ~0.0");
+        assert!(
+            sim.abs() < 1e-6,
+            "orthogonal vectors should have cosine ~0.0"
+        );
     }
 
     #[test]
     fn test_approx_fn_mapping() {
         assert_eq!(approx_fn(VectorMetric::Cosine), "APPROX_NEAR_COSINE");
         assert_eq!(approx_fn(VectorMetric::L2), "APPROX_NEAR_L2");
-        assert_eq!(approx_fn(VectorMetric::InnerProduct), "APPROX_NEAR_INNER_PRODUCT");
+        assert_eq!(
+            approx_fn(VectorMetric::InnerProduct),
+            "APPROX_NEAR_INNER_PRODUCT"
+        );
     }
 
     #[test]

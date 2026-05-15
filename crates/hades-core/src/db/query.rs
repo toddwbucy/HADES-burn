@@ -105,9 +105,7 @@ pub async fn query(
     // Paginate through remaining results via writer (proxy limitation)
     if has_more {
         let id = cursor_id.as_deref().ok_or_else(|| {
-            ArangoError::Request(
-                "hasMore=true but no cursor ID in response".to_string(),
-            )
+            ArangoError::Request("hasMore=true but no cursor ID in response".to_string())
         })?;
 
         let pagination_result = paginate(pool, id, &mut results).await;

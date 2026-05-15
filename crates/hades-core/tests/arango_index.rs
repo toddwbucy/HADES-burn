@@ -17,27 +17,26 @@ fn arango_socket() -> PathBuf {
 }
 
 fn arango_password() -> String {
-    std::env::var("ARANGO_PASSWORD").expect(
-        "ARANGO_PASSWORD must be set for integration tests.",
-    )
+    std::env::var("ARANGO_PASSWORD").expect("ARANGO_PASSWORD must be set for integration tests.")
 }
 
 fn test_pool() -> Option<ArangoPool> {
     let socket = arango_socket();
     if !socket.exists() {
         if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
-            panic!("ARANGO_TESTS is set but socket not found at {}", socket.display());
+            panic!(
+                "ARANGO_TESTS is set but socket not found at {}",
+                socket.display()
+            );
         }
-        warn!("skipping: ArangoDB socket not found at {}", socket.display());
+        warn!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return None;
     }
 
-    let client = ArangoClient::with_socket(
-        socket,
-        "bident_burn",
-        "root",
-        &arango_password(),
-    );
+    let client = ArangoClient::with_socket(socket, "bident_burn", "root", &arango_password());
     Some(ArangoPool::new(client.clone(), client))
 }
 
@@ -74,7 +73,9 @@ async fn test_create_and_drop_vector_index() {
     let col_name = format!("test_vec_idx_{}", std::process::id());
 
     // Create a test collection
-    crud::create_collection(&pool, &col_name, Some(2)).await.unwrap();
+    crud::create_collection(&pool, &col_name, Some(2))
+        .await
+        .unwrap();
 
     // Insert a few documents with embedding fields so the index has something
     let docs: Vec<serde_json::Value> = (0..5)
@@ -103,7 +104,10 @@ async fn test_create_and_drop_vector_index() {
     .await
     {
         Ok(idx) => idx,
-        Err(e) if e.to_string().contains("vector index feature is not enabled") => {
+        Err(e)
+            if e.to_string()
+                .contains("vector index feature is not enabled") =>
+        {
             warn!("skipping: ArangoDB vector index feature not enabled");
             crud::drop_collection(&pool, &col_name, true).await.unwrap();
             return;

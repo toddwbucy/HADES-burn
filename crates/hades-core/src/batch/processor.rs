@@ -142,10 +142,17 @@ impl BatchProcessor {
             BatchState::default()
         };
 
-        let skip_set = state.skip_set().into_iter().map(String::from).collect::<std::collections::HashSet<String>>();
+        let skip_set = state
+            .skip_set()
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::HashSet<String>>();
         let skipped_count = items.iter().filter(|(id, _)| skip_set.contains(id)).count();
         if skipped_count > 0 {
-            info!(skipped = skipped_count, "resuming batch, skipping already-processed items");
+            info!(
+                skipped = skipped_count,
+                "resuming batch, skipping already-processed items"
+            );
         }
 
         // Set up progress reporter.
@@ -261,25 +268,31 @@ impl BatchProcessor {
 
         // Save final state.
         if let Some(ref path) = self.config.state_file {
-            let actual_failed = results.iter().filter(|r| !r.success && r.skipped != Some(true)).count();
+            let actual_failed = results
+                .iter()
+                .filter(|r| !r.success && r.skipped != Some(true))
+                .count();
             if actual_failed == 0 {
                 // All succeeded — clean up state file.
                 BatchState::clear(path)?;
                 debug!("batch complete with zero failures, state file cleared");
             } else {
                 state.save(path)?;
-                warn!(failures = actual_failed, "batch complete with failures, state file retained");
+                warn!(
+                    failures = actual_failed,
+                    "batch complete with failures, state file retained"
+                );
             }
         }
 
         progress.report_final();
 
         // Build summary.
-        let errors: Vec<ItemError> = results
+        let errors: Vec<ItemError> = results.iter().filter_map(|r| r.error.clone()).collect();
+        let completed = results
             .iter()
-            .filter_map(|r| r.error.clone())
-            .collect();
-        let completed = results.iter().filter(|r| r.success && r.skipped != Some(true)).count();
+            .filter(|r| r.success && r.skipped != Some(true))
+            .count();
         let failed = results.iter().filter(|r| !r.success).count();
         let skipped = results.iter().filter(|r| r.skipped == Some(true)).count();
 
@@ -359,11 +372,7 @@ mod tests {
             ..Default::default()
         });
 
-        let items = vec![
-            ("a".into(), 1),
-            ("b".into(), 2),
-            ("c".into(), 3),
-        ];
+        let items = vec![("a".into(), 1), ("b".into(), 2), ("c".into(), 3)];
 
         let summary = processor
             .process(items, |_id, val| async move {
@@ -435,11 +444,7 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
 
-        let items = vec![
-            ("a".into(), ()),
-            ("b".into(), ()),
-            ("c".into(), ()),
-        ];
+        let items = vec![("a".into(), ()), ("b".into(), ()), ("c".into(), ())];
 
         let summary = processor
             .process(items, move |_id, _data| {
@@ -473,7 +478,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!state_path.exists(), "state file should be deleted on success");
+        assert!(
+            !state_path.exists(),
+            "state file should be deleted on success"
+        );
     }
 
     #[tokio::test]
@@ -487,13 +495,14 @@ mod tests {
 
         let items = vec![("a".into(), ())];
         processor
-            .process(items, |_id, _data| async {
-                Err(anyhow::anyhow!("fail"))
-            })
+            .process(items, |_id, _data| async { Err(anyhow::anyhow!("fail")) })
             .await
             .unwrap();
 
-        assert!(state_path.exists(), "state file should be retained on failure");
+        assert!(
+            state_path.exists(),
+            "state file should be retained on failure"
+        );
         let state = BatchState::load(&state_path).unwrap().unwrap();
         assert_eq!(state.failed.len(), 1);
     }

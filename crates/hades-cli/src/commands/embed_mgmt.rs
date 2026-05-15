@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use hades_core::config::HadesConfig;
@@ -187,7 +187,8 @@ pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
     let gpus = parse_nvidia_smi_output(&run_nvidia_smi()?);
 
     // Try to get embedder device from service info
-    let embedder_device = match EmbeddingClient::connect_at(&config.embedding.service.socket).await {
+    let embedder_device = match EmbeddingClient::connect_at(&config.embedding.service.socket).await
+    {
         Ok(client) => client.info().await.ok().map(|info| info.device),
         Err(_) => None,
     };
@@ -211,7 +212,11 @@ pub async fn run_gpu_status(config: &HadesConfig) -> Result<()> {
 pub fn run_gpu_list() -> Result<()> {
     let gpus = parse_nvidia_smi_output(&run_nvidia_smi()?);
 
-    output::print_output("embed.gpu.list", json!({ "gpus": gpus }), &OutputFormat::Json);
+    output::print_output(
+        "embed.gpu.list",
+        json!({ "gpus": gpus }),
+        &OutputFormat::Json,
+    );
     Ok(())
 }
 
@@ -231,10 +236,8 @@ pub fn run_extract(file: &Path, format: &str, output: Option<&Path>) -> Result<(
 
     let text = match ext.as_str() {
         "pdf" => extract_pdf(file)?,
-        "txt" | "md" | "rst" | "text" | "markdown" => {
-            std::fs::read_to_string(file)
-                .with_context(|| format!("failed to read {}", file.display()))?
-        }
+        "txt" | "md" | "rst" | "text" | "markdown" => std::fs::read_to_string(file)
+            .with_context(|| format!("failed to read {}", file.display()))?,
         "html" | "htm" => {
             let raw = std::fs::read_to_string(file)
                 .with_context(|| format!("failed to read {}", file.display()))?;
@@ -293,9 +296,7 @@ fn run_nvidia_smi() -> Result<String> {
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-        }
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
         Ok(o) => {
             anyhow::bail!("nvidia-smi failed: {}", String::from_utf8_lossy(&o.stderr));
         }

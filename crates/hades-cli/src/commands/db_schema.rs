@@ -12,7 +12,11 @@ use hades_core::dispatch::{self, DaemonCommand};
 use super::output::{self, OutputFormat};
 
 /// Connect, dispatch a command, and print the result.
-async fn dispatch_and_print(config: &HadesConfig, cmd: DaemonCommand, command_name: &str) -> Result<()> {
+async fn dispatch_and_print(
+    config: &HadesConfig,
+    cmd: DaemonCommand,
+    command_name: &str,
+) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
     let result = dispatch::dispatch(&pool, config, cmd).await?;
     output::print_output(command_name, result, &OutputFormat::Json);
@@ -50,5 +54,10 @@ pub async fn run_show(config: &HadesConfig, name: &str) -> Result<()> {
 
 /// `hades db schema version`
 pub async fn run_version(config: &HadesConfig) -> Result<()> {
-    dispatch_and_print(config, DaemonCommand::DbSchemaVersion {}, "db.schema.version").await
+    dispatch_and_print(
+        config,
+        DaemonCommand::DbSchemaVersion {},
+        "db.schema.version",
+    )
+    .await
 }

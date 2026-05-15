@@ -13,8 +13,7 @@ fn fixture_yaml_path() -> PathBuf {
     }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR not set — must run via cargo test");
-    PathBuf::from(manifest_dir)
-        .join("tests/fixtures/hades.yaml")
+    PathBuf::from(manifest_dir).join("tests/fixtures/hades.yaml")
 }
 
 /// Load and parse the test fixture into a HadesConfig.
@@ -48,10 +47,7 @@ fn load_fixture_hades_yaml() {
     );
 
     // Embedding service — OpenAI-compatible HTTP endpoint (vLLM-style).
-    assert_eq!(
-        config.embedding.service.socket,
-        "http://localhost:8087/v1"
-    );
+    assert_eq!(config.embedding.service.socket, "http://localhost:8087/v1");
     assert!(config.embedding.service.fallback_to_local);
     assert_eq!(config.embedding.service.timeout_ms, 30000);
     assert_eq!(config.embedding.service.idle_timeout, 0);

@@ -91,5 +91,8 @@ async fn test_connect_nonexistent_socket_fails() {
     };
 
     let result = TrainingClient::connect(config).await;
-    assert!(result.is_err(), "expected connection error for nonexistent socket");
+    assert!(
+        result.is_err(),
+        "expected connection error for nonexistent socket"
+    );
 }

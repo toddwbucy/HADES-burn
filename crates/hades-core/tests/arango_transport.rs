@@ -27,16 +27,15 @@ fn arango_password() -> String {
 async fn get_server_version() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
-    let client = hades_core::db::ArangoClient::with_socket(
-        socket,
-        "_system",
-        "root",
-        &arango_password(),
-    );
+    let client =
+        hades_core::db::ArangoClient::with_socket(socket, "_system", "root", &arango_password());
 
     // /_api/version doesn't need a database prefix, but our client
     // always prepends /_db/{db}/ — _system works for version endpoint
@@ -50,19 +49,20 @@ async fn get_server_version() {
 async fn list_databases() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
-    let client = hades_core::db::ArangoClient::with_socket(
-        socket,
-        "_system",
-        "root",
-        &arango_password(),
-    );
+    let client =
+        hades_core::db::ArangoClient::with_socket(socket, "_system", "root", &arango_password());
 
     let result = client.get("database").await.unwrap();
-    let databases = result["result"].as_array().expect("expected array of databases");
+    let databases = result["result"]
+        .as_array()
+        .expect("expected array of databases");
 
     // _system should always exist
     let names: Vec<&str> = databases.iter().filter_map(|v| v.as_str()).collect();
@@ -76,7 +76,10 @@ async fn list_databases() {
 async fn list_bident_burn_collections() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
@@ -107,7 +110,10 @@ async fn list_bident_burn_collections() {
 async fn get_nonexistent_document_returns_error() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
@@ -118,13 +124,12 @@ async fn get_nonexistent_document_returns_error() {
         &arango_password(),
     );
 
-    let result = client.get("document/persephone_tasks/nonexistent_key_xyz").await;
+    let result = client
+        .get("document/persephone_tasks/nonexistent_key_xyz")
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(
-        err.is_not_found(),
-        "expected NotFound, got: {err}"
-    );
+    assert!(err.is_not_found(), "expected NotFound, got: {err}");
 }
 
 /// Verify AQL query execution (read-only).
@@ -132,7 +137,10 @@ async fn get_nonexistent_document_returns_error() {
 async fn execute_aql_query() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
@@ -162,7 +170,10 @@ async fn execute_aql_query() {
 async fn pool_health_check() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 
@@ -172,12 +183,8 @@ async fn pool_health_check() {
         "root",
         &arango_password(),
     );
-    let writer = hades_core::db::ArangoClient::with_socket(
-        socket,
-        "_system",
-        "root",
-        &arango_password(),
-    );
+    let writer =
+        hades_core::db::ArangoClient::with_socket(socket, "_system", "root", &arango_password());
 
     let pool = hades_core::db::ArangoPool::new(reader, writer);
     assert!(pool.is_shared(), "same socket should produce shared pool");
@@ -193,7 +200,10 @@ async fn pool_health_check() {
 async fn pool_reader_writer_queries() {
     let socket = arango_socket();
     if !socket.exists() {
-        eprintln!("skipping: ArangoDB socket not found at {}", socket.display());
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return;
     }
 

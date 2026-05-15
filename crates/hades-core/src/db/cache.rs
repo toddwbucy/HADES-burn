@@ -120,11 +120,7 @@ impl CachedPool {
 
     /// Get a document, returning a cached copy if available.
     #[instrument(skip(self), fields(db = %self.pool.database()))]
-    pub async fn get_document(
-        &self,
-        collection: &str,
-        key: &str,
-    ) -> Result<Value, ArangoError> {
+    pub async fn get_document(&self, collection: &str, key: &str) -> Result<Value, ArangoError> {
         let cache_key = doc_cache_key(collection, key);
 
         if let Some(cached) = self.doc_cache.get(&cache_key).await {
@@ -143,13 +139,11 @@ impl CachedPool {
 
     /// Delete a document and invalidate its cache entry.
     #[instrument(skip(self), fields(db = %self.pool.database()))]
-    pub async fn delete_document(
-        &self,
-        collection: &str,
-        key: &str,
-    ) -> Result<Value, ArangoError> {
+    pub async fn delete_document(&self, collection: &str, key: &str) -> Result<Value, ArangoError> {
         let result = crud::delete_document(&self.pool, collection, key).await?;
-        self.doc_cache.invalidate(&doc_cache_key(collection, key)).await;
+        self.doc_cache
+            .invalidate(&doc_cache_key(collection, key))
+            .await;
         trace!(collection, key, "document cache invalidated (delete)");
         Ok(result)
     }
@@ -163,7 +157,9 @@ impl CachedPool {
         data: &Value,
     ) -> Result<Value, ArangoError> {
         let result = crud::update_document(&self.pool, collection, key, data).await?;
-        self.doc_cache.invalidate(&doc_cache_key(collection, key)).await;
+        self.doc_cache
+            .invalidate(&doc_cache_key(collection, key))
+            .await;
         trace!(collection, key, "document cache invalidated (update)");
         Ok(result)
     }
@@ -177,7 +173,9 @@ impl CachedPool {
         data: &Value,
     ) -> Result<Value, ArangoError> {
         let result = crud::replace_document(&self.pool, collection, key, data).await?;
-        self.doc_cache.invalidate(&doc_cache_key(collection, key)).await;
+        self.doc_cache
+            .invalidate(&doc_cache_key(collection, key))
+            .await;
         trace!(collection, key, "document cache invalidated (replace)");
         Ok(result)
     }
@@ -195,7 +193,11 @@ impl CachedPool {
         // Invalidate all query cache entries since we can't know which
         // queries are affected by the new documents.
         self.query_cache.invalidate_all();
-        trace!(collection, created = result.created, "query cache invalidated (insert)");
+        trace!(
+            collection,
+            created = result.created,
+            "query cache invalidated (insert)"
+        );
         Ok(result)
     }
 
@@ -217,10 +219,7 @@ impl CachedPool {
     ) -> Result<QueryResult, ArangoError> {
         // Never cache write queries
         if target == ExecutionTarget::Writer {
-            return query::query(
-                &self.pool, aql, bind_vars, batch_size, full_count, target,
-            )
-            .await;
+            return query::query(&self.pool, aql, bind_vars, batch_size, full_count, target).await;
         }
 
         let cache_key = query_cache_key(aql, bind_vars, batch_size);
@@ -234,10 +233,8 @@ impl CachedPool {
         self.metrics.query_misses.fetch_add(1, Ordering::Relaxed);
         trace!("query cache miss");
 
-        let result = query::query(
-            &self.pool, aql, bind_vars, batch_size, full_count, target,
-        )
-        .await?;
+        let result =
+            query::query(&self.pool, aql, bind_vars, batch_size, full_count, target).await?;
 
         self.query_cache.insert(cache_key, result.clone()).await;
         Ok(result)
@@ -268,7 +265,9 @@ impl CachedPool {
 
     /// Invalidate a specific document from the cache.
     pub async fn invalidate_document(&self, collection: &str, key: &str) {
-        self.doc_cache.invalidate(&doc_cache_key(collection, key)).await;
+        self.doc_cache
+            .invalidate(&doc_cache_key(collection, key))
+            .await;
     }
 
     /// Invalidate all query cache entries.

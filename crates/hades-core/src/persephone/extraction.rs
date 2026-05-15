@@ -44,9 +44,7 @@ pub enum ExtractionEndpoint {
 impl Default for ExtractionClientConfig {
     fn default() -> Self {
         Self {
-            endpoint: ExtractionEndpoint::Unix(
-                PathBuf::from("/run/hades/extractor.sock"),
-            ),
+            endpoint: ExtractionEndpoint::Unix(PathBuf::from("/run/hades/extractor.sock")),
             timeout: DEFAULT_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
@@ -207,16 +205,8 @@ impl ExtractionClient {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    async fn do_extract(
-        &self,
-        request: ExtractRequest,
-    ) -> Result<ExtractResult, ExtractionError> {
-        let response: ExtractResponse = self
-            .inner
-            .clone()
-            .extract(request)
-            .await?
-            .into_inner();
+    async fn do_extract(&self, request: ExtractRequest) -> Result<ExtractResult, ExtractionError> {
+        let response: ExtractResponse = self.inner.clone().extract(request).await?.into_inner();
 
         if response.full_text.is_empty()
             && response.tables.is_empty()
@@ -229,7 +219,10 @@ impl ExtractionClient {
             ));
         }
 
-        let source_type = response.source_type.try_into().unwrap_or(SourceType::Unknown);
+        let source_type = response
+            .source_type
+            .try_into()
+            .unwrap_or(SourceType::Unknown);
 
         debug!(
             text_len = response.full_text.len(),

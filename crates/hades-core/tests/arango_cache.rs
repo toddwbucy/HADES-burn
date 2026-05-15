@@ -19,27 +19,26 @@ fn arango_socket() -> PathBuf {
 }
 
 fn arango_password() -> String {
-    std::env::var("ARANGO_PASSWORD").expect(
-        "ARANGO_PASSWORD must be set for integration tests.",
-    )
+    std::env::var("ARANGO_PASSWORD").expect("ARANGO_PASSWORD must be set for integration tests.")
 }
 
 fn test_pool() -> Option<ArangoPool> {
     let socket = arango_socket();
     if !socket.exists() {
         if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
-            panic!("ARANGO_TESTS is set but socket not found at {}", socket.display());
+            panic!(
+                "ARANGO_TESTS is set but socket not found at {}",
+                socket.display()
+            );
         }
-        warn!("skipping: ArangoDB socket not found at {}", socket.display());
+        warn!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
         return None;
     }
 
-    let client = ArangoClient::with_socket(
-        socket,
-        "bident_burn",
-        "root",
-        &arango_password(),
-    );
+    let client = ArangoClient::with_socket(socket, "bident_burn", "root", &arango_password());
     Some(ArangoPool::new(client.clone(), client))
 }
 
@@ -51,7 +50,9 @@ async fn test_cached_get_document() {
     crud::create_collection(&pool, &col, Some(2)).await.unwrap();
 
     let doc = serde_json::json!({"_key": "doc1", "value": 42});
-    crud::insert_documents(&pool, &col, &[doc], false).await.unwrap();
+    crud::insert_documents(&pool, &col, &[doc], false)
+        .await
+        .unwrap();
 
     let cached = CachedPool::with_defaults(pool.clone());
 
@@ -82,7 +83,9 @@ async fn test_cached_delete_invalidates() {
     crud::create_collection(&pool, &col, Some(2)).await.unwrap();
 
     let doc = serde_json::json!({"_key": "doc1", "value": 99});
-    crud::insert_documents(&pool, &col, &[doc], false).await.unwrap();
+    crud::insert_documents(&pool, &col, &[doc], false)
+        .await
+        .unwrap();
 
     let cached = CachedPool::with_defaults(pool.clone());
 

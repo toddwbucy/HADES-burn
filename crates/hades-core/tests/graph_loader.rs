@@ -72,7 +72,9 @@ fn nl_pool() -> Option<ArangoPool> {
 async fn test_load_full_graph() {
     let Some(pool) = nl_pool() else { return };
 
-    let Some(schema) = load_test_schema(&pool).await else { return };
+    let Some(schema) = load_test_schema(&pool).await else {
+        return;
+    };
     let (graph, id_map) = graph::load(&pool, &schema)
         .await
         .expect("graph load failed");
@@ -106,7 +108,10 @@ async fn test_load_full_graph() {
     assert!(!graph.collection_names.is_empty());
     let mut sorted = graph.collection_names.clone();
     sorted.sort();
-    assert_eq!(graph.collection_names, sorted, "collection_names must be sorted");
+    assert_eq!(
+        graph.collection_names, sorted,
+        "collection_names must be sorted"
+    );
 
     // Some nodes should have embeddings (NestedLearning has real data)
     assert!(
@@ -151,7 +156,9 @@ async fn test_load_full_graph() {
 async fn test_idmap_collection_grouping() {
     let Some(pool) = nl_pool() else { return };
 
-    let Some(schema) = load_test_schema(&pool).await else { return };
+    let Some(schema) = load_test_schema(&pool).await else {
+        return;
+    };
     let (_graph, id_map) = graph::load(&pool, &schema)
         .await
         .expect("graph load failed");

@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use hades_core::config::HadesConfig;
-use hades_core::db::{ArangoError, ArangoPool};
 use hades_core::db::query::{self, ExecutionTarget};
+use hades_core::db::{ArangoError, ArangoPool};
 
 use super::output::{self, OutputFormat};
 
@@ -110,7 +110,6 @@ const INVARIANTS: &[Invariant] = &[
                  RETURN DISTINCT { chunk: c._key, missing_symbol: sym_key }",
         ),
     },
-
     // Edge invariants (8–11)
     Invariant {
         id: 8,
@@ -156,7 +155,6 @@ const INVARIANTS: &[Invariant] = &[
                RETURN { edge: e._key, _from: e._from, _to: e._to }",
         ),
     },
-
     // Uniqueness invariants (12–14) — enforced by ArangoDB
     Invariant {
         id: 12,
@@ -176,7 +174,6 @@ const INVARIANTS: &[Invariant] = &[
         description: "Same (file_key, qualified_name) pair always produces the same symbol _key (verified by unit tests)",
         aql: None,
     },
-
     // Primitive invariants (15–17)
     Invariant {
         id: 15,
@@ -353,7 +350,11 @@ async fn check_invariant(pool: &ArangoPool, inv: &Invariant) -> Result<Invariant
     .await
     {
         Ok(qr) => qr,
-        Err(ArangoError::Api { error_num: 1203, message, .. }) => {
+        Err(ArangoError::Api {
+            error_num: 1203,
+            message,
+            ..
+        }) => {
             // Collection or view not found — skip gracefully.
             return Ok(InvariantResult {
                 id: inv.id,

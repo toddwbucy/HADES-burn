@@ -60,7 +60,10 @@ pub fn late_chunk_embeddings(
     }
 
     let num_tokens = token_embeddings.len();
-    let step = config.chunk_size_tokens.saturating_sub(config.overlap_tokens).max(1);
+    let step = config
+        .chunk_size_tokens
+        .saturating_sub(config.overlap_tokens)
+        .max(1);
 
     let mut boundaries = Vec::new();
     let mut start = 0;

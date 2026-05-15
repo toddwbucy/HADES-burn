@@ -18,10 +18,7 @@ use anyhow::{Context, Result};
 use tracing::debug;
 
 /// Standard locations to search for hades.yaml, in priority order.
-const CONFIG_SEARCH_PATHS: &[&str] = &[
-    "hades.yaml",
-    "core/config/hades.yaml",
-];
+const CONFIG_SEARCH_PATHS: &[&str] = &["hades.yaml", "core/config/hades.yaml"];
 
 /// Load the full HADES configuration.
 ///
@@ -242,7 +239,10 @@ search:
         let result = config.apply_env_overrides();
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("maybe"), "error should mention the bad value: {msg}");
+        assert!(
+            msg.contains("maybe"),
+            "error should mention the bad value: {msg}"
+        );
 
         unsafe { env::remove_var("HADES_USE_GPU") };
     }

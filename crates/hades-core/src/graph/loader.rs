@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info, instrument, warn};
 
-use crate::db::{ArangoError, ArangoPool};
 use crate::db::query::{self, ExecutionTarget};
+use crate::db::{ArangoError, ArangoPool};
 
 use super::runtime_schema::RuntimeSchema;
 use super::types::{GraphData, GraphDataError, IDMap};
@@ -88,8 +88,7 @@ pub async fn load(
 
     info!(
         num_collections = relation_order.len(),
-        feature_dim,
-        "loading edges"
+        feature_dim, "loading edges"
     );
 
     for (rel_idx, col_name) in relation_order.iter().enumerate() {
@@ -224,10 +223,16 @@ async fn load_edge_collection(
             .as_str()
             .ok_or(GraphLoaderError::MalformedEdge { index: i })?;
 
-        let src_idx = u32::try_from(id_map.get_or_create(src_id))
-            .map_err(|_| GraphLoaderError::TooManyNodes { num_nodes: id_map.len() })?;
-        let dst_idx = u32::try_from(id_map.get_or_create(dst_id))
-            .map_err(|_| GraphLoaderError::TooManyNodes { num_nodes: id_map.len() })?;
+        let src_idx = u32::try_from(id_map.get_or_create(src_id)).map_err(|_| {
+            GraphLoaderError::TooManyNodes {
+                num_nodes: id_map.len(),
+            }
+        })?;
+        let dst_idx = u32::try_from(id_map.get_or_create(dst_id)).map_err(|_| {
+            GraphLoaderError::TooManyNodes {
+                num_nodes: id_map.len(),
+            }
+        })?;
         raw_edges.push((src_idx, dst_idx, rel_idx as u32));
         count += 1;
     }
@@ -255,12 +260,7 @@ async fn load_collection_embeddings(
     // Build (key, node_idx) pairs — extract _key from "collection/_key"
     let keyed_nodes: Vec<(&str, usize)> = node_list
         .iter()
-        .filter_map(|(arango_id, idx)| {
-            arango_id
-                .split('/')
-                .nth(1)
-                .map(|key| (key, *idx))
-        })
+        .filter_map(|(arango_id, idx)| arango_id.split('/').nth(1).map(|key| (key, *idx)))
         .collect();
 
     let mut total_embedded = 0;
@@ -323,7 +323,11 @@ async fn load_collection_embeddings(
                 .map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
             let Some(embedding) = embedding else {
-                warn!(key, collection = col_name, "embedding contains non-numeric values, skipping");
+                warn!(
+                    key,
+                    collection = col_name,
+                    "embedding contains non-numeric values, skipping"
+                );
                 continue;
             };
 
@@ -335,8 +339,7 @@ async fn load_collection_embeddings(
     if skipped > 0 {
         warn!(
             collection = col_name,
-            skipped,
-            "embeddings skipped (null or wrong dimension)"
+            skipped, "embeddings skipped (null or wrong dimension)"
         );
     }
 

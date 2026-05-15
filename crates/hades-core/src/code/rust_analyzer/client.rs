@@ -64,9 +64,13 @@ impl LspClient {
                 }
             })?;
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| RustAnalyzerError::Process("no stdin handle".into()))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| RustAnalyzerError::Process("no stdout handle".into()))?;
 
         let pending: Arc<Mutex<HashMap<i64, ResponseSender>>> =
@@ -90,7 +94,8 @@ impl LspClient {
                 reader_notifs,
                 reader_signal,
                 reader_stdin_clone,
-            ).await;
+            )
+            .await;
         });
 
         Ok(Self {
@@ -134,7 +139,9 @@ impl LspClient {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 // Channel closed — reader task died.
-                Err(RustAnalyzerError::Process("reader task closed channel".into()))
+                Err(RustAnalyzerError::Process(
+                    "reader task closed channel".into(),
+                ))
             }
             Err(_) => {
                 // Timeout — clean up pending entry.
@@ -147,11 +154,7 @@ impl LspClient {
     }
 
     /// Send a JSON-RPC notification (no response expected).
-    pub async fn notify(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<(), RustAnalyzerError> {
+    pub async fn notify(&self, method: &str, params: Value) -> Result<(), RustAnalyzerError> {
         let message = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -184,20 +187,15 @@ impl LspClient {
     /// Graceful shutdown: send shutdown request, then exit notification.
     pub async fn shutdown(mut self) -> Result<(), RustAnalyzerError> {
         // Send shutdown request (best effort).
-        let _ = self.request(
-            "shutdown",
-            Value::Null,
-            std::time::Duration::from_secs(5),
-        ).await;
+        let _ = self
+            .request("shutdown", Value::Null, std::time::Duration::from_secs(5))
+            .await;
 
         // Send exit notification.
         let _ = self.notify("exit", Value::Null).await;
 
         // Wait for child to exit.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.child.wait(),
-        ).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await;
 
         // Abort reader task.
         if let Some(handle) = self.reader_handle.take() {
@@ -266,10 +264,7 @@ async fn reader_loop(
                     let result = if let Some(err) = message.get("error") {
                         Err(RustAnalyzerError::JsonRpc {
                             code: err["code"].as_i64().unwrap_or(-1),
-                            message: err["message"]
-                                .as_str()
-                                .unwrap_or("unknown")
-                                .to_string(),
+                            message: err["message"].as_str().unwrap_or("unknown").to_string(),
                         })
                     } else {
                         Ok(message["result"].clone())

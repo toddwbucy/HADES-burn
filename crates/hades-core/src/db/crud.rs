@@ -173,7 +173,12 @@ pub async fn insert_documents(
         ndjson.push_str(&serde_json::to_string(doc)?);
     }
 
-    debug!(collection, doc_count = docs.len(), overwrite, "importing documents");
+    debug!(
+        collection,
+        doc_count = docs.len(),
+        overwrite,
+        "importing documents"
+    );
 
     let resp = pool
         .writer()
@@ -297,9 +302,8 @@ pub async fn upsert_documents(
         return Ok(ImportResult::empty());
     }
 
-    let path = format!(
-        "import?collection={collection}&type=documents&complete=false&onDuplicate=replace"
-    );
+    let path =
+        format!("import?collection={collection}&type=documents&complete=false&onDuplicate=replace");
 
     let mut ndjson = String::new();
     for (i, doc) in docs.iter().enumerate() {
@@ -362,27 +366,23 @@ pub async fn list_collections(
     exclude_system: bool,
 ) -> Result<Vec<CollectionInfo>, ArangoError> {
     let resp = pool.reader().get("collection").await?;
-    let arr = resp["result"]
-        .as_array()
-        .ok_or_else(|| ArangoError::Request(
-            "list collections: missing or non-array 'result' field".to_string(),
-        ))?;
+    let arr = resp["result"].as_array().ok_or_else(|| {
+        ArangoError::Request("list collections: missing or non-array 'result' field".to_string())
+    })?;
 
     let mut collections = Vec::with_capacity(arr.len());
     for c in arr {
-        let name = c["name"]
-            .as_str()
-            .ok_or_else(|| ArangoError::Request(
-                "list collections: entry missing 'name' string".to_string(),
-            ))?;
+        let name = c["name"].as_str().ok_or_else(|| {
+            ArangoError::Request("list collections: entry missing 'name' string".to_string())
+        })?;
         if exclude_system && name.starts_with('_') {
             continue;
         }
-        let collection_type = c["type"]
-            .as_u64()
-            .ok_or_else(|| ArangoError::Request(
-                format!("list collections: entry '{name}' missing 'type' integer"),
-            ))? as u32;
+        let collection_type = c["type"].as_u64().ok_or_else(|| {
+            ArangoError::Request(format!(
+                "list collections: entry '{name}' missing 'type' integer"
+            ))
+        })? as u32;
         collections.push(CollectionInfo {
             name: name.to_string(),
             collection_type,
@@ -393,17 +393,14 @@ pub async fn list_collections(
 
 /// Get the document count for a collection.
 #[instrument(skip(pool), fields(db = %pool.database()))]
-pub async fn count_collection(
-    pool: &ArangoPool,
-    collection: &str,
-) -> Result<u64, ArangoError> {
+pub async fn count_collection(pool: &ArangoPool, collection: &str) -> Result<u64, ArangoError> {
     let path = format!("collection/{collection}/count");
     let resp = pool.reader().get(&path).await?;
-    resp["count"]
-        .as_u64()
-        .ok_or_else(|| ArangoError::Request(
-            format!("count_collection: missing or non-numeric 'count' in response for '{collection}'"),
+    resp["count"].as_u64().ok_or_else(|| {
+        ArangoError::Request(format!(
+            "count_collection: missing or non-numeric 'count' in response for '{collection}'"
         ))
+    })
 }
 
 /// Create a new collection.

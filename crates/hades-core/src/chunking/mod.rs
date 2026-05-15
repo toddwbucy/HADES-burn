@@ -10,7 +10,7 @@
 mod late;
 mod strategies;
 
-pub use late::{late_chunk_embeddings, LateChunkConfig, LateChunkResult};
+pub use late::{LateChunkConfig, LateChunkResult, late_chunk_embeddings};
 pub use strategies::{SentenceChunking, SlidingWindowChunking, TokenChunking};
 
 /// A chunk of text with positional metadata.

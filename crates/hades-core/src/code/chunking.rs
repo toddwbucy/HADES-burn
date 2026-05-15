@@ -91,7 +91,12 @@ impl ChunkingStrategy for AstChunking {
             if chunk_text.len() <= self.max_chunk_chars {
                 final_chunks.push((chunk_text, start_byte));
             } else {
-                split_at_lines(&chunk_text, start_byte, self.max_chunk_chars, &mut final_chunks);
+                split_at_lines(
+                    &chunk_text,
+                    start_byte,
+                    self.max_chunk_chars,
+                    &mut final_chunks,
+                );
             }
         }
 
@@ -258,8 +263,22 @@ mod tests {
         let g_start = source.find("def g").unwrap();
 
         let defs = vec![
-            TopLevelDef { name: "f".into(), kind: SymbolKind::Function, start_line: 3, end_line: 4, start_byte: f_start, end_byte: f_end },
-            TopLevelDef { name: "g".into(), kind: SymbolKind::Function, start_line: 6, end_line: 7, start_byte: g_start, end_byte: source.len() },
+            TopLevelDef {
+                name: "f".into(),
+                kind: SymbolKind::Function,
+                start_line: 3,
+                end_line: 4,
+                start_byte: f_start,
+                end_byte: f_end,
+            },
+            TopLevelDef {
+                name: "g".into(),
+                kind: SymbolKind::Function,
+                start_line: 6,
+                end_line: 7,
+                start_byte: g_start,
+                end_byte: source.len(),
+            },
         ];
         let chunker = AstChunking::new(defs);
         let chunks = chunker.chunk(source);

@@ -70,9 +70,16 @@ pub async fn run_apply(
     }
 
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
-    let result = schema_apply::apply(&pool, &schema, ApplyOptions { dry_run: false, force })
-        .await
-        .context("schema apply failed")?;
+    let result = schema_apply::apply(
+        &pool,
+        &schema,
+        ApplyOptions {
+            dry_run: false,
+            force,
+        },
+    )
+    .await
+    .context("schema apply failed")?;
 
     output::print_output(
         "schema.apply",

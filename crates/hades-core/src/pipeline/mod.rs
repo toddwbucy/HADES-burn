@@ -6,6 +6,4 @@
 
 mod orchestrator;
 
-pub use orchestrator::{
-    DocumentResult, Pipeline, PipelineConfig, PipelineError, PipelineSummary,
-};
+pub use orchestrator::{DocumentResult, Pipeline, PipelineConfig, PipelineError, PipelineSummary};

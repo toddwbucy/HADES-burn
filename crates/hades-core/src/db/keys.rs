@@ -8,9 +8,8 @@ use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 /// Regex to strip trailing version suffix (e.g. `v1`, `v2`, `v12`).
-static VERSION_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"v\d+$").expect("invalid regex")
-});
+static VERSION_SUFFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"v\d+$").expect("invalid regex"));
 
 /// Normalize a raw identifier into an ArangoDB document key.
 ///
@@ -209,7 +208,10 @@ mod tests {
         assert_eq!(normalize_document_key("2501.12345"), "2501_12345");
         assert_eq!(normalize_document_key("hep-th/9901001"), "hep-th_9901001");
         assert_eq!(normalize_document_key("simple_key"), "simple_key");
-        assert_eq!(normalize_document_key("path/to/file.txt"), "path_to_file_txt");
+        assert_eq!(
+            normalize_document_key("path/to/file.txt"),
+            "path_to_file_txt"
+        );
         // Version-like substring in the middle should NOT be stripped
         assert_eq!(normalize_document_key("v2_doc.key"), "v2_doc_key");
     }
@@ -262,7 +264,10 @@ mod tests {
         assert_eq!(suffix.len(), 8, "hash suffix: {suffix}");
 
         let key2 = symbol_key("src_lib_rs", "Display for Config");
-        assert!(key2.starts_with("src_lib_rs__Display_for_Config__"), "key: {key2}");
+        assert!(
+            key2.starts_with("src_lib_rs__Display_for_Config__"),
+            "key: {key2}"
+        );
 
         let key3 = symbol_key("src_lib_rs", "Vec<String>");
         assert!(key3.starts_with("src_lib_rs__Vec_String___"), "key: {key3}");

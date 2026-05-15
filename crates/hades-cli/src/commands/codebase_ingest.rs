@@ -17,15 +17,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use serde_json::{json, Value};
-use tracing::{debug, error, info, warn};
 use ignore::WalkBuilder;
+use serde_json::{Value, json};
+use tracing::{debug, error, info, warn};
 
+use hades_core::HadesConfig;
 use hades_core::chunking::ChunkingStrategy;
-use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
 use hades_core::code::rust_analyzer::{
     EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
 };
+use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
 use hades_core::code::{python_calls, rust_imports};
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
@@ -33,7 +34,6 @@ use hades_core::db::keys;
 use hades_core::db::query::ExecutionTarget;
 use hades_core::db::{ArangoErrorKind, ArangoPool};
 use hades_core::persephone::embedding::EmbeddingClient;
-use hades_core::HadesConfig;
 
 use super::output::{self, OutputFormat};
 
@@ -43,7 +43,12 @@ use super::output::{self, OutputFormat};
 /// real repos; this list catches the unfortunate case of a flat directory
 /// dropped onto disk without any ignore files.
 const SKIP_DIRS: &[&str] = &[
-    "__pycache__", "node_modules", "target", "venv", "dist", "build",
+    "__pycache__",
+    "node_modules",
+    "target",
+    "venv",
+    "dist",
+    "build",
 ];
 
 /// Per-file result for JSON output.
@@ -117,8 +122,7 @@ pub async fn run(
     };
 
     // Connect to services.
-    let db = ArangoPool::from_config(config)
-        .context("failed to connect to ArangoDB")?;
+    let db = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
     // Embedding is optional — ingest proceeds without vectors if the service is unavailable.
     let embedder = match EmbeddingClient::connect_at(&config.embedding.service.socket).await {
@@ -211,7 +215,10 @@ pub async fn run(
 
         let duration = item_start.elapsed().as_millis() as u64;
         match result {
-            Ok(r) => results.push(FileResult { duration_ms: duration, ..r }),
+            Ok(r) => results.push(FileResult {
+                duration_ms: duration,
+                ..r
+            }),
             Err(e) => {
                 error!(path = %rel_path, error = %e, "ingest failed");
                 results.push(FileResult {
@@ -237,8 +244,13 @@ pub async fn run(
         &py_symbol_index,
     );
     if !py_import_edges.is_empty() {
-        info!(edge_count = py_import_edges.len(), "resolved Python import edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.imports_edges, &py_import_edges, true).await {
+        info!(
+            edge_count = py_import_edges.len(),
+            "resolved Python import edges"
+        );
+        if let Err(e) =
+            crud::insert_documents(&db, CODEBASE.imports_edges, &py_import_edges, true).await
+        {
             warn!(error = %e, "failed to store Python import edges");
         }
     }
@@ -253,18 +265,29 @@ pub async fn run(
         &py_symbol_index,
     );
     if !py_call_edges.is_empty() {
-        info!(edge_count = py_call_edges.len(), "resolved Python call edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.calls_edges, &py_call_edges, true).await {
+        info!(
+            edge_count = py_call_edges.len(),
+            "resolved Python call edges"
+        );
+        if let Err(e) =
+            crud::insert_documents(&db, CODEBASE.calls_edges, &py_call_edges, true).await
+        {
             warn!(error = %e, "failed to store Python call edges");
         }
     }
 
     // Resolve Rust import graph edges (file → symbol).
     let rust_symbol_index = rust_imports::build_symbol_index(&imports.rust_file_symbols);
-    let rs_import_edges = rust_imports::resolve_rust_imports(&imports.rust_imports, &rust_symbol_index);
+    let rs_import_edges =
+        rust_imports::resolve_rust_imports(&imports.rust_imports, &rust_symbol_index);
     if !rs_import_edges.is_empty() {
-        info!(edge_count = rs_import_edges.len(), "resolved Rust import edges");
-        if let Err(e) = crud::insert_documents(&db, CODEBASE.imports_edges, &rs_import_edges, true).await {
+        info!(
+            edge_count = rs_import_edges.len(),
+            "resolved Rust import edges"
+        );
+        if let Err(e) =
+            crud::insert_documents(&db, CODEBASE.imports_edges, &rs_import_edges, true).await
+        {
             warn!(error = %e, "failed to store Rust import edges");
         }
     }
@@ -298,16 +321,18 @@ pub async fn run(
     // Output summary.
     let total = results.len();
     let succeeded = results.iter().filter(|r| r.success).count();
-    let failed = results.iter().filter(|r| !r.success && r.skipped != Some(true)).count();
+    let failed = results
+        .iter()
+        .filter(|r| !r.success && r.skipped != Some(true))
+        .count();
     let skipped = results.iter().filter(|r| r.skipped == Some(true)).count();
     let duration_ms = cmd_start.elapsed().as_millis() as u64;
 
-    let files_embedded = results.iter()
+    let files_embedded = results
+        .iter()
         .filter(|r| r.num_embeddings.is_some_and(|n| n > 0))
         .count();
-    let total_embeddings: usize = results.iter()
-        .filter_map(|r| r.num_embeddings)
-        .sum();
+    let total_embeddings: usize = results.iter().filter_map(|r| r.num_embeddings).sum();
 
     let result_data = json!({
         "total": total,
@@ -466,9 +491,7 @@ async fn ensure_indices(db: &ArangoPool) -> Result<()> {
         db.writer()
             .post(&path, &body)
             .await
-            .with_context(|| {
-                format!("failed to ensure index on {collection} {fields:?}")
-            })?;
+            .with_context(|| format!("failed to ensure index on {collection} {fields:?}"))?;
     }
 
     debug!("ensured {} persistent indices", indices.len());
@@ -499,10 +522,10 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
         .follow_links(false)
         .add_custom_ignore_filename(".hadesignore")
         .filter_entry(|entry| {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if let Some(name) = entry.file_name().to_str() {
-                    return !SKIP_DIRS.contains(&name);
-                }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && let Some(name) = entry.file_name().to_str()
+            {
+                return !SKIP_DIRS.contains(&name);
             }
             true
         })
@@ -579,8 +602,13 @@ async fn ingest_file(
     // Only skip if the code is unchanged AND embeddings aren't needed (either
     // already present or no embedder available to backfill).
     let fkey = keys::file_key(rel_path);
-    if let Some(true) = check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await? {
-        debug!(path = rel_path, "unchanged (same symbol_hash, embeddings present), skipping");
+    if let Some(true) =
+        check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await?
+    {
+        debug!(
+            path = rel_path,
+            "unchanged (same symbol_hash, embeddings present), skipping"
+        );
         return Ok(FileResult {
             path: rel_path.to_string(),
             success: true,
@@ -603,7 +631,9 @@ async fn ingest_file(
             .cloned()
             .collect();
         if !py_import_syms.is_empty() {
-            imports.python_imports.insert(rel_path.to_string(), py_import_syms);
+            imports
+                .python_imports
+                .insert(rel_path.to_string(), py_import_syms);
         }
     }
 
@@ -717,33 +747,27 @@ async fn ingest_file(
     let embedding_docs = match embedder {
         Some(emb) if !chunk_texts.is_empty() => {
             match emb
-                .embed(
-                    &chunk_texts,
-                    "code",
-                    Some(config.embedding.batch.size),
-                )
+                .embed(&chunk_texts, "code", Some(config.embedding.batch.size))
                 .await
             {
-                Ok(embed_result) => {
-                    embed_result
-                        .embeddings
-                        .iter()
-                        .enumerate()
-                        .map(|(i, vec)| {
-                            let ckey = keys::chunk_key(&fkey, i);
-                            let ekey = keys::embedding_key(&ckey);
-                            json!({
-                                "_key": ekey,
-                                "chunk_key": ckey,
-                                "file_key": fkey,
-                                "embedding": vec,
-                                "model": embed_result.model,
-                                "model_hash": keys::model_hash(&embed_result.model),
-                                "dimension": embed_result.dimension,
-                            })
+                Ok(embed_result) => embed_result
+                    .embeddings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, vec)| {
+                        let ckey = keys::chunk_key(&fkey, i);
+                        let ekey = keys::embedding_key(&ckey);
+                        json!({
+                            "_key": ekey,
+                            "chunk_key": ckey,
+                            "file_key": fkey,
+                            "embedding": vec,
+                            "model": embed_result.model,
+                            "model_hash": keys::model_hash(&embed_result.model),
+                            "dimension": embed_result.dimension,
                         })
-                        .collect::<Vec<Value>>()
-                }
+                    })
+                    .collect::<Vec<Value>>(),
                 Err(e) => {
                     warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
                     Vec::new()
@@ -756,7 +780,11 @@ async fn ingest_file(
 
     // Build file document (after embedding so we can record embedding_count).
     // symbol_count reflects primitives only (no imports, no impl blocks).
-    let primitive_count = analysis.symbols.iter().filter(|s| s.kind.is_primitive()).count();
+    let primitive_count = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.kind.is_primitive())
+        .count();
     let file_doc = json!({
         "_key": fkey,
         "path": rel_path,
@@ -809,16 +837,14 @@ async fn ingest_file(
     // Transfer symbols into the import index (avoids cloning).
     match lang {
         Language::Rust => {
-            imports.rust_file_symbols.insert(
-                rel_path.to_string(),
-                std::mem::take(&mut analysis.symbols),
-            );
+            imports
+                .rust_file_symbols
+                .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
         Language::Python => {
-            imports.python_file_symbols.insert(
-                rel_path.to_string(),
-                std::mem::take(&mut analysis.symbols),
-            );
+            imports
+                .python_file_symbols
+                .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
         _ => {}
     }
@@ -873,7 +899,10 @@ fn build_line_offsets(source: &str) -> Vec<usize> {
 async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
     let aql = "FOR e IN @@col FILTER e.file_key == @fk REMOVE e IN @@col";
     let bind = json!({ "@col": CODEBASE.embeddings, "fk": file_key });
-    if let Err(e) = hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer).await {
+    if let Err(e) =
+        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
+            .await
+    {
         debug!(file_key, error = %e, "failed to clean up old embeddings (non-fatal)");
     }
 }
@@ -909,9 +938,7 @@ async fn check_unchanged(
                 if chunk_count == 0 {
                     return Ok(Some(true));
                 }
-                let has_embeddings = doc["embedding_count"]
-                    .as_u64()
-                    .is_some_and(|n| n > 0);
+                let has_embeddings = doc["embedding_count"].as_u64().is_some_and(|n| n > 0);
                 Ok(Some(has_embeddings)) // skip only if embeddings exist
             } else {
                 Ok(Some(true)) // no embedder → nothing to backfill → skip
@@ -1103,7 +1130,10 @@ async fn run_rust_analyzer_phase(
         }
     }
     if patched_count > 0 {
-        info!(count = patched_count, "patched file documents with rust-analyzer metadata");
+        info!(
+            count = patched_count,
+            "patched file documents with rust-analyzer metadata"
+        );
     }
 
     Ok(RustAnalyzerStats {
@@ -1146,10 +1176,7 @@ fn build_python_module_map(all_files: &HashMap<String, Vec<Symbol>>) -> HashMap<
     let mut module_to_file: HashMap<String, String> = HashMap::new();
     for rel_path in all_files.keys() {
         let p = Path::new(rel_path);
-        let stem = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let mut parts: Vec<&str> = p
             .parent()
             .map(|parent| {
@@ -1203,8 +1230,16 @@ fn resolve_python_imports(
         let source_fkey = keys::file_key(source_path);
 
         for sym in import_syms {
-            let import_type = sym.metadata.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let module = sym.metadata.get("module").and_then(|v| v.as_str()).unwrap_or("");
+            let import_type = sym
+                .metadata
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let module = sym
+                .metadata
+                .get("module")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if module.is_empty() {
                 continue;
@@ -1234,68 +1269,69 @@ fn resolve_python_imports(
                         .or_else(|| targets.first());
 
                         if let Some((target_path, target_skey)) = target
-                            && target_path != source_path {
-                                let edge_key =
-                                    keys::edge_key(&source_fkey, "imports", target_skey);
-                                if seen.insert(edge_key.clone()) {
-                                    edges.push(json!({
-                                        "_from": format!("{}/{}", CODEBASE.files, source_fkey),
-                                        "_to": format!("{}/{}", CODEBASE.symbols, target_skey),
-                                        "_key": edge_key,
-                                        "resolved": true,
-                                        "style": "from_import",
-                                        "source_path": source_path,
-                                        "target_path": target_path,
-                                        "symbol_name": original_name,
-                                        "module_path": module,
-                                    }));
-                                    resolved = true;
-                                }
+                            && target_path != source_path
+                        {
+                            let edge_key = keys::edge_key(&source_fkey, "imports", target_skey);
+                            if seen.insert(edge_key.clone()) {
+                                edges.push(json!({
+                                    "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                    "_to": format!("{}/{}", CODEBASE.symbols, target_skey),
+                                    "_key": edge_key,
+                                    "resolved": true,
+                                    "style": "from_import",
+                                    "source_path": source_path,
+                                    "target_path": target_path,
+                                    "symbol_name": original_name,
+                                    "module_path": module,
+                                }));
+                                resolved = true;
                             }
+                        }
                     }
 
                     // Fall back to file→file if symbol not found (external package or
                     // symbol not in our index).
                     if !resolved
                         && let Some(target_path) = target_file
-                            && target_path != source_path {
-                                let target_fkey = keys::file_key(target_path);
-                                let edge_key =
-                                    keys::edge_key(&source_fkey, "imports", &target_fkey);
-                                if seen.insert(edge_key.clone()) {
-                                    edges.push(json!({
-                                        "_from": format!("{}/{}", CODEBASE.files, source_fkey),
-                                        "_to": format!("{}/{}", CODEBASE.files, target_fkey),
-                                        "_key": edge_key,
-                                        "resolved": false,
-                                        "style": "from_import",
-                                        "source_path": source_path,
-                                        "target_path": target_path,
-                                        "module_path": module,
-                                    }));
-                                }
-                            }
+                        && target_path != source_path
+                    {
+                        let target_fkey = keys::file_key(target_path);
+                        let edge_key = keys::edge_key(&source_fkey, "imports", &target_fkey);
+                        if seen.insert(edge_key.clone()) {
+                            edges.push(json!({
+                                "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                "_to": format!("{}/{}", CODEBASE.files, target_fkey),
+                                "_key": edge_key,
+                                "resolved": false,
+                                "style": "from_import",
+                                "source_path": source_path,
+                                "target_path": target_path,
+                                "module_path": module,
+                            }));
+                        }
+                    }
                 }
 
                 "import" => {
                     // `import module` — file-level edge (no specific symbol target).
                     if let Some(target_path) = resolve_module_to_file(module, &module_to_file)
-                        && target_path != source_path {
-                            let target_fkey = keys::file_key(target_path);
-                            let edge_key = keys::edge_key(&source_fkey, "imports", &target_fkey);
-                            if seen.insert(edge_key.clone()) {
-                                edges.push(json!({
-                                    "_from": format!("{}/{}", CODEBASE.files, source_fkey),
-                                    "_to": format!("{}/{}", CODEBASE.files, target_fkey),
-                                    "_key": edge_key,
-                                    "resolved": false,
-                                    "style": "import",
-                                    "source_path": source_path,
-                                    "target_path": target_path,
-                                    "module_path": module,
-                                }));
-                            }
+                        && target_path != source_path
+                    {
+                        let target_fkey = keys::file_key(target_path);
+                        let edge_key = keys::edge_key(&source_fkey, "imports", &target_fkey);
+                        if seen.insert(edge_key.clone()) {
+                            edges.push(json!({
+                                "_from": format!("{}/{}", CODEBASE.files, source_fkey),
+                                "_to": format!("{}/{}", CODEBASE.files, target_fkey),
+                                "_key": edge_key,
+                                "resolved": false,
+                                "style": "import",
+                                "source_path": source_path,
+                                "target_path": target_path,
+                                "module_path": module,
+                            }));
                         }
+                    }
                 }
 
                 _ => {}
@@ -1432,7 +1468,12 @@ mod tests {
         assert_eq!(edges[0]["source_path"], "core/models.py");
         assert_eq!(edges[0]["symbol_name"], "helper");
         // Should be file→symbol edge
-        assert!(edges[0]["_to"].as_str().unwrap().contains("codebase_symbols"));
+        assert!(
+            edges[0]["_to"]
+                .as_str()
+                .unwrap()
+                .contains("codebase_symbols")
+        );
     }
 
     #[test]
@@ -1511,7 +1552,10 @@ mod tests {
         assert_eq!(edges.len(), 1);
         // Should target the symbol, not the file
         let to = edges[0]["_to"].as_str().unwrap();
-        assert!(to.starts_with("codebase_symbols/"), "expected symbol edge, got: {to}");
+        assert!(
+            to.starts_with("codebase_symbols/"),
+            "expected symbol edge, got: {to}"
+        );
         assert!(to.contains("EmbeddingConfig"));
     }
 
@@ -1534,6 +1578,9 @@ mod tests {
         assert_eq!(edges.len(), 1);
         // Should fall back to file→file
         let to = edges[0]["_to"].as_str().unwrap();
-        assert!(to.starts_with("codebase_files/"), "expected file edge fallback, got: {to}");
+        assert!(
+            to.starts_with("codebase_files/"),
+            "expected file edge fallback, got: {to}"
+        );
     }
 }

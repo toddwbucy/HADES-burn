@@ -17,6 +17,20 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ## [Unreleased]
 
+### Added
+
+- Spec doc `docs/specs/workstation-specific-tests.md` codifying the
+  skip-or-strict pattern for integration tests that depend on
+  workstation-specific resources (live ArangoDB, embedder service,
+  specific database state). Convention is the existing practice in
+  `tests/graph_loader.rs` and the `arango_*` integration tests: live
+  in `tests/`, skip when prerequisites are absent, panic when
+  `ARANGO_TESTS=1` is set and prerequisites are still absent. (#93)
+- `crates/hades-core/tests/arango_transport.rs` brought in line with
+  the spec: previously skipped without honoring `ARANGO_TESTS=1`
+  strict mode; now uses the shared `require_socket()` helper that
+  panics under strict mode. (#93)
+
 ### Changed
 
 - Strip arxiv- and NestedLearning-specific defaults from test fixtures,

@@ -1,10 +1,16 @@
 //! Integration tests for ArangoDB transport layer.
 //!
-//! These tests require a running ArangoDB instance accessible via
-//! Unix socket at /run/arangodb3/arangodb.sock.
+//! Prerequisites:
+//! - ArangoDB running with socket at /run/arangodb3/arangodb.sock
+//!   (override via ARANGO_SOCKET env var)
+//! - ARANGO_PASSWORD environment variable set
 //!
-//! Set ARANGO_PASSWORD env var to authenticate.
+//! Tests are skipped gracefully when prerequisites are missing.
+//! Set ARANGO_TESTS=1 to make missing prerequisites a hard error
+//! (for deliberate "this should pass right now" workstation checks).
+//!
 //! Tests only perform read-only operations — no data is modified.
+//! Convention documented in docs/specs/workstation-specific-tests.md.
 
 use std::path::PathBuf;
 
@@ -13,6 +19,28 @@ fn arango_socket() -> PathBuf {
         std::env::var("ARANGO_SOCKET")
             .unwrap_or_else(|_| "/run/arangodb3/arangodb.sock".to_string()),
     )
+}
+
+/// Return the ArangoDB socket path if it exists, or `None` to signal a skip.
+///
+/// Honors `ARANGO_TESTS=1` as strict mode: when the socket is missing and
+/// the strict flag is set, panic instead of skipping.
+fn require_socket() -> Option<PathBuf> {
+    let socket = arango_socket();
+    if !socket.exists() {
+        if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
+            panic!(
+                "ARANGO_TESTS=1 but socket not found at {}",
+                socket.display()
+            );
+        }
+        eprintln!(
+            "skipping: ArangoDB socket not found at {}",
+            socket.display()
+        );
+        return None;
+    }
+    Some(socket)
 }
 
 fn arango_password() -> String {
@@ -25,14 +53,9 @@ fn arango_password() -> String {
 /// Verify we can connect and get the server version.
 #[tokio::test]
 async fn get_server_version() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let client =
         hades_core::db::ArangoClient::with_socket(socket, "_system", "root", &arango_password());
@@ -47,14 +70,9 @@ async fn get_server_version() {
 /// Verify we can list databases (read-only).
 #[tokio::test]
 async fn list_databases() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let client =
         hades_core::db::ArangoClient::with_socket(socket, "_system", "root", &arango_password());
@@ -74,14 +92,9 @@ async fn list_databases() {
 /// Verify we can query bident_burn collections (read-only).
 #[tokio::test]
 async fn list_bident_burn_collections() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let client = hades_core::db::ArangoClient::with_socket(
         socket,
@@ -108,14 +121,9 @@ async fn list_bident_burn_collections() {
 /// Verify that a 404 returns a proper ArangoError.
 #[tokio::test]
 async fn get_nonexistent_document_returns_error() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let client = hades_core::db::ArangoClient::with_socket(
         socket,
@@ -135,14 +143,9 @@ async fn get_nonexistent_document_returns_error() {
 /// Verify AQL query execution (read-only).
 #[tokio::test]
 async fn execute_aql_query() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let client = hades_core::db::ArangoClient::with_socket(
         socket,
@@ -168,14 +171,9 @@ async fn execute_aql_query() {
 /// Verify pool construction with shared socket.
 #[tokio::test]
 async fn pool_health_check() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let reader = hades_core::db::ArangoClient::with_socket(
         socket.clone(),
@@ -198,14 +196,9 @@ async fn pool_health_check() {
 /// Verify pool reader/writer execute queries correctly.
 #[tokio::test]
 async fn pool_reader_writer_queries() {
-    let socket = arango_socket();
-    if !socket.exists() {
-        eprintln!(
-            "skipping: ArangoDB socket not found at {}",
-            socket.display()
-        );
+    let Some(socket) = require_socket() else {
         return;
-    }
+    };
 
     let reader = hades_core::db::ArangoClient::with_socket(
         socket.clone(),

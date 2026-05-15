@@ -1187,7 +1187,6 @@ pub async fn dispatch(
             .await
             .map_err(DispatchError::Handler),
         DaemonCommand::TaskDep(params) => {
-            if params.add.is_some() || params.remove.is_some() {}
             handlers::task_dep(
                 pool,
                 &params.key,
@@ -5751,12 +5750,10 @@ mod tests {
 
         // This will fail with a connection error (ArangoDB not running in test),
         // NOT with InvalidParameter — that's the important assertion.
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("RETURN 1 should not be rejected as mutating AQL");
-            }
-            _ => {} // Connection error or success — both acceptable.
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("RETURN 1 should not be rejected as mutating AQL");
         }
+        // Otherwise: connection error or success — both acceptable.
     }
 
     // -- AQL string stripping -------------------------------------------------
@@ -5778,12 +5775,10 @@ mod tests {
             }),
         ));
 
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("INSERT inside a string literal should not be rejected");
-            }
-            _ => {} // Connection error or success — both acceptable.
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("INSERT inside a string literal should not be rejected");
         }
+        // Otherwise: connection error or success — both acceptable.
     }
 
     #[test]
@@ -5803,11 +5798,8 @@ mod tests {
             }),
         ));
 
-        match result {
-            Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) => {
-                panic!("UPDATE inside a comment should not be rejected");
-            }
-            _ => {}
+        if let Err(DispatchError::Handler(HandlerError::InvalidParameter { .. })) = result {
+            panic!("UPDATE inside a comment should not be rejected");
         }
     }
 

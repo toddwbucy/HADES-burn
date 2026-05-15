@@ -522,11 +522,10 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
         .follow_links(false)
         .add_custom_ignore_filename(".hadesignore")
         .filter_entry(|entry| {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if let Some(name) = entry.file_name().to_str() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && let Some(name) = entry.file_name().to_str() {
                     return !SKIP_DIRS.contains(&name);
                 }
-            }
             true
         })
         .build();

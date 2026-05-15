@@ -17,6 +17,27 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Embedding coverage gap during `codebase ingest`. Two root causes:
+  the embedder service OOMed on per-file batches whose padded sequence
+  lengths exceeded available GPU memory (typically on large source
+  files like `dispatch.rs` with 90+ chunks of variable token-length),
+  and the ingest code swallowed the resulting HTTP 500 into a
+  `warn!` log line that never reached the user-facing JSON output —
+  so files appeared ingested successfully while their embeddings
+  were silently dropped. Two coordinated fixes:
+  - `EmbeddingClient::embed` now splits requests at `batch_size`
+    and progressively halves on OOM-shaped errors, recursively down
+    to single chunks. Results reassembled by start index regardless
+    of completion order.
+  - `codebase ingest` surfaces per-file embedding failures via a new
+    `embedding_error` field on each file's JSON result, plus a
+    `files_with_embedding_failures` count and `embedding_failure_paths`
+    list in the top-level summary. Failures are no longer silent.
+  Verified on `dispatch.rs` (97 chunks, was 0/97 → now 96/96) and
+  on a full re-ingest of `bident_burn`. (#98)
+
 ### Added
 
 - Spec doc `docs/specs/workstation-specific-tests.md` codifying the

@@ -118,6 +118,30 @@ pub enum EmbeddingError {
     Io(#[from] std::io::Error),
 }
 
+impl EmbeddingError {
+    /// Whether this looks like a transient GPU out-of-memory condition that
+    /// might succeed if retried with a smaller batch.
+    ///
+    /// Heuristic: an HTTP 500 whose body contains an OOM-shaped substring
+    /// from the most common engines (PyTorch's "CUDA out of memory",
+    /// generic "out of memory", or "OutOfMemoryError"). Conservative —
+    /// false negatives just mean we don't halve.
+    fn is_retriable_oom(&self) -> bool {
+        match self {
+            Self::Http {
+                status: 500,
+                message,
+            } => {
+                let m = message.to_ascii_lowercase();
+                m.contains("out of memory")
+                    || m.contains("outofmemoryerror")
+                    || m.contains("cuda oom")
+            }
+            _ => false,
+        }
+    }
+}
+
 impl From<hyper_util::client::legacy::Error> for EmbeddingError {
     fn from(e: hyper_util::client::legacy::Error) -> Self {
         EmbeddingError::Connection(e.to_string())
@@ -243,15 +267,104 @@ impl EmbeddingClient {
 
     /// Embed a batch of texts into vectors.
     ///
+    /// When `batch_size` is set, the texts are split into chunks of that size
+    /// and sent as multiple HTTP requests. This client-side chunking keeps
+    /// each request small enough to fit within the embedder's VRAM headroom:
+    /// the server's `batch_size` hint isn't always honored as a chunking
+    /// boundary, so the client owns that responsibility. When `batch_size`
+    /// is unset or zero, the entire input is sent in a single request.
+    ///
+    /// Returns one embedding vector per input text, in input order.
+    #[instrument(skip(self, texts), fields(count = texts.len()))]
+    pub async fn embed(
+        &self,
+        texts: &[String],
+        task: &str,
+        batch_size: Option<u32>,
+    ) -> Result<EmbedResult, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(EmbedResult {
+                embeddings: Vec::new(),
+                model: self.config.model.clone(),
+                dimension: 0,
+                duration_ms: 0,
+            });
+        }
+
+        let per_request = batch_size
+            .filter(|&n| n > 0)
+            .map(|n| n as usize)
+            .unwrap_or(texts.len());
+
+        // Work queue: (start_index_into_texts, slice). Halving on OOM splits
+        // a slice into two and pushes both back onto the front of the queue.
+        // The BTreeMap keyed by start index reassembles results in input order
+        // regardless of the order in which sub-batches complete.
+        use std::collections::{BTreeMap, VecDeque};
+        let mut work: VecDeque<(usize, &[String])> = VecDeque::new();
+        for (i, batch) in texts.chunks(per_request).enumerate() {
+            work.push_back((i * per_request, batch));
+        }
+
+        let mut completed: BTreeMap<usize, Vec<Vec<f32>>> = BTreeMap::new();
+        let mut model = self.config.model.clone();
+        let mut dimension = 0u32;
+        let mut total_duration_ms = 0u64;
+
+        while let Some((start, batch)) = work.pop_front() {
+            match self.embed_single_request(batch, task, batch_size).await {
+                Ok(result) => {
+                    model = result.model;
+                    if dimension == 0 {
+                        dimension = result.dimension;
+                    } else if result.dimension != dimension {
+                        return Err(EmbeddingError::InvalidResponse(format!(
+                            "dimension mismatch across batches: {dimension} vs {}",
+                            result.dimension
+                        )));
+                    }
+                    total_duration_ms = total_duration_ms.saturating_add(result.duration_ms);
+                    completed.insert(start, result.embeddings);
+                }
+                Err(e) if e.is_retriable_oom() && batch.len() > 1 => {
+                    // GPU OOM with a multi-chunk batch — halve and retry.
+                    // Push the right half first so the left half pops first
+                    // (front of queue); doesn't affect correctness since the
+                    // BTreeMap reassembles by start index, but makes the work
+                    // trace easier to read in logs.
+                    let mid = batch.len() / 2;
+                    debug!(
+                        start,
+                        batch_size = batch.len(),
+                        "embed batch OOM — halving to {} and {}",
+                        mid,
+                        batch.len() - mid
+                    );
+                    work.push_front((start + mid, &batch[mid..]));
+                    work.push_front((start, &batch[..mid]));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let all_embeddings: Vec<Vec<f32>> = completed.into_values().flatten().collect();
+
+        Ok(EmbedResult {
+            embeddings: all_embeddings,
+            model,
+            dimension,
+            duration_ms: total_duration_ms,
+        })
+    }
+
+    /// Send a single `POST /embeddings` request for the given texts.
+    ///
     /// Sends `POST {base}/embeddings` in the OpenAI-compatible shape:
     /// `{"model": ..., "input": [...]}`. The HADES-specific `task` hint
     /// (e.g. `"retrieval.query"`, `"retrieval.passage"` for Jina V4) and
     /// `batch_size` are sent as non-standard top-level fields — engines
     /// that don't understand them ignore them.
-    ///
-    /// Returns one embedding vector per input text, in input order.
-    #[instrument(skip(self, texts), fields(count = texts.len()))]
-    pub async fn embed(
+    async fn embed_single_request(
         &self,
         texts: &[String],
         task: &str,

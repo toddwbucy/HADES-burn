@@ -123,6 +123,10 @@ ARANGO_RO_SOCKET=/run/arangodb3/arangodb.sock
 ARANGO_RW_SOCKET=/run/arangodb3/arangodb.sock
 HADES_EMBEDDER_SOCKET=http://localhost:8087/v1
 DAEMON_CONF
+# Must be readable by the `hades` user via group membership — the daemon
+# runs as User=hades under systemd and source-reads this file at startup.
+# Without the chown to root:hades the daemon (running as hades) gets EACCES.
+chown root:hades /etc/hades/daemon.conf
 chmod 640 /etc/hades/daemon.conf
 echo "daemon.conf written:"
 cat /etc/hades/daemon.conf | sed 's/ARANGO_PASSWORD=.*/ARANGO_PASSWORD=<redacted>/'
@@ -130,30 +134,54 @@ cat /etc/hades/daemon.conf | sed 's/ARANGO_PASSWORD=.*/ARANGO_PASSWORD=<redacted
 echo
 echo "=== Step 7: Start the daemon (manual fallback — no systemd in container) ==="
 # In the README this is `systemctl enable --now hades-daemon.service`, which
-# uses EnvironmentFile=/etc/hades/daemon.conf + ExecStart=/usr/local/bin/hades.
-# We can't run systemd in a vanilla container, so we source the env file and
-# launch the daemon manually. This exercises the same code path the systemd
-# unit would; what it doesn't exercise is the unit file itself (Phase 2 of #96).
+# uses User=hades, EnvironmentFile=/etc/hades/daemon.conf, and
+# ExecStart=/usr/local/bin/hades. We can't run systemd in a vanilla
+# container, so we launch the daemon manually — but importantly, AS THE
+# hades USER, not as root. Running it as root would mask permission bugs
+# (e.g. /etc/hades/* unreadable by the hades user, /run/arangodb3 socket
+# not accessible via the arangodb group membership) that would surface
+# the moment systemd takes over on a real VPS.
 mkdir -p /run/hades
-set -a
-. /etc/hades/daemon.conf
-set +a
-nohup /usr/local/bin/hades daemon --socket /run/hades/hades.sock > /tmp/hades-daemon.log 2>&1 &
-DAEMON_PID=$!
-echo "daemon PID: $DAEMON_PID"
+chown hades:hades /run/hades
+chmod 0755 /run/hades  # matches RuntimeDirectoryMode= in the .service file
+
+# Sanity: daemon.conf must be readable by group hades (mode 640 root:hades).
+test -r /etc/hades/daemon.conf || true  # we're root; verify from hades's side instead
+sudo -u hades test -r /etc/hades/daemon.conf || {
+    echo "ERROR: hades user cannot read /etc/hades/daemon.conf"
+    ls -la /etc/hades/daemon.conf
+    exit 1
+}
+
+# Launch as hades. The background process under sudo detaches from the
+# outer shell so $! tracks the sudo wrapper, not the daemon; capture the
+# actual daemon PID via pgrep -u hades after a brief settle.
+sudo -u hades bash -c '
+    set -a
+    . /etc/hades/daemon.conf
+    set +a
+    nohup /usr/local/bin/hades daemon --socket /run/hades/hades.sock \
+        > /tmp/hades-daemon.log 2>&1 &
+    disown
+'
 sleep 3
-if kill -0 "$DAEMON_PID" 2>/dev/null; then
-    echo "daemon running"
+DAEMON_PID="$(pgrep -u hades -f '^/usr/local/bin/hades daemon --socket /run/hades/hades.sock' | head -1)"
+if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "daemon running as hades (UID $(id -u hades)), PID: $DAEMON_PID"
     head -20 /tmp/hades-daemon.log
 else
-    echo "ERROR: daemon exited"
-    cat /tmp/hades-daemon.log
+    echo "ERROR: daemon not running under hades user"
+    cat /tmp/hades-daemon.log 2>/dev/null || echo "(no log file)"
     exit 1
 fi
 
 echo
 echo "=== Step 8: Verify daemon is reachable ==="
-hades --db _system db stats 2>&1 | head -10
+# `hades db stats` opens its own ArangoDB connection (not via the daemon
+# socket), so the CLI needs ARANGO_PASSWORD in its env. On a real VPS
+# this is something the operator exports in their shell; here we pass it
+# through from HADES_PASSWORD which we set in step 2.
+ARANGO_PASSWORD="$HADES_PASSWORD" hades --db _system db stats 2>&1 | head -10
 
 echo
 echo "================================================================"

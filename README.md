@@ -236,12 +236,20 @@ You should see `Active: active (running)` and a log line like
 
 ### 8. Verify
 
+`hades db stats` opens its own ArangoDB connection (it doesn't proxy
+through the daemon socket), so the CLI needs the `hades` user's
+password in its environment:
+
 ```bash
+export ARANGO_PASSWORD='<password-you-set-for-the-hades-user>'
 hades --db _system db stats
 ```
 
-A clean JSON response listing the `_system` database means the daemon
-is reachable, authenticated, and serving queries.
+A clean JSON response listing the `_system` database means
+authentication works and your CLI can reach ArangoDB. The
+`ARANGO_PASSWORD` export takes precedence over anything in
+`hades.yaml`; keep it in your shell environment (or in a profile
+file restricted to your user) for ongoing CLI use.
 
 The `hades-embedder.service` and `hades-extractor.service` units cover
 the optional embedder (Jina V4) and Docling extractor services —

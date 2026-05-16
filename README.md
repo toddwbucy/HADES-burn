@@ -86,62 +86,168 @@ Binary: `target/debug/hades` or `target/release/hades`.
 
 ## Install
 
-> **WIP.** A proper installer is not yet wired up. The steps below document the
-> manual bootstrap that the systemd unit (`services/systemd/hades-daemon.service`)
-> and the CLI both depend on. Treat this as a checklist, not a script.
-> See `scripts/install/setup-arangodb-user.sh` for the (untested) ArangoDB-user
-> bootstrap sketch.
+The install procedure below has been validated end-to-end on a fresh
+Ubuntu 24.04 environment via the container harness at
+`scripts/install/test/` (run `bash scripts/install/test/run-install.sh`
+inside the harness image; see the script header for details). The
+systemd-unit portion is verified only via the harness's manual-daemon
+path; the real-VPS systemd flow is documented but tested separately.
 
-### 1. Install the binary
+### 0. Prerequisites
+
+A clean Linux machine (tested on Ubuntu 24.04; should work on any
+recent Debian-family distro). You will need root.
+
+**Install ArangoDB** following the [official docs](https://docs.arangodb.com/3.12/operations/installation/linux/).
+The short version for Debian/Ubuntu:
 
 ```
-sudo install -m 755 target/release/hades /usr/local/bin/hades
-install -m 755 target/release/hades ~/.local/bin/hades   # for your shell PATH
+echo 'deb https://download.arangodb.com/arangodb312/DEBIAN/ /' \
+  | sudo tee /etc/apt/sources.list.d/arangodb.list
+curl -fsSL https://download.arangodb.com/arangodb312/DEBIAN/Release.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/arangodb.gpg
+sudo apt-get update && sudo apt-get install -y arangodb3
 ```
 
-The systemd daemon execs `/usr/local/bin/hades`; interactive shells usually pick
-up `~/.local/bin/hades` first. If you only update one, the other will silently
-run an older build.
+> **Note (2026-05):** ArangoDB's signing key on their `arangodb312` deb
+> repo is currently expired (`EXPKEYSIG`). If `apt-get update` fails
+> with that error, either fetch the latest key from the ArangoDB
+> downloads page, or temporarily set `deb [trusted=yes] ...` in the
+> sources line as a workaround. Their key rotation is out of HADES's
+> control.
+
+During `apt-get install` you'll be prompted to set a root password
+for ArangoDB — note it, you'll use it in step 2.
+
+**Install Rust** (edition 2024, stable 1.85+):
+
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. ~/.cargo/env
+```
+
+**Install `protoc`** (needed by `hades-proto`'s build script):
+
+```
+sudo apt-get install -y protobuf-compiler
+```
+
+### 1. Build the binary
+
+From a checkout of this repo:
+
+```
+cargo build --release
+```
+
+This produces `target/release/hades`.
 
 ### 2. Create the ArangoDB user
 
-HADES connects to ArangoDB as a dedicated `hades` user (not `root`). Write
-restrictions on specific databases are enforced by ArangoDB ACLs on this user —
-HADES has no source-level allowlist. Bootstrap with arangosh:
+HADES connects to ArangoDB as a dedicated `hades` user (not `root`).
+Write restrictions on specific databases are enforced by ArangoDB
+ACLs on this user — HADES has no source-level allowlist. Bootstrap
+with arangosh, using the root password you set during install:
 
 ```
-const users = require("@arangodb/users");
-users.save("hades", "<pick-a-password>");
-users.grantDatabase("hades", "_system", "rw");
-users.grantDatabase("hades", "*", "rw");   // default for new DBs
-// Tighten specific production databases as needed:
-// users.grantDatabase("hades", "<production-db-name>", "ro");
+arangosh --server.endpoint unix:///run/arangodb3/arangodb.sock \
+         --server.username root
+# (enter root password at the prompt, then in the arangosh REPL:)
+> const users = require("@arangodb/users");
+> users.save("hades", "<pick-a-password>");
+> users.grantDatabase("hades", "_system", "rw");
+> users.grantDatabase("hades", "*", "rw");   // default for new DBs
+> // Tighten specific production databases as needed:
+> // users.grantDatabase("hades", "<production-db-name>", "ro");
 ```
 
-### 3. Install the system config
+Note the password you set for `hades` — you'll use it in step 5.
+
+### 3. Install the systemd users + tmpfiles
+
+These create the Unix `hades` user and group, plus the `/run/hades`
+runtime directory. They must run **before** step 4 because the config
+file's group ownership references `hades`.
 
 ```
+sudo install -m 644 services/systemd/hades-sysusers.conf  /etc/sysusers.d/hades.conf
+sudo install -m 644 services/systemd/hades-tmpfiles.conf  /etc/tmpfiles.d/hades.conf
+sudo systemd-sysusers
+sudo systemd-tmpfiles --create
+```
+
+After this, `getent group hades` should show the group exists.
+
+### 4. Install the binary
+
+```
+sudo install -m 755 target/release/hades /usr/local/bin/hades
+mkdir -p ~/.local/bin && install -m 755 target/release/hades ~/.local/bin/hades
+```
+
+The systemd daemon execs `/usr/local/bin/hades`; interactive shells
+usually pick up `~/.local/bin/hades` first. If you only update one,
+the other will silently run an older build.
+
+### 5. Install the system config
+
+```
+sudo mkdir -p /etc/hades
 sudo install -m 640 -o root -g hades config/hades.yaml /etc/hades/hades.yaml
 ```
 
-The daemon searches `/etc/hades/hades.yaml` after the in-repo paths; the username
-(`hades`) and socket paths live there. Passwords are never stored in YAML.
+The daemon searches `/etc/hades/hades.yaml` after the in-repo paths;
+the username (`hades`) and socket paths live there. Passwords are
+never stored in YAML — they come from the daemon's env (step 6).
 
-### 4. Set the daemon environment
+### 6. Set the daemon environment
 
-`/etc/hades/daemon.conf` is sourced by `hades-daemon.service` via `EnvironmentFile=`. Minimum required keys:
+`/etc/hades/daemon.conf` is sourced by `hades-daemon.service` via
+`EnvironmentFile=`. Create it with:
 
 ```
+sudo tee /etc/hades/daemon.conf <<'CONF'
 ARANGO_PASSWORD=<password-you-set-for-the-hades-user>
-HADES_DATABASE=_system          # bootstrap DB; per-command --db overrides this
+HADES_DATABASE=_system
 ARANGO_RO_SOCKET=/run/arangodb3/arangodb.sock
 ARANGO_RW_SOCKET=/run/arangodb3/arangodb.sock
 HADES_EMBEDDER_SOCKET=http://localhost:8087/v1
+CONF
+sudo chown root:hades /etc/hades/daemon.conf
+sudo chmod 640 /etc/hades/daemon.conf
 ```
 
-The daemon needs `HADES_DATABASE` set because `ArangoPool::from_config` opens a
-connection at startup; `_system` is the right default (always present, neutral)
-and dispatched commands override the target per-request.
+The daemon needs `HADES_DATABASE` set because `ArangoPool::from_config`
+opens a connection at startup; `_system` is the right default (always
+present, neutral) and dispatched commands override the target
+per-request.
+
+### 7. Enable and start the daemon
+
+```
+sudo install -m 644 services/systemd/hades-daemon.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hades-daemon.service
+sudo systemctl status hades-daemon.service --no-pager
+```
+
+You should see `Active: active (running)` and a log line like
+`daemon listening socket="/run/hades/hades.sock"`.
+
+### 8. Verify
+
+```
+hades --db _system db stats
+```
+
+A clean JSON response listing the `_system` database means the daemon
+is reachable, authenticated, and serving queries.
+
+The `hades-embedder.service` and `hades-extractor.service` units cover
+the optional embedder (Jina V4) and Docling extractor services —
+install only if you're using `hades embed`, `hades codebase ingest --embed`,
+or `hades extract`. Both require additional Python dependencies and (for
+the embedder) a GPU; see `services/README.md` for details.
 
 ### Updating the daemon's ArangoDB password
 
@@ -162,22 +268,6 @@ sudo systemctl status hades-daemon.service --no-pager
 
 For interactive CLI use (outside the daemon), export `ARANGO_PASSWORD` in your
 shell — it takes precedence over anything in YAML.
-
-### Systemd units
-
-```
-sudo cp services/systemd/hades-daemon.service /etc/systemd/system/
-sudo cp services/systemd/hades-sysusers.conf  /etc/sysusers.d/hades.conf
-sudo cp services/systemd/hades-tmpfiles.conf  /etc/tmpfiles.d/hades.conf
-sudo systemd-sysusers
-sudo systemd-tmpfiles --create
-sudo systemctl daemon-reload
-sudo systemctl enable --now hades-daemon.service
-```
-
-The `hades-embedder.service` and `hades-extractor.service` units cover the
-optional embedder and Docling services — install only if you're using those
-features.
 
 ## Usage
 

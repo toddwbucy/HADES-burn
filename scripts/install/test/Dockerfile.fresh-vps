@@ -1,0 +1,52 @@
+# Fresh-VPS install validation harness.
+#
+# Builds an Ubuntu 24.04 image with ArangoDB pre-installed, then runs the
+# README's HADES install steps inside it. The goal is to catch issues that
+# only surface on a clean machine (missing packages, ordering bugs, broken
+# paths) before a real-VPS dry run.
+#
+# Limitations vs. a real VPS:
+#   - No systemd (containers don't run init by default; the daemon is started
+#     manually via `hades daemon` and the systemd-units portion of the README
+#     install is skipped here and validated on a real VPS in Phase 2).
+#   - Network is container-internal; no external embedder/extractor services.
+#     The daemon is verified for ArangoDB connectivity only.
+#
+# Usage (from repo root):
+#   docker build -f scripts/install/test/Dockerfile.fresh-vps -t hades-install-test .
+#   docker run --rm -it hades-install-test bash scripts/install/test/run-install.sh
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Base utilities matching what a minimal fresh-VPS install gives you.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gpg sudo procps less vim-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ArangoDB 3.12 from the official deb repository.
+#
+# FINDING (2026-05-15): The ArangoDB signing key in their 3.12 deb repo is
+# currently expired (EXPKEYSIG). Until they rotate, the practical workaround
+# is `[trusted=yes]` on the repo line, which tells apt to accept it without
+# signature verification. This is the same workaround a real-VPS operator
+# would need today. The README install section flags this.
+RUN echo 'deb [trusted=yes] https://download.arangodb.com/arangodb312/DEBIAN/ /' > /etc/apt/sources.list.d/arangodb.list \
+    && echo 'arangodb3 arangodb3/password password test_root_pw_for_install_validation_only' | debconf-set-selections \
+    && echo 'arangodb3 arangodb3/password_again password test_root_pw_for_install_validation_only' | debconf-set-selections \
+    && echo 'arangodb3 arangodb3/storage_engine select rocksdb' | debconf-set-selections \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends arangodb3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Stage the source tree (excluding target/) so install steps reference it.
+# The runner script does the actual install + verification.
+WORKDIR /opt/hades-source
+COPY . /opt/hades-source/
+# Pre-built release binary will be copied in at run time via volume mount;
+# this Dockerfile doesn't run cargo build (would require Rust toolchain
+# in the image, defeating the "minimal fresh-VPS" model).
+
+CMD ["bash"]

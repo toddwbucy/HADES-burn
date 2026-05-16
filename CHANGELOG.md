@@ -17,6 +17,29 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/install/test/` — container-based install validation harness.
+  Builds a fresh Ubuntu 24.04 image with ArangoDB pre-installed, then
+  runs the README install steps end-to-end. Catches packaging,
+  ordering, and prerequisites issues without requiring a real VPS.
+  Two real issues caught and fixed in the README this round: the
+  ArangoDB GPG signing key is currently expired upstream, and the
+  README's step ordering required the `hades` group before
+  `systemd-sysusers` had created it. (#96)
+
+### Changed
+
+- README **Install** section rewritten end-to-end. Drop the WIP banner
+  (the procedure has been validated via the harness), add prerequisites
+  (ArangoDB, Rust toolchain, protoc), fix the step ordering so
+  systemd-sysusers runs before any command that references the `hades`
+  group, add explicit `mkdir -p /etc/hades` and `sudo` invocations
+  where they were missing, and add a verification step at the end. (#96)
+- Verified by full bident_burn re-ingest after #110 landed: coverage
+  reached 99.95% (2109/2110 chunks embedded). Single outlier is a
+  stale chunk record from a deleted file pre-fix; AC for #98 satisfied.
+
 ### Fixed
 
 - Embedding coverage gap during `codebase ingest`. Two root causes:

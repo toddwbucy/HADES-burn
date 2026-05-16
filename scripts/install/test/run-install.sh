@@ -48,18 +48,16 @@ done
 test -S /run/arangodb3/arangodb.sock || { echo "ERROR: arangod socket never appeared"; tail -30 /tmp/arangod.out; exit 1; }
 
 echo
-echo "=== Step 1: Install the binary ==="
-# A real VPS would build with cargo; here we expect a pre-built binary
-# at /opt/hades-source/target/release/hades (mounted in by the runner).
+echo "=== Step 1: Verify the build artifact ==="
+# A real VPS would `cargo build --release` here. The container deliberately
+# has no Rust toolchain (it tests "what a fresh-VPS install gives you"), so
+# we mount the host's prebuilt binary at /opt/hades-source/target/release.
 test -x /opt/hades-source/target/release/hades || {
     echo "ERROR: no release binary at /opt/hades-source/target/release/hades"
-    echo "Run: cargo build --release on host, then mount target/release/ into the container."
+    echo "On the host: cargo build --release, then mount target/release into the container."
     exit 1
 }
-install -m 755 /opt/hades-source/target/release/hades /usr/local/bin/hades
-mkdir -p /root/.local/bin
-install -m 755 /opt/hades-source/target/release/hades /root/.local/bin/hades
-/usr/local/bin/hades --version
+echo "binary present: $(ls -l /opt/hades-source/target/release/hades)"
 
 echo
 echo "=== Step 2: Create the ArangoDB user ==="
@@ -80,25 +78,44 @@ arangosh \
     '
 
 echo
-echo "=== Step 3: Install the system config ==="
-# Per the README, this requires the hades group to exist (because of -g hades).
-# The current README ordering puts sysusers AFTER this step, so we expect
-# this to FAIL on a fresh VPS until we fix the ordering. The runner will
-# fall through and report the error.
+echo "=== Step 3: Install systemd users + tmpfiles ==="
+# Creates the Unix `hades` user/group and the /run/hades runtime directory.
+# Must run BEFORE step 5 (install config) because the config file is owned
+# by group `hades`. This is the step the README previously had out of order.
+install -m 644 services/systemd/hades-sysusers.conf /etc/sysusers.d/hades.conf
+install -m 644 services/systemd/hades-tmpfiles.conf /etc/tmpfiles.d/hades.conf
+systemd-sysusers
+systemd-tmpfiles --create
+getent group hades >/dev/null || {
+    echo "ERROR: systemd-sysusers ran but the 'hades' group still doesn't exist."
+    echo "Check /etc/sysusers.d/hades.conf and re-run \`systemd-sysusers\`."
+    exit 1
+}
+echo "hades group: $(getent group hades)"
+
+echo
+echo "=== Step 4: Install the binary ==="
+install -m 755 /opt/hades-source/target/release/hades /usr/local/bin/hades
+mkdir -p /root/.local/bin
+install -m 755 /opt/hades-source/target/release/hades /root/.local/bin/hades
+/usr/local/bin/hades --version
+
+echo
+echo "=== Step 5: Install the system config ==="
+# Requires the hades group to exist. Step 3 (sysusers) creates it; if that
+# step didn't run or didn't succeed, fail fast with a clear message rather
+# than silently falling back to a different group.
 mkdir -p /etc/hades
-# Bug to fix: sysusers must run BEFORE this command.
-if getent group hades >/dev/null 2>&1; then
-    echo "hades group exists; proceeding with install"
-else
-    echo "WARN: hades group does not exist yet — sysusers needs to run first."
-    echo "      (This is the ordering bug we expect to find.)"
+if ! getent group hades >/dev/null 2>&1; then
+    echo "ERROR: cannot install /etc/hades/hades.yaml — group 'hades' is missing."
+    echo "Run step 3 (systemd-sysusers /etc/sysusers.d/hades.conf) before this step."
+    exit 1
 fi
-install -m 640 -o root -g "$(getent group hades >/dev/null && echo hades || echo root)" \
-    config/hades.yaml /etc/hades/hades.yaml
+install -m 640 -o root -g hades config/hades.yaml /etc/hades/hades.yaml
 ls -la /etc/hades/hades.yaml
 
 echo
-echo "=== Step 4: Set the daemon environment ==="
+echo "=== Step 6: Set the daemon environment ==="
 cat > /etc/hades/daemon.conf <<DAEMON_CONF
 ARANGO_PASSWORD=$HADES_PASSWORD
 HADES_DATABASE=_system
@@ -111,10 +128,12 @@ echo "daemon.conf written:"
 cat /etc/hades/daemon.conf | sed 's/ARANGO_PASSWORD=.*/ARANGO_PASSWORD=<redacted>/'
 
 echo
-echo "=== Step 5: Start the daemon manually (no systemd) ==="
-# Source the env file, then start the daemon. In the systemd path this is
-# done via EnvironmentFile + ExecStart; here we do it manually to exercise
-# the same code path the daemon takes at startup.
+echo "=== Step 7: Start the daemon (manual fallback — no systemd in container) ==="
+# In the README this is `systemctl enable --now hades-daemon.service`, which
+# uses EnvironmentFile=/etc/hades/daemon.conf + ExecStart=/usr/local/bin/hades.
+# We can't run systemd in a vanilla container, so we source the env file and
+# launch the daemon manually. This exercises the same code path the systemd
+# unit would; what it doesn't exercise is the unit file itself (Phase 2 of #96).
 mkdir -p /run/hades
 set -a
 . /etc/hades/daemon.conf
@@ -133,7 +152,7 @@ else
 fi
 
 echo
-echo "=== Step 6: Verify daemon is reachable ==="
+echo "=== Step 8: Verify daemon is reachable ==="
 hades --db _system db stats 2>&1 | head -10
 
 echo

@@ -101,7 +101,7 @@ recent Debian-family distro). You will need root.
 **Install ArangoDB** following the [official docs](https://docs.arangodb.com/3.12/operations/installation/linux/).
 The short version for Debian/Ubuntu:
 
-```
+```bash
 echo 'deb https://download.arangodb.com/arangodb312/DEBIAN/ /' \
   | sudo tee /etc/apt/sources.list.d/arangodb.list
 curl -fsSL https://download.arangodb.com/arangodb312/DEBIAN/Release.key \
@@ -121,14 +121,14 @@ for ArangoDB — note it, you'll use it in step 2.
 
 **Install Rust** (edition 2024, stable 1.85+):
 
-```
+```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . ~/.cargo/env
 ```
 
 **Install `protoc`** (needed by `hades-proto`'s build script):
 
-```
+```bash
 sudo apt-get install -y protobuf-compiler
 ```
 
@@ -136,7 +136,7 @@ sudo apt-get install -y protobuf-compiler
 
 From a checkout of this repo:
 
-```
+```bash
 cargo build --release
 ```
 
@@ -149,7 +149,7 @@ Write restrictions on specific databases are enforced by ArangoDB
 ACLs on this user — HADES has no source-level allowlist. Bootstrap
 with arangosh, using the root password you set during install:
 
-```
+```bash
 arangosh --server.endpoint unix:///run/arangodb3/arangodb.sock \
          --server.username root
 # (enter root password at the prompt, then in the arangosh REPL:)
@@ -169,7 +169,7 @@ These create the Unix `hades` user and group, plus the `/run/hades`
 runtime directory. They must run **before** step 4 because the config
 file's group ownership references `hades`.
 
-```
+```bash
 sudo install -m 644 services/systemd/hades-sysusers.conf  /etc/sysusers.d/hades.conf
 sudo install -m 644 services/systemd/hades-tmpfiles.conf  /etc/tmpfiles.d/hades.conf
 sudo systemd-sysusers
@@ -180,7 +180,7 @@ After this, `getent group hades` should show the group exists.
 
 ### 4. Install the binary
 
-```
+```bash
 sudo install -m 755 target/release/hades /usr/local/bin/hades
 mkdir -p ~/.local/bin && install -m 755 target/release/hades ~/.local/bin/hades
 ```
@@ -191,7 +191,7 @@ the other will silently run an older build.
 
 ### 5. Install the system config
 
-```
+```bash
 sudo mkdir -p /etc/hades
 sudo install -m 640 -o root -g hades config/hades.yaml /etc/hades/hades.yaml
 ```
@@ -205,7 +205,7 @@ never stored in YAML — they come from the daemon's env (step 6).
 `/etc/hades/daemon.conf` is sourced by `hades-daemon.service` via
 `EnvironmentFile=`. Create it with:
 
-```
+```bash
 sudo tee /etc/hades/daemon.conf <<'CONF'
 ARANGO_PASSWORD=<password-you-set-for-the-hades-user>
 HADES_DATABASE=_system
@@ -224,7 +224,7 @@ per-request.
 
 ### 7. Enable and start the daemon
 
-```
+```bash
 sudo install -m 644 services/systemd/hades-daemon.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hades-daemon.service
@@ -236,7 +236,7 @@ You should see `Active: active (running)` and a log line like
 
 ### 8. Verify
 
-```
+```bash
 hades --db _system db stats
 ```
 
@@ -253,7 +253,7 @@ the embedder) a GPU; see `services/README.md` for details.
 
 1. Rotate the password in arangosh:
 
-```
+```javascript
 require("@arangodb/users").replace("hades", "<new-password>");
 ```
 
@@ -261,7 +261,7 @@ require("@arangodb/users").replace("hades", "<new-password>");
 (file is `root:hades 640`, so use `sudoedit` or `sudo $EDITOR`).
 3. Restart the daemon:
 
-```
+```bash
 sudo systemctl restart hades-daemon.service
 sudo systemctl status hades-daemon.service --no-pager
 ```

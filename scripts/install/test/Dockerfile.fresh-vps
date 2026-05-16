@@ -13,8 +13,28 @@
 #     The daemon is verified for ArangoDB connectivity only.
 #
 # Usage (from repo root):
+#   cargo build --release   # produces target/release/hades — required below
 #   docker build -f scripts/install/test/Dockerfile.fresh-vps -t hades-install-test .
-#   docker run --rm -it hades-install-test bash scripts/install/test/run-install.sh
+#   docker run --rm \
+#       -v "$PWD/target/release":/opt/hades-source/target/release:ro \
+#       hades-install-test:latest \
+#       bash /opt/hades-source/scripts/install/test/run-install.sh
+#
+# The volume mount is REQUIRED: the runner expects the binary at
+# /opt/hades-source/target/release/hades and exits with an error
+# without it. The image deliberately has no Rust toolchain (to keep
+# it minimal and honest about what a fresh-VPS install gives you),
+# so we mount in the prebuilt binary from the host.
+#
+# For iterating on run-install.sh / config files without rebuilding
+# the image, also mount:
+#   -v "$PWD/scripts/install/test/run-install.sh":/opt/hades-source/scripts/install/test/run-install.sh:ro
+#   -v "$PWD/config":/opt/hades-source/config:ro
+#
+# BuildKit note: the .dockerignore for this custom-named Dockerfile
+# is at scripts/install/test/Dockerfile.fresh-vps.dockerignore. Older
+# Docker builders without BuildKit ignore this file; modern Docker
+# (BuildKit default in 23.0+) picks it up automatically.
 
 FROM ubuntu:24.04
 
@@ -22,8 +42,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
 # Base utilities matching what a minimal fresh-VPS install gives you.
+# `systemd-standalone-sysusers` and `systemd-standalone-tmpfiles` provide the
+# `systemd-sysusers` and `systemd-tmpfiles` binaries without pulling in
+# systemd-init (which doesn't run cleanly in a vanilla container). They're
+# the same binaries shipped on a real Ubuntu VPS; the README install
+# procedure invokes them directly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gpg sudo procps less vim-tiny \
+        systemd-standalone-sysusers systemd-standalone-tmpfiles \
+    && mkdir -p /etc/sysusers.d /etc/tmpfiles.d \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ArangoDB 3.12 from the official deb repository.

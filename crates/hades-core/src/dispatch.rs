@@ -1733,6 +1733,13 @@ mod handlers {
     pub async fn db_purge(pool: &ArangoPool, document_id: &str) -> Result<Value, HandlerError> {
         let (col, key) = parse_node_id(document_id)?;
 
+        // Codebase files own an extended collection set (symbols + four edge
+        // collections) beyond the base metadata/chunks/embeddings triple.
+        // Cascade to all of them so purge never leaves orphan symbols/edges.
+        if col == crate::db::collections::CODEBASE.files {
+            return db_purge_codebase_file(pool, document_id, key).await;
+        }
+
         let profile = CollectionProfile::find_by_metadata(col).ok_or_else(|| {
             HandlerError::InvalidParameter {
                 name: "document_id".into(),
@@ -1774,6 +1781,88 @@ mod handlers {
         let total = counts["metadata"].as_u64().unwrap_or(0)
             + counts["chunks"].as_u64().unwrap_or(0)
             + counts["embeddings"].as_u64().unwrap_or(0);
+
+        Ok(json!({
+            "document_id": document_id,
+            "deleted": counts,
+            "total_deleted": total,
+        }))
+    }
+
+    /// Cascade-purge a `codebase_files` document.
+    ///
+    /// Removes the file metadata, its chunks, embeddings, symbols, and every
+    /// edge (defines/calls/implements/imports) that references the file or one
+    /// of its symbols. Symbol `_id`s are collected in a read-only pass first so
+    /// the delete pass can match symbol-referencing edges via a bind value —
+    /// keeping it to one modification per collection, like the base purge.
+    async fn db_purge_codebase_file(
+        pool: &ArangoPool,
+        document_id: &str,
+        key: &str,
+    ) -> Result<Value, HandlerError> {
+        use crate::db::collections::CODEBASE;
+
+        // 1. Read-only: collect this file's symbol _ids before deletion.
+        let sym_aql = "RETURN (FOR s IN @@symbols FILTER s.file_key == @key RETURN s._id)";
+        let sym_bind = json!({ "@symbols": CODEBASE.symbols, "key": key });
+        let mut ids: Vec<Value> = query::query_single(pool, sym_aql, Some(&sym_bind), ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("codebase purge symbol lookup failed for '{document_id}'"),
+                source: e,
+            })?
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        ids.push(json!(format!("{}/{}", CODEBASE.files, key)));
+
+        // 2. Delete file metadata, chunks, embeddings, symbols, and every edge
+        //    whose endpoint is the file or one of its symbols. Each collection
+        //    is modified exactly once; edge filters use the bound id list.
+        let aql = "\
+            LET meta = (FOR d IN @@files FILTER d._key == @key REMOVE d IN @@files RETURN 1) \
+            LET chunks = (FOR d IN @@chunks FILTER d.file_key == @key REMOVE d IN @@chunks RETURN 1) \
+            LET embs = (FOR d IN @@embs FILTER d.file_key == @key REMOVE d IN @@embs RETURN 1) \
+            LET syms = (FOR d IN @@symbols FILTER d.file_key == @key REMOVE d IN @@symbols RETURN 1) \
+            LET defs = (FOR e IN @@defines FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@defines RETURN 1) \
+            LET calls = (FOR e IN @@calls FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@calls RETURN 1) \
+            LET impls = (FOR e IN @@implements FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@implements RETURN 1) \
+            LET imps = (FOR e IN @@imports FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@imports RETURN 1) \
+            RETURN { metadata: LENGTH(meta), chunks: LENGTH(chunks), embeddings: LENGTH(embs), \
+                     symbols: LENGTH(syms), defines_edges: LENGTH(defs), calls_edges: LENGTH(calls), \
+                     implements_edges: LENGTH(impls), imports_edges: LENGTH(imps) }";
+
+        let bind = json!({
+            "@files": CODEBASE.files,
+            "@chunks": CODEBASE.chunks,
+            "@embs": CODEBASE.embeddings,
+            "@symbols": CODEBASE.symbols,
+            "@defines": CODEBASE.defines_edges,
+            "@calls": CODEBASE.calls_edges,
+            "@implements": CODEBASE.implements_edges,
+            "@imports": CODEBASE.imports_edges,
+            "ids": ids,
+            "key": key,
+        });
+
+        let result = query::query_single(pool, aql, Some(&bind), ExecutionTarget::Writer)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: format!("codebase purge AQL failed for '{document_id}'"),
+                source: e,
+            })?;
+
+        let counts = result.unwrap_or(json!({
+            "metadata": 0, "chunks": 0, "embeddings": 0, "symbols": 0,
+            "defines_edges": 0, "calls_edges": 0, "implements_edges": 0, "imports_edges": 0
+        }));
+        let total: u64 = [
+            "metadata", "chunks", "embeddings", "symbols",
+            "defines_edges", "calls_edges", "implements_edges", "imports_edges",
+        ]
+        .iter()
+        .map(|k| counts[*k].as_u64().unwrap_or(0))
+        .sum();
 
         Ok(json!({
             "document_id": document_id,

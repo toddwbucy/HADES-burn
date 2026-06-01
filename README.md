@@ -198,7 +198,10 @@ sudo install -m 640 -o root -g hades config/hades.yaml /etc/hades/hades.yaml
 
 The daemon searches `/etc/hades/hades.yaml` after the in-repo paths;
 the username (`hades`) and socket paths live there. Passwords are
-never stored in YAML — they come from the daemon's env (step 6).
+never stored in YAML — they come from the daemon's env (step 6). The
+username can also be overridden out-of-band with the `ARANGO_USERNAME`
+env var, parallel to `ARANGO_PASSWORD` / `ARANGO_HOST` / `ARANGO_PORT` /
+`ARANGO_RO_SOCKET` / `ARANGO_RW_SOCKET`.
 
 ### 6. Set the daemon environment
 

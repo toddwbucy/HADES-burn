@@ -162,16 +162,10 @@ impl CollectionProfile {
         for (_, p) in ALL_PROFILES.iter() {
             names.extend([p.metadata, p.chunks, p.embeddings]);
         }
-        names.extend([
-            CODEBASE.files,
-            CODEBASE.chunks,
-            CODEBASE.embeddings,
-            CODEBASE.symbols,
-            CODEBASE.defines_edges,
-            CODEBASE.calls_edges,
-            CODEBASE.implements_edges,
-            CODEBASE.imports_edges,
-        ]);
+        // Reuse CODEBASE.all_collections() (the canonical list) so new codebase
+        // collections are picked up automatically instead of drifting from a
+        // hand-maintained copy here.
+        names.extend(CODEBASE.all_collections().into_iter().map(|(name, _)| name));
         names.sort_unstable();
         names.dedup();
         names

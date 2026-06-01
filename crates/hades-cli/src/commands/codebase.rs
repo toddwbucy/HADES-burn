@@ -18,6 +18,13 @@ pub enum CodebaseCmd {
         /// Run in batch mode.
         #[arg(short = 'b', long)]
         batch: bool,
+
+        /// Comma-separated extensions to embed without a parser (e.g.
+        /// `cu,cuh`). Files with these extensions are chunked by size and
+        /// embedded as features — no symbol/edge extraction. Their file nodes
+        /// are merged (existing fields preserved), not overwritten.
+        #[arg(long = "unparsed-ext", value_delimiter = ',')]
+        unparsed_ext: Vec<String>,
     },
 
     /// Update an existing code graph node.

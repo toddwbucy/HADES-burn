@@ -108,6 +108,7 @@ pub async fn run(
     path: PathBuf,
     language: Option<&str>,
     batch: bool,
+    unparsed_ext: &[String],
 ) -> Result<()> {
     let cmd_start = Instant::now();
 
@@ -115,6 +116,14 @@ pub async fn run(
     if !path.exists() {
         bail!("path not found: {}", path.display());
     }
+
+    // Normalize the unparsed-extension allowlist: strip leading dots, lowercase.
+    // Files matching these extensions are embedded without a parser (#121).
+    let unparsed_set: std::collections::HashSet<String> = unparsed_ext
+        .iter()
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
 
     // Parse language override if provided.
     let lang_override = match language {
@@ -148,7 +157,7 @@ pub async fn run(
     ensure_collections(&db).await?;
 
     // Discover source files.
-    let files = discover_files(&path, lang_override)?;
+    let files = discover_files(&path, lang_override, &unparsed_set)?;
     if files.is_empty() {
         output::print_output(
             "codebase.ingest",
@@ -203,23 +212,39 @@ pub async fn run(
             .to_string_lossy()
             .to_string();
 
-        // Track Rust files for rust-analyzer post-loop enrichment.
-        let is_rust = lang_override == Some(Language::Rust)
-            || file_path.extension().and_then(|e| e.to_str()) == Some("rs");
+        // Route unparsed-allowlisted files (e.g. CUDA `.cu`) through the
+        // parser-free fallback: line/size chunk + embed, no AST (#121).
+        let file_ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        let is_unparsed = lang_override.is_none()
+            && Language::from_path(&rel_path).is_none()
+            && file_ext
+                .as_deref()
+                .is_some_and(|e| unparsed_set.contains(e));
+
+        // Track Rust files for rust-analyzer post-loop enrichment (parsed only).
+        let is_rust = !is_unparsed
+            && (lang_override == Some(Language::Rust) || file_ext.as_deref() == Some("rs"));
         if is_rust {
             rust_abs_paths.push(file_path.clone());
         }
 
-        let result = ingest_file(
-            &db,
-            embedder.as_ref(),
-            config,
-            file_path,
-            &rel_path,
-            lang_override,
-            &mut imports,
-        )
-        .await;
+        let result = if is_unparsed {
+            ingest_unparsed_file(&db, embedder.as_ref(), config, file_path, &rel_path).await
+        } else {
+            ingest_file(
+                &db,
+                embedder.as_ref(),
+                config,
+                file_path,
+                &rel_path,
+                lang_override,
+                &mut imports,
+            )
+            .await
+        };
 
         let duration = item_start.elapsed().as_millis() as u64;
         match result {
@@ -526,14 +551,26 @@ async fn ensure_indices(db: &ArangoPool) -> Result<()> {
 /// If `path` is a file, returns just that file (if it matches the language
 /// filter). If a directory, walks recursively, skipping common non-source
 /// directories.
-fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<PathBuf>> {
+fn discover_files(
+    path: &Path,
+    lang_override: Option<Language>,
+    unparsed_set: &std::collections::HashSet<String>,
+) -> Result<Vec<PathBuf>> {
+    // Whether a path's (lowercased) extension is in the unparsed allowlist.
+    let ext_allowed = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| unparsed_set.contains(&e.to_lowercase()))
+    };
+
     if path.is_file() {
         let path_str = path.to_string_lossy();
-        if lang_override.is_some() || Language::from_path(&path_str).is_some() {
+        if lang_override.is_some() || Language::from_path(&path_str).is_some() || ext_allowed(path)
+        {
             return Ok(vec![path.to_path_buf()]);
         }
         bail!(
-            "unsupported file type: {}. Use --language to override.",
+            "unsupported file type: {}. Use --language or --unparsed-ext to override.",
             path.display()
         );
     }
@@ -561,6 +598,10 @@ fn discover_files(path: &Path, lang_override: Option<Language>) -> Result<Vec<Pa
         let path_str = entry_path.to_string_lossy();
         let include = if Language::from_path(&path_str).is_some() {
             // File has a recognized source extension — always include.
+            true
+        } else if ext_allowed(entry_path) {
+            // Extension is in the unparsed allowlist (e.g. cu,cuh) — include
+            // for the parser-free embedding fallback (#121).
             true
         } else if lang_override.is_some() {
             // Language override active: include extensionless files only
@@ -902,6 +943,174 @@ async fn ingest_file(
         error: None,
         duration_ms: 0,
     })
+}
+
+// ── Unparsed-language fallback (#121) ────────────────────────────────────
+
+/// Map an unparsed file extension to a language label for the file node.
+fn unparsed_language_label(rel_path: &str) -> &'static str {
+    let ext = Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    match ext.as_deref() {
+        Some("cu") | Some("cuh") => "cuda",
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => "cpp",
+        Some("c") | Some("h") => "c",
+        _ => "other",
+    }
+}
+
+/// Ingest a file whose language has no parser: size-chunk the raw text, embed
+/// the chunks as node features, and attach them to the file node — WITHOUT
+/// symbol/edge extraction. The file node is *merged* (existing fields
+/// preserved), not overwritten, so a pre-existing node's metadata survives
+/// (e.g. an externally-created stub's `note`/`source`). See #121.
+async fn ingest_unparsed_file(
+    db: &ArangoPool,
+    embedder: Option<&EmbeddingClient>,
+    config: &HadesConfig,
+    file_path: &Path,
+    rel_path: &str,
+) -> Result<FileResult> {
+    let source = std::fs::read_to_string(file_path)
+        .with_context(|| format!("failed to read {}", file_path.display()))?;
+    let fkey = keys::file_key(rel_path);
+    let lang_label = unparsed_language_label(rel_path);
+
+    // Parser-free chunking: empty defs => whole file, split at line boundaries
+    // to stay under the max chunk size.
+    let chunker = AstChunking::new(Vec::new());
+    let chunks = chunker.chunk(&source);
+    let num_chk = chunks.len();
+
+    // Chunk documents — no symbol overlap (unparsed files have no symbols).
+    let chunk_docs: Vec<Value> = chunks
+        .iter()
+        .map(|c| {
+            let ckey = keys::chunk_key(&fkey, c.chunk_index);
+            json!({
+                "_key": ckey,
+                "file_key": fkey,
+                "chunk_index": c.chunk_index,
+                "total_chunks": c.total_chunks,
+                "text": c.text,
+                "start_char": c.start_char,
+                "end_char": c.end_char,
+                "symbols": [],
+            })
+        })
+        .collect();
+
+    // Clear stale embeddings before re-embedding.
+    delete_file_embeddings(db, &fkey).await;
+
+    // Embed chunks (skipped if embedder unavailable). Same path/task as parsed.
+    let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    let (embedding_docs, embedding_error): (Vec<Value>, Option<String>) = match embedder {
+        Some(emb) if !chunk_texts.is_empty() => {
+            match emb
+                .embed(&chunk_texts, "code", Some(config.embedding.batch.size))
+                .await
+            {
+                Ok(embed_result) => {
+                    let docs = embed_result
+                        .embeddings
+                        .iter()
+                        .enumerate()
+                        .map(|(i, vec)| {
+                            let ckey = keys::chunk_key(&fkey, i);
+                            let ekey = keys::embedding_key(&ckey);
+                            json!({
+                                "_key": ekey,
+                                "chunk_key": ckey,
+                                "file_key": fkey,
+                                "embedding": vec,
+                                "model": embed_result.model,
+                                "model_hash": keys::model_hash(&embed_result.model),
+                                "dimension": embed_result.dimension,
+                            })
+                        })
+                        .collect::<Vec<Value>>();
+                    (docs, None)
+                }
+                Err(e) => {
+                    warn!(path = rel_path, error = %e, "embedding failed, storing without vectors");
+                    (Vec::new(), Some(e.to_string()))
+                }
+            }
+        }
+        _ => (Vec::new(), None),
+    };
+    let num_embeddings_written = embedding_docs.len();
+
+    // Persist chunks + embeddings (ours — overwrite-by-key is fine).
+    if !chunk_docs.is_empty() {
+        crud::insert_documents(db, CODEBASE.chunks, &chunk_docs, true)
+            .await
+            .context("failed to store chunk documents")?;
+    }
+    if !embedding_docs.is_empty() {
+        crud::insert_documents(db, CODEBASE.embeddings, &embedding_docs, true)
+            .await
+            .context("failed to store embedding documents")?;
+    }
+
+    // Merge the file node — preserve any pre-existing fields, set only ours,
+    // create if absent.
+    let total_lines = source.lines().count();
+    let fields = json!({
+        "path": rel_path,
+        "rel_path": rel_path,
+        "kind": "file",
+        "language": lang_label,
+        "symbol_count": 0,
+        "chunk_count": num_chk,
+        "embedding_count": num_embeddings_written,
+        "total_lines": total_lines,
+        "status": "PROCESSED",
+        "ingested_at": chrono::Utc::now().to_rfc3339(),
+    });
+    upsert_merge_file_node(db, &fkey, fields).await?;
+
+    info!(
+        path = rel_path,
+        language = lang_label,
+        chunks = num_chk,
+        embeddings = num_embeddings_written,
+        "ingested (unparsed)"
+    );
+
+    Ok(FileResult {
+        path: rel_path.to_string(),
+        success: true,
+        language: Some(lang_label.to_string()),
+        num_symbols: Some(0),
+        num_chunks: Some(num_chk),
+        num_embeddings: Some(num_embeddings_written),
+        embedding_error,
+        skipped: None,
+        error: None,
+        duration_ms: 0,
+    })
+}
+
+/// Merge-write a `codebase_files` node: PATCH (preserving existing fields) when
+/// it exists, otherwise insert. Lets the unparsed fallback attach to a
+/// pre-existing file node without clobbering its metadata (#121).
+async fn upsert_merge_file_node(db: &ArangoPool, fkey: &str, fields: Value) -> Result<()> {
+    match crud::update_document(db, CODEBASE.files, fkey, &fields).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.is_not_found() => {
+            let mut doc = fields;
+            doc["_key"] = json!(fkey);
+            crud::insert_documents(db, CODEBASE.files, &[doc], true)
+                .await
+                .context("failed to insert file document")?;
+            Ok(())
+        }
+        Err(e) => Err(anyhow::Error::new(e).context("failed to merge file document")),
+    }
 }
 
 // ── Line-offset table ─────────────────────────────────────────────────
@@ -1388,8 +1597,51 @@ fn resolve_python_imports(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_unparsed_language_label() {
+        assert_eq!(unparsed_language_label("core/kernels/adamw.cu"), "cuda");
+        assert_eq!(unparsed_language_label("k.cuh"), "cuda");
+        assert_eq!(unparsed_language_label("src/foo.cpp"), "cpp");
+        assert_eq!(unparsed_language_label("a/b.h"), "c");
+        assert_eq!(unparsed_language_label("notes.txt"), "other");
+        assert_eq!(unparsed_language_label("Makefile"), "other");
+    }
+
+    #[test]
+    fn test_discover_files_unparsed_ext() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("kernel.cu"), "__global__ void k(){}\n").unwrap();
+        fs::write(dir.path().join("header.cuh"), "#pragma once\n").unwrap();
+        fs::write(dir.path().join("app.py"), "x = 1\n").unwrap();
+        fs::write(dir.path().join("readme.md"), "# hi\n").unwrap();
+
+        // Without the allowlist: only the .py is picked up (.cu/.cuh skipped).
+        let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
+        assert_eq!(files.len(), 1);
+
+        // With cu,cuh allowlisted: .py + .cu + .cuh, still not .md.
+        let allow: HashSet<String> = ["cu", "cuh"].iter().map(|s| s.to_string()).collect();
+        let files = discover_files(dir.path(), None, &allow).unwrap();
+        assert_eq!(files.len(), 3);
+    }
+
+    #[test]
+    fn test_discover_files_unparsed_single_file() {
+        let dir = TempDir::new().unwrap();
+        let cu = dir.path().join("backward.cu");
+        fs::write(&cu, "__global__ void b(){}\n").unwrap();
+
+        // Single unparsed file is rejected without the allowlist...
+        assert!(discover_files(&cu, None, &HashSet::new()).is_err());
+        // ...and accepted with it.
+        let allow: HashSet<String> = ["cu"].iter().map(|s| s.to_string()).collect();
+        let files = discover_files(&cu, None, &allow).unwrap();
+        assert_eq!(files.len(), 1);
+    }
 
     #[test]
     fn test_discover_files_single() {
@@ -1397,7 +1649,7 @@ mod tests {
         let py_file = dir.path().join("test.py");
         fs::write(&py_file, "x = 1\n").unwrap();
 
-        let files = discover_files(&py_file, None).unwrap();
+        let files = discover_files(&py_file, None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -1408,7 +1660,7 @@ mod tests {
         fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
         fs::write(dir.path().join("readme.md"), "# hi\n").unwrap();
 
-        let files = discover_files(dir.path(), None).unwrap();
+        let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 2); // .py + .rs, not .md
     }
 
@@ -1423,7 +1675,7 @@ mod tests {
         fs::create_dir(&pycache).unwrap();
         fs::write(pycache.join("mod.py"), "x = 1\n").unwrap();
 
-        let files = discover_files(dir.path(), None).unwrap();
+        let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1); // only a.py
     }
 
@@ -1433,11 +1685,11 @@ mod tests {
         fs::write(dir.path().join("script"), "x = 1\n").unwrap(); // no extension
 
         // Without override: no files found.
-        let files = discover_files(dir.path(), None).unwrap();
+        let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 0);
 
         // With override: extensionless file is included.
-        let files = discover_files(dir.path(), Some(Language::Python)).unwrap();
+        let files = discover_files(dir.path(), Some(Language::Python), &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -1449,7 +1701,7 @@ mod tests {
         fs::write(dir.path().join("data.json"), "{}").unwrap(); // has extension — excluded
         fs::write(dir.path().join("real.py"), "x = 1\n").unwrap(); // recognized — included
 
-        let files = discover_files(dir.path(), Some(Language::Python)).unwrap();
+        let files = discover_files(dir.path(), Some(Language::Python), &HashSet::new()).unwrap();
         assert_eq!(files.len(), 2); // script + real.py, not readme.md or data.json
     }
 

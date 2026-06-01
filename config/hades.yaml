@@ -60,6 +60,19 @@ embedding:
     size_small: 8     # conservative fallback for smaller GPUs
 
   chunking:
+    # Chunk size is a recall-vs-VRAM lever. The 500/200 default is tuned for
+    # late-chunking recall with Jina V4 on a 49 GiB A6000. Per-embedding GPU
+    # allocation scales with chunk size, so shrinking chunks cuts memory
+    # pressure: e.g. 200/50 lowers per-embedding allocation by ~2.5×.
+    #
+    # Tradeoff: smaller chunks → more chunks per file → more embeddings stored
+    # (marginally more storage), and shorter context per embedding (slightly
+    # lower late-chunking recall).
+    #
+    # Lower these when the embedder service returns intermittent 500 OOMs while
+    # ingesting large source files — e.g. on a 16 GiB GPU (RTX 2000 Ada):
+    #     size_tokens: 200
+    #     overlap_tokens: 50
     size_tokens: 500
     overlap_tokens: 200  # 40% overlap — high for late-chunking recall with Jina V4
 

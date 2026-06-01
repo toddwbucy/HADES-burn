@@ -37,6 +37,9 @@ impl HadesConfig {
     /// Returns `Err` if an env var contains an invalid value.
     pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         // Database
+        if let Ok(v) = env::var("ARANGO_USERNAME") {
+            self.database.username = v;
+        }
         if let Ok(v) = env::var("ARANGO_PASSWORD") {
             self.database.password = Some(v);
         }

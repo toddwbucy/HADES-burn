@@ -160,6 +160,7 @@ search:
         // SAFETY: test runs single-threaded via cargo test -- --test-threads=1
         // or is isolated enough that env mutation is acceptable.
         unsafe {
+            env::set_var("ARANGO_USERNAME", "override-user");
             env::set_var("ARANGO_HOST", "override-host");
             env::set_var("ARANGO_PORT", "1234");
             env::set_var("HADES_DATABASE", "OverrideDB");
@@ -168,6 +169,8 @@ search:
 
         config.apply_env_overrides().unwrap();
 
+        // Default username is "root"; the override must replace it.
+        assert_eq!(config.database.username, "override-user");
         assert_eq!(config.database.host, "override-host");
         assert_eq!(config.database.port, 1234);
         assert_eq!(config.database.name.as_deref(), Some("OverrideDB"));
@@ -175,6 +178,7 @@ search:
 
         // Clean up
         unsafe {
+            env::remove_var("ARANGO_USERNAME");
             env::remove_var("ARANGO_HOST");
             env::remove_var("ARANGO_PORT");
             env::remove_var("HADES_DATABASE");

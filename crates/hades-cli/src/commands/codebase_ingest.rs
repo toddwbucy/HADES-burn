@@ -218,8 +218,11 @@ pub async fn run(
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        let is_unparsed = lang_override.is_none()
-            && Language::from_path(&rel_path).is_none()
+        // The unparsed allowlist is orthogonal to `--language`: an allowlisted
+        // extension with no recognized parser (e.g. `.cu`) always takes the
+        // parser-free path, even when `--language` is set for other files.
+        // `discover_files` likewise includes these regardless of the override.
+        let is_unparsed = Language::from_path(&rel_path).is_none()
             && file_ext
                 .as_deref()
                 .is_some_and(|e| unparsed_set.contains(e));
@@ -1005,11 +1008,9 @@ async fn ingest_unparsed_file(
         })
         .collect();
 
-    // Clear stale embeddings before re-embedding. (Stale *chunk* docs are not
-    // purged: chunks are overwritten by key, so a re-ingest that produces fewer
-    // chunks can leave orphaned high-index chunk docs — but their embeddings are
-    // deleted here, so they carry no vector. Same accepted limitation as the
-    // parsed `ingest_file` path.)
+    // Clear stale chunks AND embeddings before re-writing, so a re-ingest that
+    // produces fewer chunks leaves no orphaned high-index chunk/vector docs.
+    delete_file_chunks(db, &fkey).await;
     delete_file_embeddings(db, &fkey).await;
 
     // Embed chunks (skipped if embedder unavailable). Same path/task as parsed.
@@ -1153,6 +1154,22 @@ async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
             .await
     {
         debug!(file_key, error = %e, "failed to clean up old embeddings (non-fatal)");
+    }
+}
+
+/// Delete all chunk documents for a file.
+///
+/// Called before re-chunking on the unparsed path so that a re-ingest which
+/// produces fewer chunks leaves no orphaned high-index chunk docs behind
+/// (overwrite-by-key only updates the chunks that still exist).
+async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
+    let aql = "FOR c IN @@col FILTER c.file_key == @fk REMOVE c IN @@col";
+    let bind = json!({ "@col": CODEBASE.chunks, "fk": file_key });
+    if let Err(e) =
+        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
+            .await
+    {
+        debug!(file_key, error = %e, "failed to clean up old chunks (non-fatal)");
     }
 }
 

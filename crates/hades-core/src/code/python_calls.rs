@@ -46,7 +46,9 @@ pub fn build_qualified_index(
                 continue;
             }
             let qname = qualified_name(sym);
-            let skey = keys::symbol_key(&fkey, &sym.name);
+            // Value keys on the qualified name so it matches the stored vertex
+            // `_key`; the index is *keyed* by qname for qualified-exact lookup.
+            let skey = keys::symbol_key(&fkey, &qname);
             let entry = (rel_path.clone(), skey);
             index.entry(qname).or_default().push(entry);
         }
@@ -87,7 +89,7 @@ pub fn resolve_python_calls(
             };
 
             let caller_qname = qualified_name(sym);
-            let caller_skey = keys::symbol_key(&fkey, &sym.name);
+            let caller_skey = keys::symbol_key(&fkey, &caller_qname);
             let caller_parent = sym
                 .metadata
                 .get("parent_symbol")
@@ -147,10 +149,10 @@ pub fn resolve_python_calls(
 /// For symbols with `parent_symbol` metadata, returns `"Parent.name"`.
 /// Otherwise returns the bare symbol name.
 fn qualified_name(sym: &Symbol) -> String {
-    match sym.metadata.get("parent_symbol").and_then(|v| v.as_str()) {
-        Some(parent) if !parent.is_empty() => format!("{parent}.{}", sym.name),
-        _ => sym.name.clone(),
-    }
+    // Single source of truth: `Symbol::qualified_name()` produces the same
+    // `"Parent.method"` form for Python (and `::` form for Rust). Kept as a thin
+    // wrapper so call sites in this module read naturally.
+    sym.qualified_name()
 }
 
 /// Attempt to resolve a call site to a target symbol.
@@ -262,7 +264,7 @@ mod tests {
                 if sym.kind == SymbolKind::Import {
                     continue;
                 }
-                let skey = keys::symbol_key(&fkey, &sym.name);
+                let skey = keys::symbol_key(&fkey, &sym.qualified_name());
                 index
                     .entry(sym.name.clone())
                     .or_default()

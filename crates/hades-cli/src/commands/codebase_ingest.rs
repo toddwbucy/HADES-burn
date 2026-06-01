@@ -699,7 +699,7 @@ async fn ingest_file(
                         .copied()
                         .unwrap_or(source.len());
                     if c.start_char < sym_end && sym_start < c.end_char {
-                        Some(keys::symbol_key(&fkey, &s.name))
+                        Some(keys::symbol_key(&fkey, &s.qualified_name()))
                     } else {
                         None
                     }
@@ -726,13 +726,14 @@ async fn ingest_file(
         .iter()
         .filter(|s| s.kind.is_primitive())
         .map(|s| {
-            let skey = keys::symbol_key(&fkey, &s.name);
+            let qname = s.qualified_name();
+            let skey = keys::symbol_key(&fkey, &qname);
             json!({
                 "_key": skey,
                 "file_key": fkey,
                 "file_path": rel_path,
                 "name": s.name,
-                "qualified_name": s.name,
+                "qualified_name": qname,
                 "kind": s.kind.universal_kind().unwrap(),
                 "lang_kind": s.kind.lang_kind(),
                 "start_line": s.start_line,
@@ -748,7 +749,7 @@ async fn ingest_file(
         .iter()
         .filter(|s| s.kind.is_primitive())
         .map(|s| {
-            let skey = keys::symbol_key(&fkey, &s.name);
+            let skey = keys::symbol_key(&fkey, &s.qualified_name());
             let edge_key = keys::edge_key(&fkey, "defines", &skey);
             json!({
                 "_key": edge_key,
@@ -805,12 +806,17 @@ async fn ingest_file(
     let num_embeddings_written = embedding_docs.len();
 
     // Build file document (after embedding so we can record embedding_count).
-    // symbol_count reflects primitives only (no imports, no impl blocks).
-    let primitive_count = analysis
-        .symbols
+    // symbol_count reflects primitives only (no imports, no impl blocks), and is
+    // counted from the DEDUPLICATED stored set (distinct `_key`) rather than the
+    // pre-dedup primitive list — the upsert collapses any same-keyed symbols, so
+    // counting the input would over-report and break `symbol_count_consistency`
+    // (#113). With qualified-name keying collisions should not occur, but this
+    // keeps the denorm honest regardless.
+    let primitive_count = symbol_docs
         .iter()
-        .filter(|s| s.kind.is_primitive())
-        .count();
+        .filter_map(|d| d["_key"].as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let file_doc = json!({
         "_key": fkey,
         "path": rel_path,
@@ -1193,7 +1199,10 @@ fn build_python_symbol_index(
             if sym.kind == SymbolKind::Import {
                 continue;
             }
-            let skey = keys::symbol_key(&fkey, &sym.name);
+            // Index is keyed by the bare name (call sites use bare names), but
+            // the value must be the qualified-name-derived key so edges target
+            // the actual stored vertex (#113).
+            let skey = keys::symbol_key(&fkey, &sym.qualified_name());
             index
                 .entry(sym.name.clone())
                 .or_default()

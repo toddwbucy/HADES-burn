@@ -24,6 +24,40 @@ pub struct Symbol {
     pub metadata: serde_json::Value,
 }
 
+impl Symbol {
+    /// The collision-free name used to derive this symbol's graph `_key`.
+    ///
+    /// The bare `name` is NOT unique within a file — Rust has one `new`,
+    /// `default`, `fmt`, … per `impl` block, and Python one `__init__` per
+    /// class. Keying on the bare name collapses them onto a single `_key`,
+    /// silently discarding all but one (see issue #113). This method consults
+    /// the parent context the analyzers already record in `metadata`:
+    ///
+    /// - Rust methods carry `impl_context` (`"Config"`, `"Display for Config"`,
+    ///   set in `rust_ast.rs`) → `"<ctx>::<name>"`.
+    /// - Python methods carry `parent_symbol` (the enclosing class) →
+    ///   `"<parent>.<name>"`, matching the dotted convention the Python call
+    ///   resolver indexes on (`python_calls.rs`).
+    /// - Everything else (free functions, top-level types) is already unique at
+    ///   file scope and returns the bare `name`.
+    ///
+    /// Mirrors the qualified names produced by the rust-analyzer enrichment
+    /// path, which has always keyed correctly.
+    pub fn qualified_name(&self) -> String {
+        if let Some(ctx) = self.metadata.get("impl_context").and_then(|v| v.as_str())
+            && !ctx.is_empty()
+        {
+            return format!("{ctx}::{}", self.name);
+        }
+        if let Some(parent) = self.metadata.get("parent_symbol").and_then(|v| v.as_str())
+            && !parent.is_empty()
+        {
+            return format!("{parent}.{}", self.name);
+        }
+        self.name.clone()
+    }
+}
+
 /// Classification of extracted symbols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +213,48 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn sym(name: &str, metadata: serde_json::Value) -> Symbol {
+        Symbol {
+            name: name.into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 1,
+            metadata,
+        }
+    }
+
+    #[test]
+    fn test_qualified_name_rust_impl_method() {
+        // Two `new`s in different impl blocks must qualify differently (#113).
+        let a = sym("new", json!({ "impl_context": "Config" }));
+        let b = sym("new", json!({ "impl_context": "Embedder" }));
+        assert_eq!(a.qualified_name(), "Config::new");
+        assert_eq!(b.qualified_name(), "Embedder::new");
+        assert_ne!(a.qualified_name(), b.qualified_name());
+    }
+
+    #[test]
+    fn test_qualified_name_rust_trait_impl() {
+        let fmt = sym("fmt", json!({ "impl_context": "Display for Config" }));
+        assert_eq!(fmt.qualified_name(), "Display for Config::fmt");
+    }
+
+    #[test]
+    fn test_qualified_name_python_method() {
+        let save = sym("save", json!({ "parent_symbol": "Model" }));
+        assert_eq!(save.qualified_name(), "Model.save");
+    }
+
+    #[test]
+    fn test_qualified_name_free_function_is_bare() {
+        assert_eq!(sym("helper", json!({})).qualified_name(), "helper");
+        assert_eq!(sym("helper", serde_json::Value::Null).qualified_name(), "helper");
+        // Empty context must not produce a dangling separator.
+        assert_eq!(sym("helper", json!({ "impl_context": "" })).qualified_name(), "helper");
+        assert_eq!(sym("helper", json!({ "parent_symbol": "" })).qualified_name(), "helper");
+    }
 
     #[test]
     fn test_symbol_hash_deterministic() {

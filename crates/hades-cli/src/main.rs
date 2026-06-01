@@ -279,6 +279,11 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::codebase_validate::run_validate(&config))
         }
+        Commands::Codebase(CodebaseCmd::PruneOrphans { dry_run }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::codebase_prune::run_prune(&config, dry_run))
+        }
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

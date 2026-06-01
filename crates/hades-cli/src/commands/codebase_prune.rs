@@ -39,8 +39,11 @@ pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
     // 1. Orphan symbols: file_key no longer present in codebase_files.
     let orphan_symbols = prune_orphan_symbols(&pool, dry_run).await?;
 
-    // 2. Dangling edges: either endpoint no longer resolves. Run after the
-    //    symbol prune so edges to just-removed symbols are caught too.
+    // 2. Dangling edges: either endpoint no longer resolves. In a real run this
+    //    follows the symbol prune, so edges to just-removed orphan symbols are
+    //    counted as dangling too. In a dry-run nothing is removed, so those
+    //    edges still resolve and the count is a *lower bound* — see the
+    //    `dry_run_note` below.
     let mut dangling = serde_json::Map::new();
     for (label, col) in [
         ("defines_edges", CODEBASE.defines_edges),
@@ -53,20 +56,36 @@ pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
     }
     let total_edges: u64 = dangling.values().filter_map(Value::as_u64).sum();
 
-    let report = json!({
+    let mut report = json!({
         "dry_run": dry_run,
         "orphan_symbols": orphan_symbols,
         "dangling_edges": dangling,
     });
+    if dry_run {
+        // The dangling-edge count excludes edges that only become dangling once
+        // the orphan symbols are removed (nothing is deleted in a dry-run), so
+        // a real run may remove at least this many edges.
+        report["dangling_edges_note"] = json!(
+            "lower bound: excludes edges that become dangling after orphan \
+             symbols are removed; a real run may remove more"
+        );
+    }
     output::print_output("codebase.prune_orphans", report, &OutputFormat::Json);
 
     // Human-readable summary to stderr.
-    let verb = if dry_run { "would remove" } else { "removed" };
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(
-        err,
-        "Prune: {verb} {orphan_symbols} orphan symbols, {total_edges} dangling edges",
-    );
+    if dry_run {
+        let _ = writeln!(
+            err,
+            "Prune (dry-run): would remove {orphan_symbols} orphan symbols, \
+             ≥{total_edges} dangling edges",
+        );
+    } else {
+        let _ = writeln!(
+            err,
+            "Prune: removed {orphan_symbols} orphan symbols, {total_edges} dangling edges",
+        );
+    }
 
     if dry_run {
         info!(orphan_symbols, total_edges, "prune dry-run complete");
@@ -113,7 +132,12 @@ async fn prune_dangling_edges(pool: &ArangoPool, col: &str, dry_run: bool) -> Re
     };
     let bind = json!({ "@edges": col });
     let n = run_count(pool, aql, &bind, target(dry_run)).await?;
-    info!(collection = col, dangling_edges = n, dry_run, "pruned dangling edges");
+    info!(
+        collection = col,
+        dangling_edges = n,
+        dry_run,
+        "pruned dangling edges"
+    );
     Ok(n)
 }
 
@@ -136,7 +160,9 @@ async fn run_count(
 ) -> Result<u64> {
     match query::query_single(pool, aql, Some(bind), target).await {
         Ok(v) => Ok(v.and_then(|v| v.as_u64()).unwrap_or(0)),
-        Err(ArangoError::Api { error_num: 1203, .. }) => Ok(0),
+        Err(ArangoError::Api {
+            error_num: 1203, ..
+        }) => Ok(0),
         Err(e) => Err(e).context("prune AQL query failed"),
     }
 }

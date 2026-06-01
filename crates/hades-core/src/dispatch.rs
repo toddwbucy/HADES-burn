@@ -1793,9 +1793,10 @@ mod handlers {
     ///
     /// Removes the file metadata, its chunks, embeddings, symbols, and every
     /// edge (defines/calls/implements/imports) that references the file or one
-    /// of its symbols. Symbol `_id`s are collected in a read-only pass first so
-    /// the delete pass can match symbol-referencing edges via a bind value —
-    /// keeping it to one modification per collection, like the base purge.
+    /// of its symbols. The symbol `_id`s used to match symbol-referencing edges
+    /// are collected with a `LET` inside the same writer query, so reads and
+    /// deletes share one transaction snapshot (no read-then-write race), and
+    /// each collection is modified exactly once — like the base purge.
     async fn db_purge_codebase_file(
         pool: &ArangoPool,
         document_id: &str,
@@ -1803,31 +1804,23 @@ mod handlers {
     ) -> Result<Value, HandlerError> {
         use crate::db::collections::CODEBASE;
 
-        // 1. Read-only: collect this file's symbol _ids before deletion.
-        let sym_aql = "RETURN (FOR s IN @@symbols FILTER s.file_key == @key RETURN s._id)";
-        let sym_bind = json!({ "@symbols": CODEBASE.symbols, "key": key });
-        let mut ids: Vec<Value> = query::query_single(pool, sym_aql, Some(&sym_bind), ExecutionTarget::Reader)
-            .await
-            .map_err(|e| HandlerError::Query {
-                context: format!("codebase purge symbol lookup failed for '{document_id}'"),
-                source: e,
-            })?
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
-        ids.push(json!(format!("{}/{}", CODEBASE.files, key)));
-
-        // 2. Delete file metadata, chunks, embeddings, symbols, and every edge
-        //    whose endpoint is the file or one of its symbols. Each collection
-        //    is modified exactly once; edge filters use the bound id list.
+        // Delete file metadata, chunks, embeddings, symbols, and every edge
+        // whose endpoint is the file or one of its symbols. The endpoint id
+        // list (`ids`) is built in-query from the symbols snapshot plus the
+        // file's own _id, so concurrent inserts can't slip an edge past the
+        // filter. Each collection is modified exactly once.
         let aql = "\
+            LET ids = APPEND( \
+                (FOR s IN @@symbols FILTER s.file_key == @key RETURN s._id), \
+                [CONCAT(@files_name, '/', @key)]) \
             LET meta = (FOR d IN @@files FILTER d._key == @key REMOVE d IN @@files RETURN 1) \
             LET chunks = (FOR d IN @@chunks FILTER d.file_key == @key REMOVE d IN @@chunks RETURN 1) \
             LET embs = (FOR d IN @@embs FILTER d.file_key == @key REMOVE d IN @@embs RETURN 1) \
             LET syms = (FOR d IN @@symbols FILTER d.file_key == @key REMOVE d IN @@symbols RETURN 1) \
-            LET defs = (FOR e IN @@defines FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@defines RETURN 1) \
-            LET calls = (FOR e IN @@calls FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@calls RETURN 1) \
-            LET impls = (FOR e IN @@implements FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@implements RETURN 1) \
-            LET imps = (FOR e IN @@imports FILTER e._from IN @ids OR e._to IN @ids REMOVE e IN @@imports RETURN 1) \
+            LET defs = (FOR e IN @@defines FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@defines RETURN 1) \
+            LET calls = (FOR e IN @@calls FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@calls RETURN 1) \
+            LET impls = (FOR e IN @@implements FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@implements RETURN 1) \
+            LET imps = (FOR e IN @@imports FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@imports RETURN 1) \
             RETURN { metadata: LENGTH(meta), chunks: LENGTH(chunks), embeddings: LENGTH(embs), \
                      symbols: LENGTH(syms), defines_edges: LENGTH(defs), calls_edges: LENGTH(calls), \
                      implements_edges: LENGTH(impls), imports_edges: LENGTH(imps) }";
@@ -1841,7 +1834,7 @@ mod handlers {
             "@calls": CODEBASE.calls_edges,
             "@implements": CODEBASE.implements_edges,
             "@imports": CODEBASE.imports_edges,
-            "ids": ids,
+            "files_name": CODEBASE.files,
             "key": key,
         });
 
@@ -1857,8 +1850,14 @@ mod handlers {
             "defines_edges": 0, "calls_edges": 0, "implements_edges": 0, "imports_edges": 0
         }));
         let total: u64 = [
-            "metadata", "chunks", "embeddings", "symbols",
-            "defines_edges", "calls_edges", "implements_edges", "imports_edges",
+            "metadata",
+            "chunks",
+            "embeddings",
+            "symbols",
+            "defines_edges",
+            "calls_edges",
+            "implements_edges",
+            "imports_edges",
         ]
         .iter()
         .map(|k| counts[*k].as_u64().unwrap_or(0))

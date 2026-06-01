@@ -171,6 +171,28 @@ pub enum DbCmd {
         force: bool,
     },
 
+    /// Empty a collection in place (keeps the collection and its indexes).
+    Truncate {
+        /// Collection name.
+        collection: String,
+
+        /// Confirm the operation. Required — this permanently deletes all
+        /// documents in the collection.
+        #[arg(short = 'y', long)]
+        force: bool,
+    },
+
+    /// Drop a single collection (documents, indexes, and the collection itself).
+    DropCollection {
+        /// Collection name.
+        collection: String,
+
+        /// Confirm the operation. Required — this permanently removes the
+        /// collection.
+        #[arg(short = 'y', long)]
+        force: bool,
+    },
+
     /// Count documents in a collection.
     Count {
         /// Collection name.

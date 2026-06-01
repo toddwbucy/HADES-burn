@@ -439,3 +439,25 @@ pub async fn drop_collection(
         Err(e) => Err(e),
     }
 }
+
+/// Truncate a collection — remove all documents while keeping the collection
+/// and its indexes in place.
+///
+/// Returns `Ok` even if the collection doesn't exist when `ignore_missing`
+/// is true.
+#[instrument(skip(pool), fields(db = %pool.database()))]
+pub async fn truncate_collection(
+    pool: &ArangoPool,
+    name: &str,
+    ignore_missing: bool,
+) -> Result<Value, ArangoError> {
+    let path = format!("collection/{name}/truncate");
+    match pool.writer().put(&path, &serde_json::json!({})).await {
+        Ok(resp) => Ok(resp),
+        Err(e) if ignore_missing && e.is_not_found() => {
+            debug!(collection = name, "collection not found, ignoring");
+            Ok(serde_json::json!({"truncated": false, "name": name}))
+        }
+        Err(e) => Err(e),
+    }
+}

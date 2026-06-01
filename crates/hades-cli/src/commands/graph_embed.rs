@@ -4,7 +4,7 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
 pub enum GraphEmbedCmd {
-    /// Train RGCN graph embeddings via Persephone training service.
+    /// Train RGCN graph embeddings via the HADES training service.
     Train {
         /// Maximum number of training epochs.
         #[arg(long, default_value_t = 200)]

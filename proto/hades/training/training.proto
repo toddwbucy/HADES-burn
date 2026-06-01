@@ -1,4 +1,8 @@
-// Persephone Training Service — RGCN link prediction on knowledge graphs.
+// HADES Training Service — RGCN link prediction on knowledge graphs.
+//
+// HADES-owned compute service (not the Persephone PM system). The agentic
+// training path is deliberately decoupled from the "persephone.*" provider
+// brand — see issue #106.
 //
 // The Rust orchestrator drives the training loop: it loads the graph from
 // ArangoDB, computes edge splits and negative samples via safetensors IPC,
@@ -15,7 +19,7 @@
 
 syntax = "proto3";
 
-package persephone.training;
+package hades.training;
 
 // ---------------------------------------------------------------------------
 // Service

@@ -2,7 +2,7 @@
 //!
 //! Connects the [`Prefetcher`](crate::prefetcher::Prefetcher) (which
 //! pre-computes negative samples) with the
-//! [`TrainingClient`](hades_core::persephone::training::TrainingClient)
+//! [`TrainingClient`](hades_core::training::TrainingClient)
 //! (which issues gRPC RPCs to the Python GPU process).
 //!
 //! ## Training lifecycle
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use hades_core::graph::types::GraphData;
-use hades_core::persephone::training::{EvalResult, TrainingClient, TrainingError};
+use hades_core::training::{EvalResult, TrainingClient, TrainingError};
 use hades_proto::training::{ModelConfig, OptimizerConfig};
 
 use crate::prefetcher::{PrefetchConfig, PrefetchError, Prefetcher};

@@ -3,7 +3,7 @@
 //! Replaces the Python dispatch for RGCN training.  Orchestrates:
 //! 1. Graph loading from ArangoDB
 //! 2. Edge splitting + safetensors serialization
-//! 3. Training via Persephone gRPC (Python GPU process)
+//! 3. Training via the HADES gRPC training service (Python GPU process)
 //! 4. Embedding export back to ArangoDB
 
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::graph::{ExportConfig, decode_f32_embeddings, export_embeddings};
-use hades_core::persephone::training::{TrainingClient, TrainingClientConfig};
+use hades_core::training::{TrainingClient, TrainingClientConfig};
 
 use super::output::{self, OutputFormat};
 
@@ -73,7 +73,7 @@ pub async fn run(
     // so misconfiguration fails fast.
     let training_client = TrainingClient::connect(TrainingClientConfig::default())
         .await
-        .context("failed to connect to Persephone training service")?;
+        .context("failed to connect to HADES training service")?;
 
     // ── Prepare training data ────────────────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);

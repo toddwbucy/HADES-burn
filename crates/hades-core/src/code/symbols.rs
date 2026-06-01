@@ -250,10 +250,19 @@ mod tests {
     #[test]
     fn test_qualified_name_free_function_is_bare() {
         assert_eq!(sym("helper", json!({})).qualified_name(), "helper");
-        assert_eq!(sym("helper", serde_json::Value::Null).qualified_name(), "helper");
+        assert_eq!(
+            sym("helper", serde_json::Value::Null).qualified_name(),
+            "helper"
+        );
         // Empty context must not produce a dangling separator.
-        assert_eq!(sym("helper", json!({ "impl_context": "" })).qualified_name(), "helper");
-        assert_eq!(sym("helper", json!({ "parent_symbol": "" })).qualified_name(), "helper");
+        assert_eq!(
+            sym("helper", json!({ "impl_context": "" })).qualified_name(),
+            "helper"
+        );
+        assert_eq!(
+            sym("helper", json!({ "parent_symbol": "" })).qualified_name(),
+            "helper"
+        );
     }
 
     #[test]

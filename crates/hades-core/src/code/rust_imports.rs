@@ -152,7 +152,10 @@ pub fn build_symbol_index(
                 continue;
             }
 
-            let skey = keys::symbol_key(&fkey, &sym.name);
+            // Index is keyed by bare name (use-paths resolve by leaf name), but
+            // the value must be the qualified-name-derived key so import edges
+            // target the actual stored vertex (#113).
+            let skey = keys::symbol_key(&fkey, &sym.qualified_name());
             let entry = (rel_path.clone(), skey);
 
             // Index by symbol name.

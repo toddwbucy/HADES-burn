@@ -956,6 +956,9 @@ fn unparsed_language_label(rel_path: &str) -> &'static str {
     match ext.as_deref() {
         Some("cu") | Some("cuh") => "cuda",
         Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => "cpp",
+        // `.h` is shared by C and C++; labelled "c" as an intentional
+        // simplification. The label is for human display / RGCN features only,
+        // not parsing, so the ambiguity is harmless here.
         Some("c") | Some("h") => "c",
         _ => "other",
     }
@@ -1002,7 +1005,11 @@ async fn ingest_unparsed_file(
         })
         .collect();
 
-    // Clear stale embeddings before re-embedding.
+    // Clear stale embeddings before re-embedding. (Stale *chunk* docs are not
+    // purged: chunks are overwritten by key, so a re-ingest that produces fewer
+    // chunks can leave orphaned high-index chunk docs — but their embeddings are
+    // deleted here, so they carry no vector. Same accepted limitation as the
+    // parsed `ingest_file` path.)
     delete_file_embeddings(db, &fkey).await;
 
     // Embed chunks (skipped if embedder unavailable). Same path/task as parsed.

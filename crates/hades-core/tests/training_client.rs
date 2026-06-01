@@ -1,11 +1,11 @@
-//! Tests for the Persephone training client.
+//! Tests for the HADES training client.
 //!
-//! Connection tests require a running Persephone training service.
+//! Connection tests require a running HADES training service.
 //! Type and config tests run without a service.
 
 use std::path::PathBuf;
 
-use hades_core::persephone::training::{
+use hades_core::training::{
     CheckpointResult, EmbeddingsResult, EvalResult, InitResult, LoadGraphResult, StepResult,
     TrainingClientConfig, TrainingEndpoint,
 };
@@ -79,7 +79,7 @@ fn test_endpoint_variants() {
 
 #[tokio::test]
 async fn test_connect_nonexistent_socket_fails() {
-    use hades_core::persephone::training::TrainingClient;
+    use hades_core::training::TrainingClient;
 
     let dir = tempfile::tempdir().expect("failed to create tempdir");
     let socket_path = dir.path().join("nonexistent.sock");

@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "persephone/common/common.proto",
         "persephone/embedding/embedding.proto",
         "persephone/extraction/extraction.proto",
-        "persephone/training/training.proto",
+        "hades/training/training.proto",
     ]
     .iter()
     .map(|p| proto_root.join(p))

@@ -91,7 +91,7 @@ pub struct ExportResult {
 /// Decode raw little-endian F32 bytes into a `Vec<f32>`.
 ///
 /// Use this to convert the inline `embeddings` bytes from
-/// [`EmbeddingsResult`](crate::persephone::training::EmbeddingsResult)
+/// [`EmbeddingsResult`](crate::training::EmbeddingsResult)
 /// before passing to [`export_embeddings`].
 pub fn decode_f32_embeddings(bytes: &[u8]) -> Result<Vec<f32>, ExportError> {
     if !bytes.len().is_multiple_of(4) {

@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use hades_core::config::HadesConfig;
 use hades_core::db::ArangoPool;
 use hades_core::graph::{ExportConfig, decode_f32_embeddings, export_embeddings};
-use hades_core::persephone::training::{TrainingClient, TrainingClientConfig};
+use hades_core::training::{TrainingClient, TrainingClientConfig};
 
 use super::output::{self, OutputFormat};
 
@@ -57,7 +57,7 @@ pub async fn run(
     // ── Connect to training service ─────────────────────────────────
     let training_client = TrainingClient::connect(TrainingClientConfig::default())
         .await
-        .context("failed to connect to Persephone training service")?;
+        .context("failed to connect to HADES training service")?;
 
     // ── Load graph from ArangoDB ────────────────────────────────────
     info!("loading runtime schema");

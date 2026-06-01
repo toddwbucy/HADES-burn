@@ -1,8 +1,10 @@
-//! Persephone Training Client — gRPC client for RGCN training on GPU.
+//! HADES Training Client — gRPC client for RGCN training on GPU.
 //!
-//! Connects to a Python training provider that owns the GPU, model
-//! parameters, and optimizer state. The Rust orchestrator drives the
-//! training loop and issues per-step RPCs.
+//! Connects to a HADES-owned Python training provider (at
+//! `/run/hades/training.sock`) that owns the GPU, model parameters, and
+//! optimizer state. The Rust orchestrator drives the training loop and issues
+//! per-step RPCs. Decoupled from the `persephone.*` provider brand (and
+//! entirely separate from the Persephone PM system) — see issue #106.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -165,7 +167,7 @@ fn path_to_string(path: &Path) -> Result<String, TrainingError> {
 // Client
 // ---------------------------------------------------------------------------
 
-/// Client for the Persephone training service.
+/// Client for the HADES training service (gRPC over `/run/hades/training.sock`).
 ///
 /// Provides typed methods for each training lifecycle step: init, load,
 /// train, evaluate, and checkpoint.

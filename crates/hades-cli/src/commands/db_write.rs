@@ -155,44 +155,10 @@ pub async fn run_create_collection(
     Ok(())
 }
 
-/// `hades db drop-database <name> --force`
-///
-/// CLI-only — refuses non-writable target databases (production data is
-/// sacrosanct), requires explicit `--force` because the operation is
-/// irreversible. Connects to `_system` like `create-database`.
-pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) -> Result<()> {
-    if !force {
-        anyhow::bail!(
-            "refusing to drop database '{name}' without --force (-y). \
-             This operation is irreversible — all collections and documents \
-             will be deleted permanently."
-        );
-    }
-
-    use hades_core::db::ArangoClient;
-
-    let mut system_config = config.clone();
-    system_config.database.name = Some("_system".to_string());
-    let client = ArangoClient::from_config(&system_config, false)
-        .context("failed to connect to ArangoDB for database deletion")?;
-
-    let path = format!("database/{name}");
-    let resp = client
-        .delete(&path)
-        .await
-        .with_context(|| format!("failed to drop database '{name}'"))?;
-
-    output::print_output(
-        "db.drop-database",
-        json!({
-            "dropped": true,
-            "name": name,
-            "response": resp,
-        }),
-        &OutputFormat::Json,
-    );
-    Ok(())
-}
+// NOTE: `run_drop_database` was intentionally removed (issue #118). Dropping a
+// whole database is a console-only ritual — irreversible, total blast radius,
+// and the data is sacrosanct. The CLI provides collection-scoped `truncate` /
+// `drop-collection` only; whole-database drops go through the ArangoDB console.
 
 /// `hades db truncate <collection> -y`
 ///

@@ -466,8 +466,10 @@ platform that actually constrains model behavior."
   Drift is expected.
 - **Rollback**: no `schema rollback` command. If `apply` fails partway,
   the state is whatever ArangoDB left it in (collection-creation is
-  idempotent, AQL UPSERTs are per-document atomic). Recovery is manual
-  or via `db drop-database` + re-apply.
+  idempotent, AQL UPSERTs are per-document atomic). Recovery is manual:
+  drop the database from the ArangoDB console (the CLI deliberately has no
+  `drop-database` — see issue #118) and re-apply, or surgically fix with
+  `db truncate` / `db drop-collection`.
 
 ## 12. Open Questions
 

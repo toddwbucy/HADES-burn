@@ -31,4 +31,11 @@ pub enum CodebaseCmd {
 
     /// Validate codebase graph invariants (ontology spec §10).
     Validate,
+
+    /// Remove orphan symbols and dangling edges left by pre-cascade deletes.
+    PruneOrphans {
+        /// Report what would be deleted without modifying the graph.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

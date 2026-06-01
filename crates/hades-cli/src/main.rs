@@ -571,6 +571,24 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::db_write::run_drop_database(&config, &name, force))
         }
+        Commands::Db(commands::db::DbCmd::Truncate { collection, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::db_write::run_truncate(
+                &config,
+                &collection,
+                force,
+            ))
+        }
+        Commands::Db(commands::db::DbCmd::DropCollection { collection, force }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::db_write::run_drop_collection(
+                &config,
+                &collection,
+                force,
+            ))
+        }
         Commands::Db(commands::db::DbCmd::CreateIndex {
             collection,
             dimension,

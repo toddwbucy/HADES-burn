@@ -12,8 +12,9 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use hades_core::config::HadesConfig;
-use hades_core::db::ArangoPool;
+use hades_core::db::{ArangoPool, collections::CollectionProfile, crud};
 use hades_core::dispatch::{self, DaemonCommand};
+use tracing::warn;
 
 use super::output::{self, OutputFormat};
 
@@ -187,6 +188,92 @@ pub async fn run_drop_database(config: &HadesConfig, name: &str, force: bool) ->
             "dropped": true,
             "name": name,
             "response": resp,
+        }),
+        &OutputFormat::Json,
+    );
+    Ok(())
+}
+
+/// `hades db truncate <collection> -y`
+///
+/// Empties a collection in place — every document is removed, the collection
+/// and its indexes remain. Requires explicit `-y`. If the collection is still
+/// referenced by the active schema it warns loudly but proceeds: retiring a
+/// superseded-but-still-referenced collection is a legitimate migration step.
+///
+/// Collection-scoped by design — there is deliberately no database-wide
+/// equivalent in the CLI. ArangoDB ACLs remain the authoritative gate: a
+/// read-only database rejects the write regardless of `-y`.
+pub async fn run_truncate(config: &HadesConfig, collection: &str, force: bool) -> Result<()> {
+    if !force {
+        anyhow::bail!(
+            "refusing to truncate '{collection}' without --force (-y). \
+             This permanently deletes every document in the collection."
+        );
+    }
+    let schema_referenced = CollectionProfile::is_schema_referenced(collection);
+    if schema_referenced {
+        warn!(
+            collection,
+            "truncating a collection the active schema still references — \
+             all of its documents will be deleted"
+        );
+    }
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
+    let response = crud::truncate_collection(&pool, collection, false)
+        .await
+        .with_context(|| format!("failed to truncate collection '{collection}'"))?;
+    output::print_output(
+        "db.truncate",
+        json!({
+            "truncated": true,
+            "collection": collection,
+            "schema_referenced": schema_referenced,
+            "response": response,
+        }),
+        &OutputFormat::Json,
+    );
+    Ok(())
+}
+
+/// `hades db drop-collection <collection> -y`
+///
+/// Removes a collection entirely (documents, indexes, and the collection
+/// itself). Requires explicit `-y`. Warns loudly — but proceeds — if the
+/// collection is still referenced by the active schema.
+///
+/// Collection-scoped by design — there is deliberately no database-wide
+/// equivalent in the CLI. ArangoDB ACLs remain the authoritative gate.
+pub async fn run_drop_collection(
+    config: &HadesConfig,
+    collection: &str,
+    force: bool,
+) -> Result<()> {
+    if !force {
+        anyhow::bail!(
+            "refusing to drop collection '{collection}' without --force (-y). \
+             This permanently removes the collection, its documents, and its indexes."
+        );
+    }
+    let schema_referenced = CollectionProfile::is_schema_referenced(collection);
+    if schema_referenced {
+        warn!(
+            collection,
+            "dropping a collection the active schema still references — \
+             it will have to be recreated before re-ingest"
+        );
+    }
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
+    let response = crud::drop_collection(&pool, collection, false)
+        .await
+        .with_context(|| format!("failed to drop collection '{collection}'"))?;
+    output::print_output(
+        "db.drop-collection",
+        json!({
+            "dropped": true,
+            "collection": collection,
+            "schema_referenced": schema_referenced,
+            "response": response,
         }),
         &OutputFormat::Json,
     );

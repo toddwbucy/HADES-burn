@@ -148,6 +148,41 @@ impl CollectionProfile {
     pub fn all() -> &'static [(&'static str, &'static CollectionProfile)] {
         &ALL_PROFILES
     }
+
+    /// Every physical collection name referenced by the compiled-in schema:
+    /// each registered profile's metadata/chunks/embeddings triple plus the
+    /// full codebase collection set. Sorted and de-duplicated.
+    ///
+    /// Used by destructive `db` commands (`truncate`, `drop-collection`) to
+    /// warn when a target is still part of the active schema. This is the
+    /// universal layer only — a database's own `hades_schema` may reference
+    /// additional collections this list does not know about.
+    pub fn known_collections() -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+        for (_, p) in ALL_PROFILES.iter() {
+            names.extend([p.metadata, p.chunks, p.embeddings]);
+        }
+        names.extend([
+            CODEBASE.files,
+            CODEBASE.chunks,
+            CODEBASE.embeddings,
+            CODEBASE.symbols,
+            CODEBASE.defines_edges,
+            CODEBASE.calls_edges,
+            CODEBASE.implements_edges,
+            CODEBASE.imports_edges,
+        ]);
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// Whether `name` is referenced by the compiled-in schema. A `true` result
+    /// means dropping/truncating `name` removes live, schema-known data and
+    /// should be warned about loudly.
+    pub fn is_schema_referenced(name: &str) -> bool {
+        Self::known_collections().contains(&name)
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +240,32 @@ mod tests {
         assert_eq!(p.metadata, "codebase_files");
         assert_eq!(p.chunks, "codebase_chunks");
         assert_eq!(p.embeddings, "codebase_embeddings");
+    }
+
+    #[test]
+    fn test_known_collections_and_schema_referenced() {
+        let known = CollectionProfile::known_collections();
+
+        // Live collections from both the default and codebase schemas.
+        assert!(CollectionProfile::is_schema_referenced("documents"));
+        assert!(CollectionProfile::is_schema_referenced("codebase_files"));
+        assert!(CollectionProfile::is_schema_referenced("codebase_symbols"));
+        assert!(CollectionProfile::is_schema_referenced(
+            "codebase_defines_edges"
+        ));
+
+        // A superseded collection (the #114 migration case) is NOT referenced
+        // by the active schema, so it can be retired without a warning.
+        assert!(!CollectionProfile::is_schema_referenced("codebase_edges"));
+        assert!(!CollectionProfile::is_schema_referenced(
+            "some_random_collection"
+        ));
+
+        // Sorted and de-duplicated.
+        let mut sorted = known.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(known, sorted);
     }
 
     #[test]

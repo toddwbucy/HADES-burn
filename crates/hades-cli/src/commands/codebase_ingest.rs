@@ -1407,6 +1407,48 @@ async fn run_rust_analyzer_phase(
         );
     }
 
+    // Recompute `symbol_count` from the authoritative stored set for every
+    // RA-touched file. Enrichment adds symbols (struct fields, methods) beyond
+    // the syn primitives that `ingest_file` counted, so the syn-based
+    // `symbol_count` is now stale (#126). Counting the actually-stored symbols
+    // keeps the denorm consistent — the same "count from the stored set" stance
+    // as #113 — and treats the richer RA granularity as canonical. The
+    // `file_key` index on `codebase_symbols` keeps the per-file count cheap.
+    let touched_fkeys: Vec<String> = file_patches
+        .iter()
+        .map(|(rel_path, _, _)| keys::file_key(rel_path))
+        .collect();
+    if !touched_fkeys.is_empty() {
+        let n = touched_fkeys.len();
+        let aql = "FOR fk IN @fkeys \
+                   LET c = LENGTH(FOR s IN @@sym FILTER s.file_key == fk RETURN 1) \
+                   UPDATE fk WITH { symbol_count: c } IN @@files";
+        let bind = json!({
+            "fkeys": touched_fkeys,
+            "@sym": CODEBASE.symbols,
+            "@files": CODEBASE.files,
+        });
+        match hades_core::db::query::query(
+            db,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await
+        {
+            Ok(_) => debug!(
+                files = n,
+                "recomputed symbol_count from stored set after RA enrichment"
+            ),
+            Err(e) => warn!(
+                error = %e,
+                "failed to recompute symbol_count after RA enrichment (non-fatal)"
+            ),
+        }
+    }
+
     Ok(RustAnalyzerStats {
         symbols: sym_count,
         edges: edge_count,

@@ -104,6 +104,11 @@ pub struct SymbolDocument {
     pub visibility: String,
     pub signature: String,
     pub file_path: String,
+    /// Key of the file node this symbol belongs to (`keys::file_key(file_path)`).
+    /// Must be stored explicitly — the document `_key` is *derived* from it, but
+    /// downstream queries (coverage, RGCN feature loading, `symbol_count_consistency`)
+    /// read this field. See #124.
+    pub file_key: String,
     pub start_line: u32,
     pub end_line: u32,
     pub parent_symbol: Option<String>,
@@ -151,7 +156,8 @@ impl RustEdgeResolver {
                     continue;
                 };
 
-                let sk = keys::symbol_key(&keys::file_key(rel_path), &sym.qualified_name);
+                let fk = keys::file_key(rel_path);
+                let sk = keys::symbol_key(&fk, &sym.qualified_name);
 
                 documents.push(SymbolDocument {
                     key: sk,
@@ -162,6 +168,7 @@ impl RustEdgeResolver {
                     visibility: sym.visibility.clone(),
                     signature: sym.signature.clone(),
                     file_path: rel_path.clone(),
+                    file_key: fk,
                     start_line: sym.start_line,
                     end_line: sym.end_line,
                     parent_symbol: sym.parent_symbol.clone(),
@@ -500,6 +507,16 @@ mod tests {
         let docs = resolver.build_symbol_documents();
         assert_eq!(docs.len(), 2);
         assert!(docs.iter().all(|d| !d.key.is_empty()));
+
+        // #124: every symbol must carry a non-null file_key equal to
+        // file_key(file_path), and the document _key must be prefixed by it.
+        let expected_fk = keys::file_key("src/lib.rs");
+        assert_eq!(expected_fk, "src_lib_rs");
+        for d in &docs {
+            assert_eq!(d.file_key, expected_fk);
+            assert_eq!(d.file_key, keys::file_key(&d.file_path));
+            assert!(d.key.starts_with(&expected_fk));
+        }
     }
 
     #[test]

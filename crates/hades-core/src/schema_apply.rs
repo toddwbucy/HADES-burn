@@ -391,6 +391,26 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
         }
     }
 
+    // relation_order (#128): no duplicates (the loader would walk the same
+    // collection twice under two relation ids), and any entry that matches a
+    // declared collection must be `type: edge`. Entries that aren't declared
+    // here are allowed — they may name a pre-existing edge collection not
+    // (re)declared in this schema file.
+    let mut seen_rel: HashSet<&str> = HashSet::new();
+    for rel in &file.relation_order {
+        if !seen_rel.insert(rel.as_str()) {
+            errors.push(format!(
+                "relation_order entry '{rel}' is listed more than once"
+            ));
+        }
+        if let Some(CollectionType::Document) = declared.get(rel.as_str()) {
+            errors.push(format!(
+                "relation_order entry '{rel}' refers to a `type: document` \
+                 collection; training relations must be edge collections"
+            ));
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -733,6 +753,40 @@ feature_dim: 1024
         let checksum = crate::graph::runtime_schema::compute_checksum(&file.relation_order);
         assert!(checksum.starts_with("sha256:"));
         assert_eq!(file.relation_order.len(), 2);
+    }
+
+    #[test]
+    fn validate_relation_order_rejects_duplicates_and_document_type() {
+        // Duplicate entry + an entry pointing at a declared document collection.
+        let yaml = r#"
+collections:
+  - { name: z_edges, type: edge }
+  - { name: z_docs, type: document }
+relation_order:
+  - z_edges
+  - z_edges
+  - z_docs
+"#;
+        let file = parse(yaml).unwrap();
+        let err = validate(&file).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("listed more than once"), "got: {msg}");
+        assert!(msg.contains("type: document"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_relation_order_allows_undeclared_edge() {
+        // An entry not declared in this file (a pre-existing edge collection)
+        // is allowed.
+        let yaml = r#"
+collections:
+  - { name: z_edges, type: edge }
+relation_order:
+  - z_edges
+  - some_preexisting_edges
+"#;
+        let file = parse(yaml).unwrap();
+        assert!(validate(&file).is_ok());
     }
 
     #[test]

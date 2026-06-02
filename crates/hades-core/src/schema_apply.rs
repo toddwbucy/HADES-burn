@@ -96,6 +96,19 @@ pub struct SchemaFile {
     #[serde(default)]
     pub named_graphs: Vec<NamedGraphDef>,
 
+    /// RGCN structural-training relation order: the ordered edge-collection
+    /// names the graph loader trains on (#128). Empty = training not scoped.
+    /// The workspace controls *which* relations train (e.g. excluding process
+    /// edges like `persephone_*`); the order fixes the stable RGCN relation
+    /// index. Written verbatim to `schema_meta.relation_order`.
+    #[serde(default)]
+    pub relation_order: Vec<String>,
+
+    /// Node feature dimension for structural training. Defaults to 2048 (the
+    /// Jina V4 embedding width) when omitted.
+    #[serde(default)]
+    pub feature_dim: Option<u32>,
+
     /// Per-collection document seeds. Collected from arbitrary
     /// top-level YAML keys not matching any of the above sections.
     /// Keys must match a declared collection name (validated).
@@ -230,7 +243,13 @@ pub fn parse(yaml_str: &str) -> Result<SchemaFile, ApplyError> {
         })?
         .clone();
 
-    const RESERVED: &[&str] = &["collections", "edge_definitions", "named_graphs"];
+    const RESERVED: &[&str] = &[
+        "collections",
+        "edge_definitions",
+        "named_graphs",
+        "relation_order",
+        "feature_dim",
+    ];
 
     // Second pass: parse the reserved sections via serde with deny_unknown_fields.
     // Build a sub-mapping containing only the reserved keys, then deserialize.
@@ -369,6 +388,26 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
                     ng.name
                 ));
             }
+        }
+    }
+
+    // relation_order (#128): no duplicates (the loader would walk the same
+    // collection twice under two relation ids), and any entry that matches a
+    // declared collection must be `type: edge`. Entries that aren't declared
+    // here are allowed — they may name a pre-existing edge collection not
+    // (re)declared in this schema file.
+    let mut seen_rel: HashSet<&str> = HashSet::new();
+    for rel in &file.relation_order {
+        if !seen_rel.insert(rel.as_str()) {
+            errors.push(format!(
+                "relation_order entry '{rel}' is listed more than once"
+            ));
+        }
+        if let Some(CollectionType::Document) = declared.get(rel.as_str()) {
+            errors.push(format!(
+                "relation_order entry '{rel}' refers to a `type: document` \
+                 collection; training relations must be edge collections"
+            ));
         }
     }
 
@@ -533,9 +572,12 @@ pub async fn apply(
     }
 
     // 5. schema_meta document — required by RuntimeSchema::load. Empty
-    //    seeds get an empty `relation_order` (RGCN training is deferred);
-    //    `feature_dim` mirrors the runtime default for Jina V4.
-    let relation_order: Vec<String> = Vec::new();
+    //    `relation_order` and `feature_dim` come from the schema (#128) — the
+    //    workspace scopes which relations the RGCN trains on. An empty
+    //    `relation_order` means training isn't scoped yet. `feature_dim`
+    //    defaults to 2048 (Jina V4 width) when the schema omits it.
+    let relation_order = file.relation_order.clone();
+    let feature_dim = file.feature_dim.unwrap_or(2048);
     let checksum = crate::graph::runtime_schema::compute_checksum(&relation_order);
     let meta_doc = json!({
         "_key": "meta",
@@ -543,8 +585,8 @@ pub async fn apply(
         "schema_version": 1u32,
         "seed_name": Value::Null,
         "relation_order": relation_order,
-        "num_relations": 0u32,
-        "feature_dim": 2048u32,
+        "num_relations": relation_order.len() as u32,
+        "feature_dim": feature_dim,
         "schema_checksum": checksum,
     });
     crud::insert_documents(
@@ -682,6 +724,83 @@ async fn check_not_in_use(pool: &ArangoPool, file: &SchemaFile) -> Result<(), Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_relation_order_and_feature_dim() {
+        // #128: the schema drives relation_order + feature_dim.
+        let yaml = r#"
+collections:
+  - { name: axioms, type: document }
+relation_order:
+  - nl_code_equation_edges
+  - nl_equation_source_edges
+feature_dim: 1024
+"#;
+        let file = parse(yaml).unwrap();
+        assert_eq!(
+            file.relation_order,
+            vec![
+                "nl_code_equation_edges".to_string(),
+                "nl_equation_source_edges".to_string()
+            ]
+        );
+        assert_eq!(file.feature_dim, Some(1024));
+        // Not mistaken for a document-seed block.
+        assert!(!file.documents.contains_key("relation_order"));
+        assert!(!file.documents.contains_key("feature_dim"));
+
+        // The meta document would carry a checksum derived from this order.
+        let checksum = crate::graph::runtime_schema::compute_checksum(&file.relation_order);
+        assert!(checksum.starts_with("sha256:"));
+        assert_eq!(file.relation_order.len(), 2);
+    }
+
+    #[test]
+    fn validate_relation_order_rejects_duplicates_and_document_type() {
+        // Duplicate entry + an entry pointing at a declared document collection.
+        let yaml = r#"
+collections:
+  - { name: z_edges, type: edge }
+  - { name: z_docs, type: document }
+relation_order:
+  - z_edges
+  - z_edges
+  - z_docs
+"#;
+        let file = parse(yaml).unwrap();
+        let err = validate(&file).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("listed more than once"), "got: {msg}");
+        assert!(msg.contains("type: document"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_relation_order_allows_undeclared_edge() {
+        // An entry not declared in this file (a pre-existing edge collection)
+        // is allowed.
+        let yaml = r#"
+collections:
+  - { name: z_edges, type: edge }
+relation_order:
+  - z_edges
+  - some_preexisting_edges
+"#;
+        let file = parse(yaml).unwrap();
+        assert!(validate(&file).is_ok());
+    }
+
+    #[test]
+    fn parse_defaults_when_relation_order_omitted() {
+        // Omitting both → empty relation_order, no feature_dim (→ 2048 default).
+        let yaml = r#"
+collections:
+  - { name: axioms, type: document }
+"#;
+        let file = parse(yaml).unwrap();
+        assert!(file.relation_order.is_empty());
+        assert_eq!(file.feature_dim, None);
+        assert_eq!(file.feature_dim.unwrap_or(2048), 2048);
+    }
 
     #[test]
     fn parse_minimal() {

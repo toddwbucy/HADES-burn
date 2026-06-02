@@ -689,6 +689,15 @@ async fn ingest_file(
         });
     }
 
+    // Purge this file's existing symbols and incident edges before re-writing.
+    // Symbol/edge inserts are overwrite-by-key only, so without this a renamed
+    // or deleted symbol would leave an orphaned row that later inflates
+    // `symbol_count` and dangles in the graph (#126). We only reach here when
+    // the file actually changed (the unchanged-skip returned above), so an
+    // unchanged file — which has no orphans — is never needlessly purged.
+    // RA enrichment runs afterward and *augments* the freshly-written syn set.
+    purge_file_symbols_and_edges(db, &fkey).await;
+
     // Collect Python import symbols for later edge resolution.
     if lang == Language::Python {
         let py_import_syms: Vec<Symbol> = analysis
@@ -1173,6 +1182,49 @@ async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
     }
 }
 
+/// Purge a file's existing symbols and the **source-owned (outgoing) edges**
+/// the file's own ingest will recreate, before re-writing. Symbol/edge inserts
+/// are overwrite-by-key only, so without this a renamed/deleted symbol leaves
+/// an orphaned row — which inflates `symbol_count` and dangles in the graph
+/// (#126). This makes `codebase_symbols` authoritative on re-ingest.
+///
+/// Only edges with `_from` in this file (the file node for `defines`, or one of
+/// its symbols for `calls`/`implements`/`imports`) are removed — those are
+/// rebuilt by this file's ingest. **Incoming** edges (`_to` in this file) are
+/// owned by *other* source files and are NOT touched here: deleting them would
+/// drop valid edges that a skipped source file never rebuilds. Incoming edges
+/// left dangling by a rename/delete are cleaned by `hades codebase prune`.
+///
+/// The `ids` list is snapshotted in-query from the current symbols plus the
+/// file `_id`, so the edge filter is consistent even under concurrent inserts.
+async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
+    let aql = "\
+        LET ids = APPEND( \
+            (FOR s IN @@symbols FILTER s.file_key == @key RETURN s._id), \
+            [CONCAT(@files_name, '/', @key)]) \
+        LET syms = (FOR d IN @@symbols FILTER d.file_key == @key REMOVE d IN @@symbols RETURN 1) \
+        LET defs = (FOR e IN @@defines FILTER e._from IN ids REMOVE e IN @@defines RETURN 1) \
+        LET calls = (FOR e IN @@calls FILTER e._from IN ids REMOVE e IN @@calls RETURN 1) \
+        LET impls = (FOR e IN @@implements FILTER e._from IN ids REMOVE e IN @@implements RETURN 1) \
+        LET imps = (FOR e IN @@imports FILTER e._from IN ids REMOVE e IN @@imports RETURN 1) \
+        RETURN 1";
+    let bind = json!({
+        "@symbols": CODEBASE.symbols,
+        "@defines": CODEBASE.defines_edges,
+        "@calls": CODEBASE.calls_edges,
+        "@implements": CODEBASE.implements_edges,
+        "@imports": CODEBASE.imports_edges,
+        "files_name": CODEBASE.files,
+        "key": file_key,
+    });
+    if let Err(e) =
+        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
+            .await
+    {
+        warn!(file_key, error = %e, "failed to purge stale symbols/edges before re-ingest");
+    }
+}
+
 // ── Incremental check ───────────────────────────────────────────────────
 
 /// Check if a file can be skipped during incremental ingest.
@@ -1405,6 +1457,48 @@ async fn run_rust_analyzer_phase(
             count = patched_count,
             "patched file documents with rust-analyzer metadata"
         );
+    }
+
+    // Recompute `symbol_count` from the authoritative stored set for every
+    // RA-touched file. Enrichment adds symbols (struct fields, methods) beyond
+    // the syn primitives that `ingest_file` counted, so the syn-based
+    // `symbol_count` is now stale (#126). Counting the actually-stored symbols
+    // keeps the denorm consistent — the same "count from the stored set" stance
+    // as #113 — and treats the richer RA granularity as canonical. The
+    // `file_key` index on `codebase_symbols` keeps the per-file count cheap.
+    let touched_fkeys: Vec<String> = file_patches
+        .iter()
+        .map(|(rel_path, _, _)| keys::file_key(rel_path))
+        .collect();
+    if !touched_fkeys.is_empty() {
+        let n = touched_fkeys.len();
+        let aql = "FOR fk IN @fkeys \
+                   LET c = LENGTH(FOR s IN @@sym FILTER s.file_key == fk RETURN 1) \
+                   UPDATE fk WITH { symbol_count: c } IN @@files";
+        let bind = json!({
+            "fkeys": touched_fkeys,
+            "@sym": CODEBASE.symbols,
+            "@files": CODEBASE.files,
+        });
+        match hades_core::db::query::query(
+            db,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await
+        {
+            Ok(_) => debug!(
+                files = n,
+                "recomputed symbol_count from stored set after RA enrichment"
+            ),
+            Err(e) => warn!(
+                error = %e,
+                "failed to recompute symbol_count after RA enrichment (non-fatal)"
+            ),
+        }
     }
 
     Ok(RustAnalyzerStats {

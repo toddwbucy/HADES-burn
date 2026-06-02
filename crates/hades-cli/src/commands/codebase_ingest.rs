@@ -689,6 +689,15 @@ async fn ingest_file(
         });
     }
 
+    // Purge this file's existing symbols and incident edges before re-writing.
+    // Symbol/edge inserts are overwrite-by-key only, so without this a renamed
+    // or deleted symbol would leave an orphaned row that later inflates
+    // `symbol_count` and dangles in the graph (#126). We only reach here when
+    // the file actually changed (the unchanged-skip returned above), so an
+    // unchanged file — which has no orphans — is never needlessly purged.
+    // RA enrichment runs afterward and *augments* the freshly-written syn set.
+    purge_file_symbols_and_edges(db, &fkey).await;
+
     // Collect Python import symbols for later edge resolution.
     if lang == Language::Python {
         let py_import_syms: Vec<Symbol> = analysis
@@ -1170,6 +1179,45 @@ async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
             .await
     {
         debug!(file_key, error = %e, "failed to clean up old chunks (non-fatal)");
+    }
+}
+
+/// Purge a file's existing symbols and every edge incident to the file node or
+/// one of its symbols, before re-ingesting. Symbol/edge inserts are
+/// overwrite-by-key only, so without this a renamed/deleted symbol leaves an
+/// orphaned row — which inflates `symbol_count` and dangles in the graph
+/// (#126). This makes `codebase_symbols` authoritative on re-ingest.
+///
+/// Mirrors the cascade in `dispatch::db_purge_codebase_file`, minus the file
+/// node / chunks / embeddings (which the ingest path rewrites itself). The
+/// endpoint `ids` list is snapshotted in-query from the current symbols plus
+/// the file `_id`, so the edge filter is consistent even under concurrent
+/// inserts.
+async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
+    let aql = "\
+        LET ids = APPEND( \
+            (FOR s IN @@symbols FILTER s.file_key == @key RETURN s._id), \
+            [CONCAT(@files_name, '/', @key)]) \
+        LET syms = (FOR d IN @@symbols FILTER d.file_key == @key REMOVE d IN @@symbols RETURN 1) \
+        LET defs = (FOR e IN @@defines FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@defines RETURN 1) \
+        LET calls = (FOR e IN @@calls FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@calls RETURN 1) \
+        LET impls = (FOR e IN @@implements FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@implements RETURN 1) \
+        LET imps = (FOR e IN @@imports FILTER e._from IN ids OR e._to IN ids REMOVE e IN @@imports RETURN 1) \
+        RETURN 1";
+    let bind = json!({
+        "@symbols": CODEBASE.symbols,
+        "@defines": CODEBASE.defines_edges,
+        "@calls": CODEBASE.calls_edges,
+        "@implements": CODEBASE.implements_edges,
+        "@imports": CODEBASE.imports_edges,
+        "files_name": CODEBASE.files,
+        "key": file_key,
+    });
+    if let Err(e) =
+        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
+            .await
+    {
+        warn!(file_key, error = %e, "failed to purge stale symbols/edges before re-ingest");
     }
 }
 

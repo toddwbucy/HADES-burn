@@ -17,8 +17,10 @@ RuntimeDirectoryMode=0755
 CacheDirectory=hades
 CacheDirectoryMode=0755
 
-WorkingDirectory=/home/todd/olympus/HADES-Burn/services
-ExecStart=/home/todd/olympus/HADES-Burn/services/.venv/bin/python -m training.server
+# @SERVICES_DIR@ is substituted with the actual services/ path at install time
+# (`make install-trainer`), so this unit isn't pinned to any one workstation.
+WorkingDirectory=@SERVICES_DIR@
+ExecStart=@SERVICES_DIR@/.venv/bin/python -m training.server
 
 # Environment from config file (GPU device, socket)
 EnvironmentFile=/etc/hades/trainer.conf

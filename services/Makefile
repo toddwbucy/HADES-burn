@@ -2,7 +2,7 @@ PROTO_DIR := proto
 GEN_DIR := generated
 PYTHON := python
 
-.PHONY: all test proto-gen clean install start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
+.PHONY: all test proto-gen clean install install-trainer start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
 
 all: proto-gen start-all
 
@@ -38,6 +38,15 @@ clean:
 
 install:
 	pip install -e .
+
+# Install the trainer systemd unit + config, substituting this repo's services/
+# path so the unit isn't pinned to any one workstation. Run from services/.
+install-trainer:
+	sed 's|@SERVICES_DIR@|$(CURDIR)|g' systemd/hades-trainer.service \
+		| sudo tee /etc/systemd/system/hades-trainer.service > /dev/null
+	sudo install -D -m 644 systemd/trainer.conf /etc/hades/trainer.conf
+	sudo systemctl daemon-reload
+	@echo "Installed hades-trainer.service (SERVICES_DIR=$(CURDIR))"
 
 start-extraction:
 	systemctl start hades-extractor

@@ -2,7 +2,7 @@ PROTO_DIR := proto
 GEN_DIR := generated
 PYTHON := python
 
-.PHONY: all test proto-gen clean install start-extraction stop-extraction start-embedding stop-embedding start-all stop-all
+.PHONY: all test proto-gen clean install start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
 
 all: proto-gen start-all
 
@@ -14,19 +14,23 @@ proto-gen:
 	@mkdir -p $(GEN_DIR)/persephone/extraction
 	@mkdir -p $(GEN_DIR)/persephone/embedding
 	@mkdir -p $(GEN_DIR)/persephone/common
+	@mkdir -p $(GEN_DIR)/hades/training
 	$(PYTHON) -m grpc_tools.protoc \
 		-I$(PROTO_DIR) \
 		--python_out=$(GEN_DIR) \
 		--grpc_python_out=$(GEN_DIR) \
 		$(PROTO_DIR)/persephone/common/common.proto \
 		$(PROTO_DIR)/persephone/extraction/extraction.proto \
-		$(PROTO_DIR)/persephone/embedding/embedding.proto
+		$(PROTO_DIR)/persephone/embedding/embedding.proto \
+		$(PROTO_DIR)/hades/training/training.proto
 	@# Create __init__.py files for package imports
 	@touch $(GEN_DIR)/__init__.py
 	@touch $(GEN_DIR)/persephone/__init__.py
 	@touch $(GEN_DIR)/persephone/common/__init__.py
 	@touch $(GEN_DIR)/persephone/extraction/__init__.py
 	@touch $(GEN_DIR)/persephone/embedding/__init__.py
+	@touch $(GEN_DIR)/hades/__init__.py
+	@touch $(GEN_DIR)/hades/training/__init__.py
 	@echo "Proto stubs generated in $(GEN_DIR)/"
 
 clean:
@@ -46,6 +50,12 @@ start-embedding:
 
 stop-embedding:
 	systemctl --user stop hades-embedder
+
+start-training:
+	systemctl --user start hades-trainer
+
+stop-training:
+	systemctl --user stop hades-trainer
 
 start-all: start-extraction start-embedding
 

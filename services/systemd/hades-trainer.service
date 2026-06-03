@@ -1,0 +1,47 @@
+[Unit]
+Description=HADES RGCN Training Service (gRPC, GPU)
+Documentation=https://github.com/r3d91ll/HADES-Burn
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hades
+Group=hades
+SupplementaryGroups=weaver-admin arangodb
+
+# Runtime directory for the socket (/run/hades/training.sock)
+RuntimeDirectory=hades
+RuntimeDirectoryMode=0755
+CacheDirectory=hades
+CacheDirectoryMode=0755
+
+# @SERVICES_DIR@ is substituted with the actual services/ path at install time
+# (`make install-trainer`), so this unit isn't pinned to any one workstation.
+WorkingDirectory=@SERVICES_DIR@
+ExecStart=@SERVICES_DIR@/.venv/bin/python -m training.server
+
+# Environment from config file (GPU device, socket)
+EnvironmentFile=/etc/hades/trainer.conf
+
+Restart=on-failure
+RestartSec=10
+
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Security hardening. NOTE: PrivateTmp is intentionally NOT enabled — the Rust
+# orchestrator hands the trainer a safetensors graph file by path, which may
+# live in a shared temp/runtime dir; a private /tmp would hide it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/hades /var/cache/hades /tmp
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hades-trainer
+
+[Install]
+WantedBy=multi-user.target

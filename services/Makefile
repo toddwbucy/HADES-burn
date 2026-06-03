@@ -40,22 +40,22 @@ install:
 	pip install -e .
 
 start-extraction:
-	systemctl --user start hades-extractor
+	systemctl start hades-extractor
 
 stop-extraction:
-	systemctl --user stop hades-extractor
+	systemctl stop hades-extractor
 
 start-embedding:
-	systemctl --user start hades-embedder
+	systemctl start hades-embedder
 
 stop-embedding:
-	systemctl --user stop hades-embedder
+	systemctl stop hades-embedder
 
 start-training:
-	systemctl --user start hades-trainer
+	systemctl start hades-trainer
 
 stop-training:
-	systemctl --user stop hades-trainer
+	systemctl stop hades-trainer
 
 start-all: start-extraction start-embedding
 

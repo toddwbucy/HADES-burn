@@ -23,11 +23,12 @@ class TrainingConfig:
 
     @classmethod
     def from_env(cls) -> TrainingConfig:
-        # `or` so a blank env entry (e.g. `HADES_TRAINER_DEVICE=`) falls back to
-        # the default rather than disabling it.
+        # `.strip() or default` so a blank or whitespace-only env entry
+        # (e.g. `HADES_TRAINER_DEVICE=`) falls back to the default rather than
+        # disabling it and producing an invalid socket path / device.
         return cls(
-            socket_path=os.environ.get("HADES_TRAINER_SOCKET", "") or cls.socket_path,
-            device=os.environ.get("HADES_TRAINER_DEVICE", "") or cls.device,
+            socket_path=os.environ.get("HADES_TRAINER_SOCKET", "").strip() or cls.socket_path,
+            device=os.environ.get("HADES_TRAINER_DEVICE", "").strip() or cls.device,
         )
 
     def resolve_device(self, requested: str | None) -> str:

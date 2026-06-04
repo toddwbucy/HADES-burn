@@ -279,6 +279,19 @@ async def serve() -> None:
     logger.info("Starting training service on %s (default device %s)", socket_path, config.device)
     await server.start()
 
+    # Make the socket group-connectable (the `hades` group) so CLI clients can
+    # reach it, matching the daemon socket. Under systemd the default umask
+    # (022) would otherwise create it 0755 — no group write — blocking
+    # same-group clients (e.g. the `hades` CLI run by a user in the group).
+    try:
+        os.chmod(socket_path, 0o770)
+    except OSError as exc:
+        # The socket is unusable by group clients without this, so don't
+        # advertise "ready" — fail loudly and let systemd restart.
+        logger.error("failed to chmod %s to 0770; aborting startup: %s", socket_path, exc)
+        await server.stop(grace=0)
+        raise
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

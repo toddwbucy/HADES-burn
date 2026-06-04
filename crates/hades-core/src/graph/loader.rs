@@ -6,11 +6,12 @@
 //!   1. Scan all 22 edge collections → build IDMap + raw edge lists.
 //!   2. Group nodes by collection → batch-fetch Jina embeddings → fill GraphData.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use tracing::{debug, info, instrument, warn};
 
+use crate::db::collections::CODEBASE;
 use crate::db::query::{self, ExecutionTarget};
 use crate::db::{ArangoError, ArangoPool};
 
@@ -148,9 +149,17 @@ pub async fn load(
         "loading node embeddings"
     );
 
-    // Fetch embeddings per vertex collection
+    // Fetch embeddings per vertex collection. Code collections carry no
+    // node-level `embedding` (their embeddings live per-chunk in
+    // `codebase_embeddings`), so their node features are mean-pooled from the
+    // file's chunk embeddings instead (#132).
     for (col_name, node_list) in &nodes_by_col {
-        match load_collection_embeddings(pool, &mut graph, col_name, node_list, feature_dim).await {
+        let result = if *col_name == CODEBASE.files || *col_name == CODEBASE.symbols {
+            load_codebase_node_features(pool, &mut graph, col_name, node_list, feature_dim).await
+        } else {
+            load_collection_embeddings(pool, &mut graph, col_name, node_list, feature_dim).await
+        };
+        match result {
             Ok(embedded) => {
                 info!(
                     collection = *col_name,
@@ -344,6 +353,153 @@ async fn load_collection_embeddings(
     }
 
     Ok(total_embedded)
+}
+
+/// Load features for a codebase node collection (`codebase_files` /
+/// `codebase_symbols`), which carry no node-level `embedding`.
+///
+/// Each node's feature is the **mean-pool of its file's chunk embeddings** in
+/// `codebase_embeddings` (keyed by `file_key`):
+/// - `codebase_files` pool by their own `_key` (which *is* the file_key),
+/// - `codebase_symbols` inherit their parent file's pooled embedding, mapped
+///   via the symbol's `file_key` field — so all symbols in a file share that
+///   file's pooled vector.
+///
+/// Derived on read (no node-level denorm, no re-ingest); see #132.
+async fn load_codebase_node_features(
+    pool: &ArangoPool,
+    graph: &mut GraphData,
+    col_name: &str,
+    node_list: &[(&str, usize)],
+    feature_dim: usize,
+) -> Result<usize, GraphLoaderError> {
+    // 1. Map each node index → the file_key whose chunks feed its feature.
+    let mut node_file_key: Vec<(usize, String)> = Vec::with_capacity(node_list.len());
+    if col_name == CODEBASE.symbols {
+        // Symbols carry the parent file_key in a field — fetch it.
+        let keyed: Vec<(&str, usize)> = node_list
+            .iter()
+            .filter_map(|(id, idx)| id.split('/').nth(1).map(|k| (k, *idx)))
+            .collect();
+        for batch in keyed.chunks(EMBEDDING_BATCH_KEYS) {
+            let keys: Vec<&str> = batch.iter().map(|(k, _)| *k).collect();
+            let key_to_idx: HashMap<&str, usize> = batch.iter().map(|&(k, i)| (k, i)).collect();
+            let aql = "FOR d IN @@col FILTER d._key IN @keys RETURN [d._key, d.file_key]";
+            let bind = json!({ "@col": col_name, "keys": keys });
+            let res = query::query(
+                pool,
+                aql,
+                Some(&bind),
+                Some(LOADER_BATCH_SIZE),
+                false,
+                ExecutionTarget::Reader,
+            )
+            .await?;
+            for doc in &res.results {
+                let arr = match doc.as_array() {
+                    Some(a) if a.len() >= 2 => a,
+                    _ => continue,
+                };
+                if let (Some(k), Some(fk)) = (arr[0].as_str(), arr[1].as_str())
+                    && let Some(&idx) = key_to_idx.get(k)
+                {
+                    node_file_key.push((idx, fk.to_string()));
+                }
+            }
+        }
+    } else {
+        // codebase_files: the node `_key` is the file_key.
+        for (id, idx) in node_list {
+            if let Some(k) = id.split('/').nth(1) {
+                node_file_key.push((*idx, k.to_string()));
+            }
+        }
+    }
+
+    if node_file_key.is_empty() {
+        return Ok(0);
+    }
+
+    // 2. Mean-pool chunk embeddings for the distinct file_keys.
+    let unique: Vec<String> = node_file_key
+        .iter()
+        .map(|(_, fk)| fk.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let pooled = pool_chunk_embeddings(pool, &unique, feature_dim).await?;
+
+    // 3. Assign each node its file's pooled vector.
+    let mut embedded = 0;
+    for (idx, fk) in &node_file_key {
+        if let Some(vec) = pooled.get(fk.as_str()) {
+            graph.set_node_features(*idx, vec);
+            embedded += 1;
+        }
+    }
+    Ok(embedded)
+}
+
+/// Mean-pool `codebase_embeddings` per `file_key`. Returns `file_key → pooled
+/// feature vector` for keys that have at least one valid chunk embedding.
+async fn pool_chunk_embeddings(
+    pool: &ArangoPool,
+    file_keys: &[String],
+    feature_dim: usize,
+) -> Result<HashMap<String, Vec<f32>>, GraphLoaderError> {
+    // Accumulate (sum, count) per file_key, then divide.
+    let mut acc: HashMap<String, (Vec<f32>, usize)> = HashMap::new();
+
+    for batch in file_keys.chunks(EMBEDDING_BATCH_KEYS) {
+        let aql = "FOR e IN @@col FILTER e.file_key IN @fkeys RETURN [e.file_key, e.embedding]";
+        let bind = json!({ "@col": CODEBASE.embeddings, "fkeys": batch });
+        let res = query::query(
+            pool,
+            aql,
+            Some(&bind),
+            Some(LOADER_BATCH_SIZE),
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await?;
+        for doc in &res.results {
+            let arr = match doc.as_array() {
+                Some(a) if a.len() >= 2 => a,
+                _ => continue,
+            };
+            let fk = match arr[0].as_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            let emb = match arr[1].as_array() {
+                Some(a) if a.len() == feature_dim => a,
+                _ => continue,
+            };
+            let vec: Option<Vec<f32>> = emb.iter().map(|v| v.as_f64().map(|f| f as f32)).collect();
+            let Some(vec) = vec else { continue };
+            let entry = acc
+                .entry(fk.to_string())
+                .or_insert_with(|| (vec![0.0f32; feature_dim], 0));
+            for (s, x) in entry.0.iter_mut().zip(vec.iter()) {
+                *s += *x;
+            }
+            entry.1 += 1;
+        }
+    }
+
+    Ok(acc
+        .into_iter()
+        .map(|(fk, (mut sum, n))| {
+            if n > 0 {
+                let inv = 1.0 / n as f32;
+                for x in sum.iter_mut() {
+                    *x *= inv;
+                }
+            }
+            (fk, sum)
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

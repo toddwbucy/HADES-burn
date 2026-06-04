@@ -286,7 +286,11 @@ async def serve() -> None:
     try:
         os.chmod(socket_path, 0o770)
     except OSError as exc:
-        logger.warning("could not chmod %s to 0770: %s", socket_path, exc)
+        # The socket is unusable by group clients without this, so don't
+        # advertise "ready" — fail loudly and let systemd restart.
+        logger.error("failed to chmod %s to 0770; aborting startup: %s", socket_path, exc)
+        await server.stop(grace=0)
+        raise
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

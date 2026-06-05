@@ -199,9 +199,14 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
             emb = self._encode().cpu().contiguous().float()
         num_nodes, embed_dim = emb.size(0), emb.size(1)
         if request.output_path:
-            from safetensors.torch import save_file
+            # Write a RAW little-endian f32 blob (num_nodes × embed_dim) — the
+            # Rust export reader (graph/export.rs) reads this file as raw f32
+            # (chunks_exact(4)/from_le_bytes), NOT safetensors. A safetensors
+            # header would be miscounted as ~24 extra floats and trip the
+            # length check (#134). Matches the inline path's `.tobytes()`.
+            import numpy as np
 
-            save_file({"structural_embedding": emb}, request.output_path)
+            np.ascontiguousarray(emb.numpy(), dtype="<f4").tofile(request.output_path)
             return training_pb2.GetEmbeddingsResponse(
                 num_nodes=num_nodes, embed_dim=embed_dim, output_path=request.output_path
             )

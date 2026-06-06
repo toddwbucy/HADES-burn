@@ -1,6 +1,8 @@
 PROTO_DIR := proto
 GEN_DIR := generated
-PYTHON := python
+# Prefer this project's venv interpreter when present so targets work from a
+# cold shell (no activated venv); override with `make PYTHON=python ...`.
+PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
 .PHONY: all test proto-gen clean install install-trainer start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
 
@@ -37,7 +39,7 @@ clean:
 	rm -rf $(GEN_DIR)
 
 install:
-	pip install -e .
+	$(PYTHON) -m pip install -e .
 
 # Install the trainer systemd unit + config, substituting this repo's services/
 # path so the unit isn't pinned to any one workstation. Run from services/.

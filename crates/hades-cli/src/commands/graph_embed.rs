@@ -4,7 +4,9 @@ use clap::Subcommand;
 
 #[derive(Debug, Subcommand)]
 pub enum GraphEmbedCmd {
-    /// Train RGCN graph embeddings via the HADES training service.
+    /// Train structural graph embeddings via the HADES training service.
+    /// The architecture (transductive RGCN or inductive relational GraphSAGE)
+    /// is chosen by the database schema's `model_type`, not a flag.
     Train {
         /// Maximum number of training epochs.
         #[arg(long, default_value_t = 200)]
@@ -18,7 +20,8 @@ pub enum GraphEmbedCmd {
         #[arg(long, default_value_t = 256)]
         hidden_dim: u32,
 
-        /// Number of RGCN basis matrices.
+        /// Number of basis matrices for the relation-weight decomposition
+        /// (used by both RGCN and the inductive GraphSAGE architectures).
         #[arg(long, default_value_t = 21)]
         num_bases: u32,
 
@@ -55,9 +58,14 @@ pub enum GraphEmbedCmd {
         #[arg(long)]
         export_to: Option<String>,
 
-        /// Checkpoint directory for model snapshots.
+        /// Checkpoint directory for model snapshots and the graph IPC file.
+        /// The training service runs as a separate user (`hades`) and both
+        /// reads and writes files here, so this directory must be writable by
+        /// BOTH you and that service — e.g. a directory owned by a shared
+        /// group with the setgid bit, or any path both can write. Otherwise
+        /// the service fails to write the checkpoint or read the graph file.
         /// The default /tmp/hades-train is ephemeral and cleared on reboot;
-        /// for production training, use a persistent path (e.g. /var/lib/hades/train).
+        /// for production, use a persistent shared path (e.g. /var/lib/hades/train).
         #[arg(long, default_value = "/tmp/hades-train")]
         checkpoint_dir: String,
 
@@ -97,7 +105,9 @@ pub enum GraphEmbedCmd {
         #[arg(long)]
         export_to: Option<String>,
 
-        /// Checkpoint directory containing the trained model.
+        /// Checkpoint directory containing the trained model. Must be writable
+        /// by both you and the `hades` training-service user (see `train`),
+        /// since the service reads the graph IPC file written here.
         #[arg(long, default_value = "/tmp/hades-train")]
         checkpoint_dir: String,
     },

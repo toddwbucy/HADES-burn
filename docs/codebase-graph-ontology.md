@@ -511,9 +511,13 @@ This bridge is explicitly **out of scope** for the codebase ontology. It belongs
 
 ---
 
-## 9. RGCN Training Considerations
+## 9. Structural Training Considerations
 
-RGCN training assigns a stable integer **relation-type index** to each edge collection. That mapping is recorded in the database's `hades_schema` collection (`SchemaMeta::relation_order` — a list of edge collection names whose position is the relation index).
+Structural training (both the transductive `rgcn` and the inductive
+`hetero_sage` architectures — selected by `SchemaMeta::model_type`) assigns a
+stable integer **relation-type index** to each edge collection. That mapping is
+recorded in the database's `hades_schema` collection (`SchemaMeta::relation_order`
+— a list of edge collection names whose position is the relation index).
 
 For a database hosting the codebase graph, `relation_order` should include the four codebase edge collections:
 
@@ -527,7 +531,7 @@ relation_order: [
 ]
 ```
 
-`hades-prefetch` reads this list at runtime via `RuntimeSchema::load(pool)` and uses the index positions as RGCN relation IDs — no translation layer.
+`hades-prefetch` reads this list at runtime via `RuntimeSchema::load(pool)` and uses the index positions as relation IDs — no translation layer.
 
 **Node features** for codebase vertices use a 5-value `kind` categorical (`file`, `module`, `type`, `callable`, `value`) — clean one-hot encoding, language-agnostic. The `lang_kind` string is available as an additional feature if finer granularity helps training.
 

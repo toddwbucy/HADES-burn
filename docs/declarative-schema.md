@@ -169,6 +169,9 @@ runs and shouldn't block schema bootstrap.
 collections:        # required collections (document or edge type)
 edge_definitions:   # registered in hades_schema
 named_graphs:       # registered in hades_schema (gharial)
+relation_order:     # structural-training scope (ordered edge-collection names)
+feature_dim:        # node feature width (default 2048, Jina V4)
+model_type:         # structural-embedding architecture (default rgcn)
 <user_collection>:  # documents to seed per collection (e.g., axioms:, smell_specs:)
 ```
 
@@ -231,6 +234,37 @@ schema-application level. They're conventions, not requirements. The
 generalization step in §9 strips NL-specific naming so that *commands
 like `smell check`* read the convention from the data, not from
 hardcoded constants.
+
+### 5.4 Structural-training keys
+
+Three optional top-level keys configure RGCN/GraphSAGE structural embeddings.
+They are written verbatim into the `schema_meta` document and read by
+`graph-embed train` / `graph-embed update`.
+
+```yaml
+relation_order:                 # ordered edge-collection names that train
+  - codebase_defines_edges      # index position = stable relation id (append-only)
+  - codebase_calls_edges
+feature_dim: 2048               # node feature width (Jina V4); default 2048
+model_type: hetero_sage         # rgcn | hetero_sage; default rgcn
+```
+
+- **`relation_order`** — which edge collections the model trains on, in order.
+  Position fixes each relation's stable id, so the list is **append-only**.
+  Scope it to *semantic/structural* relations; exclude process/PM edges. Empty
+  ⇒ training not yet scoped.
+- **`feature_dim`** — input node-feature width. Code nodes get features by
+  mean-pooling their chunk embeddings.
+- **`model_type`** — the encoder architecture. Validated at `schema apply`
+  (an unknown value is rejected before it can reach the GPU service):
+  - **`rgcn`** (default) — *transductive*. Trains over a fixed graph; a node
+    added afterward needs a full retrain to be embedded.
+  - **`hetero_sage`** — *inductive* relational GraphSAGE. Embeds a node added
+    after training by a forward pass (`graph-embed update`) on frozen weights —
+    no retrain. Use it for continuously-growing graphs (live code ingestion).
+
+  The choice is persisted into the trained checkpoint, so `graph-embed update`
+  rebuilds the matching model automatically.
 
 ## 6. Internal Pipeline (Generated, Not User-Authored)
 

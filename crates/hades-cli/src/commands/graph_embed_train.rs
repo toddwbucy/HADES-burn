@@ -1,6 +1,8 @@
 //! Native Rust implementation of the `hades graph-embed train` command.
 //!
-//! Replaces the Python dispatch for RGCN training.  Orchestrates:
+//! Replaces the Python dispatch for structural training (the architecture —
+//! RGCN or inductive GraphSAGE — is chosen by the schema's `model_type`).
+//! Orchestrates:
 //! 1. Graph loading from ArangoDB
 //! 2. Edge splitting + safetensors serialization
 //! 3. Training via the HADES gRPC training service (Python GPU process)

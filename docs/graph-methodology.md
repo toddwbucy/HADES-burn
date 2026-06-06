@@ -133,12 +133,15 @@ standing query. Non-connection is the signal.
 
 ## `relation_order` — what trains
 
-For RGCN structural embeddings (see [declarative-schema.md](declarative-schema.md)),
+For structural embeddings (see [declarative-schema.md](declarative-schema.md)),
 `relation_order` scopes which relations the model trains on. Include the
 **semantic + structural** relations (concept edges, gate edges, bridge edges, and
 the `codebase_*` edges). **Exclude** process / project-management relations — a
 training graph carries *what the work means*, never *who/when/status* (the
 human/agent-UI boundary). `feature_dim` is the node feature width (2048 for Jina V4).
+`model_type` selects the encoder: `rgcn` (transductive) or `hetero_sage`
+(inductive — embeds nodes added after training without a retrain; use it for a
+continuously-growing graph).
 
 ---
 
@@ -153,11 +156,12 @@ human/agent-UI boundary). `feature_dim` is the node feature width (2048 for Jina
    `validated-against` edges (Layer 2). *Ratification is a human step.*
 4. **Derive the smells** from the axioms (Layer 3).
 5. **`schema apply`** a YAML declaring the collections, edge definitions, the
-   named graph, `relation_order`, and `feature_dim`
+   named graph, `relation_order`, `feature_dim`, and `model_type`
    (see [declarative-schema.md](declarative-schema.md)).
 6. **Ingest the codebase last** and add the bridge edges (Layer 4).
-7. **Run the suspect-set queries** (Layer 5); optionally train RGCN structural
-   embeddings once every trained node carries a feature.
+7. **Run the suspect-set queries** (Layer 5); optionally train structural
+   embeddings (`graph-embed train`; `model_type` picks RGCN or inductive
+   GraphSAGE) once every trained node carries a feature.
 
 > Per-graph *design* (the specific concept families, principles, smells for one
 > document) belongs in that graph's **companion document**, not in code or this

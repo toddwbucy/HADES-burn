@@ -1,9 +1,14 @@
 //! Native Rust implementation of the `hades graph-embed update` command.
 //!
-//! Incrementally re-embeds the knowledge graph without retraining:
+//! Incrementally re-embeds the knowledge graph without retraining. This is the
+//! inductive serving path: it works for any trained checkpoint, but pays off
+//! with an inductive `hetero_sage` model, which embeds nodes added since
+//! training by forward pass alone. The checkpoint records its architecture, so
+//! LoadCheckpoint rebuilds the matching model (RGCN or GraphSAGE).
+//!
 //! 1. Load graph from ArangoDB
 //! 2. Serialize graph structure to safetensors (no edge splits)
-//! 3. Load previously trained RGCN checkpoint on the GPU service
+//! 3. Load the previously trained checkpoint on the GPU service
 //! 4. Load the current graph onto the GPU
 //! 5. Single forward pass → embedding vectors
 //! 6. Export embeddings back to ArangoDB

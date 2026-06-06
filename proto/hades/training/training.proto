@@ -1,4 +1,9 @@
-// HADES Training Service — RGCN link prediction on knowledge graphs.
+// HADES Training Service — structural link prediction on knowledge graphs.
+//
+// Supports two encoder architectures, selected per-database via the schema's
+// `model_type` (see ModelConfig.architecture): "rgcn" (transductive) and
+// "hetero_sage" (inductive relational GraphSAGE — embeds unseen nodes by
+// forward pass, for continuously-growing graphs).
 //
 // HADES-owned compute service (not the Persephone PM system). The agentic
 // training path is deliberately decoupled from the "persephone.*" provider
@@ -25,7 +30,7 @@ package hades.training;
 // Service
 // ---------------------------------------------------------------------------
 
-// Training service for RGCN link prediction.
+// Training service for structural link prediction (RGCN | hetero-SAGE).
 service TrainingService {
   // Initialize the model with the given architecture config.
   // Must be called before LoadGraph or TrainStep.
@@ -72,11 +77,20 @@ message ModelConfig {
   // Output structural embedding dimension (default: 128).
   uint32 embed_dim = 4;
 
-  // Number of basis matrices for RGCN decomposition (default: 21).
+  // Number of basis matrices for relation-weight decomposition (default: 21).
+  // Used by both architectures' per-relation transforms.
   uint32 num_bases = 5;
 
   // Dropout rate (default: 0.2).
   float dropout = 6;
+
+  // Encoder architecture: "rgcn" (transductive, default) or "hetero_sage"
+  // (inductive relational GraphSAGE — embeds unseen nodes by forward pass).
+  // Empty string is treated as "rgcn" for backward compatibility with
+  // pre-#137 clients and checkpoints. Selected per-database via the schema's
+  // `model_type`; persisted in checkpoints so LoadCheckpoint rebuilds the
+  // matching model (e.g. for `graph-embed update`).
+  string architecture = 7;
 }
 
 // Optimizer configuration.

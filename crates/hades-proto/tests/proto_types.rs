@@ -110,9 +110,11 @@ fn test_training_types() {
         embed_dim: 128,
         num_bases: 21,
         dropout: 0.2,
+        architecture: "hetero_sage".to_string(),
     };
     assert_eq!(model_config.num_relations, 22);
     assert_eq!(model_config.embed_dim, 128);
+    assert_eq!(model_config.architecture, "hetero_sage");
 
     let optimizer = OptimizerConfig {
         learning_rate: 0.01,

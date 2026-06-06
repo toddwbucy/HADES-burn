@@ -63,6 +63,16 @@ pub async fn run(
 
     info!(db = %source_pool.database(), "connected to source database");
 
+    // ── Resolve the structural-embedding architecture from the schema ─
+    // The database's schema picks the model (rgcn transductive | hetero_sage
+    // inductive); defaults to rgcn for schemas seeded before #137. Persisted
+    // into the checkpoint so `graph-embed update` rebuilds the same model.
+    let schema = hades_core::graph::RuntimeSchema::load(&source_pool)
+        .await
+        .context("failed to load runtime schema from hades_schema")?;
+    let architecture = schema.meta.resolved_model_type().to_string();
+    info!(architecture = %architecture, "structural-embedding model selected");
+
     // ── Preflight export target ──────────────────────────────────────
     // Validate and connect to the export database before training so
     // misconfiguration fails fast rather than after a long training run.
@@ -114,6 +124,7 @@ pub async fn run(
         neg_sampling_ratio: neg_ratio,
         prefetch_depth,
         device: config.gpu.device.clone(),
+        architecture,
     };
 
     // ── Train ────────────────────────────────────────────────────────

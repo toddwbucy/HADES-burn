@@ -109,6 +109,13 @@ pub struct SchemaFile {
     #[serde(default)]
     pub feature_dim: Option<u32>,
 
+    /// Structural-embedding encoder for this database: `"rgcn"` (transductive,
+    /// default) or `"hetero_sage"` (inductive relational GraphSAGE — for
+    /// continuously-growing graphs). Written to `schema_meta.model_type`;
+    /// omitted → `"rgcn"`.
+    #[serde(default)]
+    pub model_type: Option<String>,
+
     /// Per-collection document seeds. Collected from arbitrary
     /// top-level YAML keys not matching any of the above sections.
     /// Keys must match a declared collection name (validated).
@@ -249,6 +256,7 @@ pub fn parse(yaml_str: &str) -> Result<SchemaFile, ApplyError> {
         "named_graphs",
         "relation_order",
         "feature_dim",
+        "model_type",
     ];
 
     // Second pass: parse the reserved sections via serde with deny_unknown_fields.
@@ -409,6 +417,18 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
                  collection; training relations must be edge collections"
             ));
         }
+    }
+
+    // model_type (#137): must name a known structural-embedding architecture.
+    // A typo here would otherwise only surface as a failure inside the GPU
+    // training service, far from the schema author.
+    const KNOWN_MODEL_TYPES: &[&str] = &["rgcn", "hetero_sage"];
+    if let Some(mt) = &file.model_type
+        && !KNOWN_MODEL_TYPES.contains(&mt.as_str())
+    {
+        errors.push(format!(
+            "model_type '{mt}' is not a known architecture; expected one of {KNOWN_MODEL_TYPES:?}"
+        ));
     }
 
     if errors.is_empty() {
@@ -578,6 +598,10 @@ pub async fn apply(
     //    defaults to 2048 (Jina V4 width) when the schema omits it.
     let relation_order = file.relation_order.clone();
     let feature_dim = file.feature_dim.unwrap_or(2048);
+    let model_type = file
+        .model_type
+        .clone()
+        .unwrap_or_else(|| crate::graph::runtime_schema::DEFAULT_MODEL_TYPE.to_string());
     let checksum = crate::graph::runtime_schema::compute_checksum(&relation_order);
     let meta_doc = json!({
         "_key": "meta",
@@ -587,6 +611,7 @@ pub async fn apply(
         "relation_order": relation_order,
         "num_relations": relation_order.len() as u32,
         "feature_dim": feature_dim,
+        "model_type": model_type,
         "schema_checksum": checksum,
     });
     crud::insert_documents(
@@ -753,6 +778,35 @@ feature_dim: 1024
         let checksum = crate::graph::runtime_schema::compute_checksum(&file.relation_order);
         assert!(checksum.starts_with("sha256:"));
         assert_eq!(file.relation_order.len(), 2);
+    }
+
+    #[test]
+    fn parse_model_type() {
+        // #137: model_type is a reserved section, not a document seed.
+        let yaml = r#"
+collections:
+  - { name: axioms, type: document }
+model_type: hetero_sage
+"#;
+        let file = parse(yaml).unwrap();
+        assert_eq!(file.model_type.as_deref(), Some("hetero_sage"));
+        assert!(!file.documents.contains_key("model_type"));
+        validate(&file).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unknown_model_type() {
+        let yaml = r#"
+collections:
+  - { name: axioms, type: document }
+model_type: graphsage_typo
+"#;
+        let file = parse(yaml).unwrap();
+        let err = validate(&file).unwrap_err();
+        assert!(
+            format!("{err}").contains("not a known architecture"),
+            "expected unknown-architecture error, got: {err}"
+        );
     }
 
     #[test]

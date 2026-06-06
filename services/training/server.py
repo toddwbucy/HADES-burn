@@ -36,10 +36,10 @@ from .config import TrainingConfig  # noqa: E402
 from .rgcn_model import HadesRGCN  # noqa: E402
 from .sage_model import HadesHeteroSAGE  # noqa: E402
 
-# Encoder architectures selectable via ModelConfig.architecture. Empty string
-# maps to "rgcn" for backward compatibility with pre-#137 clients/checkpoints.
+# Encoder architectures selectable via ModelConfig.architecture. `_build_model`
+# normalizes an empty/blank value to "rgcn" before lookup (back-compat with
+# pre-#137 clients/checkpoints), so only the real names appear here.
 _ARCHITECTURES = {
-    "": HadesRGCN,
     "rgcn": HadesRGCN,
     "hetero_sage": HadesHeteroSAGE,
 }
@@ -106,7 +106,7 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
         except KeyError:
             raise ValueError(
                 f"unknown architecture {arch!r}; expected one of "
-                f"{sorted(k for k in _ARCHITECTURES if k)}"
+                f"{sorted(_ARCHITECTURES)}"
             ) from None
         # HadesRGCN and HadesHeteroSAGE share an identical constructor surface
         # and encode()/score() contract, so the only thing that varies is the

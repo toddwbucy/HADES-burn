@@ -421,13 +421,14 @@ pub fn validate(file: &SchemaFile) -> Result<(), ApplyError> {
 
     // model_type (#137): must name a known structural-embedding architecture.
     // A typo here would otherwise only surface as a failure inside the GPU
-    // training service, far from the schema author.
-    const KNOWN_MODEL_TYPES: &[&str] = &["rgcn", "hetero_sage"];
+    // training service, far from the schema author. The allowlist is the
+    // single source of truth in `runtime_schema`.
+    let known = crate::graph::runtime_schema::KNOWN_MODEL_TYPES;
     if let Some(mt) = &file.model_type
-        && !KNOWN_MODEL_TYPES.contains(&mt.as_str())
+        && !known.contains(&mt.as_str())
     {
         errors.push(format!(
-            "model_type '{mt}' is not a known architecture; expected one of {KNOWN_MODEL_TYPES:?}"
+            "model_type '{mt}' is not a known architecture; expected one of {known:?}"
         ));
     }
 

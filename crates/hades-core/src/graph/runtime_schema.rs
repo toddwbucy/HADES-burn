@@ -121,8 +121,16 @@ pub struct SchemaMeta {
     pub schema_checksum: String,
 }
 
+/// The structural-embedding architectures HADES recognises — the single Rust
+/// source of truth for the allowlist (schema validation references this).
+/// The Python training service keeps its own matching `_ARCHITECTURES` map:
+/// it is a separate runtime and cannot share this compile-time constant, and
+/// `architecture` is deliberately a human-readable string in the schema YAML
+/// rather than a proto enum.
+pub const KNOWN_MODEL_TYPES: &[&str] = &["rgcn", "hetero_sage"];
+
 /// The default structural-embedding architecture when a schema omits
-/// `model_type` (pre-#137 schemas).
+/// `model_type` (pre-#137 schemas). One of [`KNOWN_MODEL_TYPES`].
 pub const DEFAULT_MODEL_TYPE: &str = "rgcn";
 
 impl SchemaMeta {

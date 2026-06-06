@@ -497,6 +497,25 @@ pub fn serialize_graph_for_inference_to_file(
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(std::io::Error::from)?;
 
+    // `NamedTempFile` creates the file mode 0600 (owner-only). The training
+    // service runs as a separate user and must *read* this file via LoadGraph,
+    // so widen it to 0644. Without this, cross-user `graph-embed update` fails
+    // at LoadGraph with a permission error surfaced as FileNotFoundError.
+    //
+    // World-read (0o004) is deliberate, not drift: when the CLI user's group
+    // doesn't match the service's (the common case, unless the checkpoint dir
+    // is setgid to the service group), the world bit is the *only* thing that
+    // lets the service read the file. The sibling training artifact
+    // (`serialize_to_file` via `File::create`, typically 0664) is likewise
+    // world-readable. Restricting to 0640 would reintroduce this bug. The file
+    // is a transient inference graph in the checkpoint dir; its node features
+    // already live in the database the operator can read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    }
+
     info!(
         path = %path.display(),
         size_mb = bytes.len() as f64 / (1024.0 * 1024.0),
@@ -1004,6 +1023,21 @@ mod tests {
         let mapped = MappedGraph::open(&path).unwrap();
         assert_eq!(mapped.num_nodes().unwrap(), graph.num_nodes);
         assert_eq!(mapped.num_edges().unwrap(), graph.num_edges);
+
+        // The training service runs as a separate same-group user and reads
+        // this file via LoadGraph, so it must be group-readable. NamedTempFile
+        // defaults to 0600 (owner-only); the serializer must widen it. Without
+        // this, cross-user `graph-embed update` fails at LoadGraph.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o040,
+                0o040,
+                "inference file not group-readable: {mode:o}"
+            );
+        }
     }
 
     #[test]

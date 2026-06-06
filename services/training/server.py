@@ -34,6 +34,15 @@ from hades.training import training_pb2, training_pb2_grpc  # noqa: E402
 
 from .config import TrainingConfig  # noqa: E402
 from .rgcn_model import HadesRGCN  # noqa: E402
+from .sage_model import HadesHeteroSAGE  # noqa: E402
+
+# Encoder architectures selectable via ModelConfig.architecture. `_build_model`
+# normalizes an empty/blank value to "rgcn" before lookup (back-compat with
+# pre-#137 clients/checkpoints), so only the real names appear here.
+_ARCHITECTURES = {
+    "rgcn": HadesRGCN,
+    "hetero_sage": HadesHeteroSAGE,
+}
 
 logger = logging.getLogger("hades.training")
 
@@ -75,7 +84,7 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
     def __init__(self, config: TrainingConfig) -> None:
         self.config = config
         self.device: torch.device | None = None
-        self.model: HadesRGCN | None = None
+        self.model: HadesRGCN | HadesHeteroSAGE | None = None
         self.optimizer: torch.optim.Optimizer | None = None
         self.model_config = None
         self.opt_config = None
@@ -91,7 +100,18 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
     def _build_model(self, in_dim: int) -> int:
         mc = self.model_config
         self.in_dim = in_dim
-        self.model = HadesRGCN(
+        arch = mc.architecture or "rgcn"
+        try:
+            model_cls = _ARCHITECTURES[arch]
+        except KeyError:
+            raise ValueError(
+                f"unknown architecture {arch!r}; expected one of "
+                f"{sorted(_ARCHITECTURES)}"
+            ) from None
+        # HadesRGCN and HadesHeteroSAGE share an identical constructor surface
+        # and encode()/score() contract, so the only thing that varies is the
+        # class selected here.
+        self.model = model_cls(
             num_relations=mc.num_relations,
             num_collection_types=mc.num_collection_types,
             in_dim=in_dim,
@@ -171,8 +191,8 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
         pos_idx = self._idx(request.train_edge_indices)
         pos_src, pos_dst = self.edge_src[pos_idx], self.edge_dst[pos_idx]
         neg_src, neg_dst = self._idx(request.neg_src), self._idx(request.neg_dst)
-        pos_score = HadesRGCN.score(emb, pos_src, pos_dst)
-        neg_score = HadesRGCN.score(emb, neg_src, neg_dst)
+        pos_score = self.model.score(emb, pos_src, pos_dst)
+        neg_score = self.model.score(emb, neg_src, neg_dst)
         loss, acc = _bce_link_loss(pos_score, neg_score)
         loss.backward()
         self.optimizer.step()
@@ -186,8 +206,8 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
             pos_idx = self._idx(request.edge_indices)
             pos_src, pos_dst = self.edge_src[pos_idx], self.edge_dst[pos_idx]
             neg_src, neg_dst = self._idx(request.neg_src), self._idx(request.neg_dst)
-            pos_score = HadesRGCN.score(emb, pos_src, pos_dst)
-            neg_score = HadesRGCN.score(emb, neg_src, neg_dst)
+            pos_score = self.model.score(emb, pos_src, pos_dst)
+            neg_score = self.model.score(emb, neg_src, neg_dst)
             loss, acc = _bce_link_loss(pos_score, neg_score)
             auc = _auc(pos_score, neg_score)
         return training_pb2.EvaluateResponse(loss=float(loss), accuracy=acc, auc=auc)
@@ -231,6 +251,10 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
                     "embed_dim": self.model_config.embed_dim,
                     "num_bases": self.model_config.num_bases,
                     "dropout": self.model_config.dropout,
+                    # Persist the architecture so LoadCheckpoint (e.g. for
+                    # `graph-embed update`) rebuilds the matching model rather
+                    # than defaulting to RGCN.
+                    "architecture": self.model_config.architecture,
                 },
             },
             request.path,

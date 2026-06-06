@@ -95,6 +95,12 @@ pub struct TrainConfig {
     // -- Device --
     /// PyTorch device string (e.g. "cuda:0", "cpu").
     pub device: String,
+
+    // -- Architecture --
+    /// Structural-embedding encoder: `"rgcn"` (transductive) or `"hetero_sage"`
+    /// (inductive relational GraphSAGE). Sent to the training service as
+    /// `ModelConfig.architecture`; sourced from the schema's `model_type`.
+    pub architecture: String,
 }
 
 impl Default for TrainConfig {
@@ -112,6 +118,7 @@ impl Default for TrainConfig {
             neg_sampling_ratio: 1.0,
             prefetch_depth: 2,
             device: "cuda:0".to_string(),
+            architecture: "rgcn".to_string(),
         }
     }
 }
@@ -126,6 +133,7 @@ impl TrainConfig {
             embed_dim: self.embed_dim,
             num_bases: self.num_bases,
             dropout: self.dropout,
+            architecture: self.architecture.clone(),
         }
     }
 
@@ -453,6 +461,18 @@ mod tests {
         assert_eq!(mc.embed_dim, 128);
         assert_eq!(mc.num_bases, 21);
         assert!((mc.dropout - 0.2).abs() < f32::EPSILON);
+        // Default architecture is RGCN (transductive); the empty proto default
+        // would also be treated as rgcn by the server.
+        assert_eq!(mc.architecture, "rgcn");
+
+        let sage = TrainConfig {
+            architecture: "hetero_sage".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            sage.model_config(NUM_RELATIONS as u32, 5).architecture,
+            "hetero_sage"
+        );
     }
 
     #[test]
@@ -540,10 +560,12 @@ mod tests {
             neg_sampling_ratio: 2.0,
             prefetch_depth: 4,
             device: "cuda:2".into(),
+            architecture: "hetero_sage".into(),
         };
         assert_eq!(cfg.hidden_dim, 512);
         assert_eq!(cfg.val_every, 5);
         assert_eq!(cfg.device, "cuda:2");
+        assert_eq!(cfg.architecture, "hetero_sage");
     }
 
     #[test]

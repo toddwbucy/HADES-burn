@@ -111,9 +111,38 @@ pub struct SchemaMeta {
     /// Embedding feature dimension (e.g. 2048 for Jina V4).
     #[serde(default = "default_feature_dim")]
     pub feature_dim: usize,
+    /// Structural-embedding encoder: `"rgcn"` (transductive) or `"hetero_sage"`
+    /// (inductive relational GraphSAGE). `None`/absent → `"rgcn"` for backward
+    /// compatibility with schemas seeded before #137.
+    #[serde(default)]
+    pub model_type: Option<String>,
     /// SHA-256 of canonicalized `relation_order`.
     #[serde(default)]
     pub schema_checksum: String,
+}
+
+/// The structural-embedding architectures HADES recognises — the single Rust
+/// source of truth for the allowlist (schema validation references this).
+/// The Python training service keeps its own matching `_ARCHITECTURES` map:
+/// it is a separate runtime and cannot share this compile-time constant, and
+/// `architecture` is deliberately a human-readable string in the schema YAML
+/// rather than a proto enum.
+pub const KNOWN_MODEL_TYPES: &[&str] = &["rgcn", "hetero_sage"];
+
+/// The default structural-embedding architecture when a schema omits
+/// `model_type` (pre-#137 schemas). One of [`KNOWN_MODEL_TYPES`].
+pub const DEFAULT_MODEL_TYPE: &str = "rgcn";
+
+impl SchemaMeta {
+    /// Resolved structural-embedding architecture: the schema's `model_type`,
+    /// or [`DEFAULT_MODEL_TYPE`] when unset/blank. This is the string sent to
+    /// the training service as `ModelConfig.architecture`.
+    pub fn resolved_model_type(&self) -> &str {
+        match self.model_type.as_deref() {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => DEFAULT_MODEL_TYPE,
+        }
+    }
 }
 
 fn default_version() -> u32 {
@@ -326,6 +355,7 @@ pub fn empty_seed_documents() -> Vec<Value> {
         "relation_order": [],
         "num_relations": 0,
         "feature_dim": 2048,
+        "model_type": DEFAULT_MODEL_TYPE,
         "schema_checksum": compute_checksum(&[]),
     })]
 }
@@ -354,6 +384,25 @@ mod tests {
         assert_eq!(docs[0]["schema_type"], "schema_meta");
         assert_eq!(docs[0]["num_relations"], 0);
         assert!(docs[0]["seed_name"].is_null());
+    }
+
+    #[test]
+    fn test_resolved_model_type() {
+        // Absent / blank → default rgcn; an explicit value passes through.
+        let mut meta: SchemaMeta = serde_json::from_value(serde_json::json!({
+            "schema_type": "schema_meta",
+            "relation_order": [],
+            "num_relations": 0,
+        }))
+        .unwrap();
+        assert_eq!(meta.model_type, None);
+        assert_eq!(meta.resolved_model_type(), "rgcn");
+
+        meta.model_type = Some("  ".to_string());
+        assert_eq!(meta.resolved_model_type(), "rgcn");
+
+        meta.model_type = Some("hetero_sage".to_string());
+        assert_eq!(meta.resolved_model_type(), "hetero_sage");
     }
 
     #[test]

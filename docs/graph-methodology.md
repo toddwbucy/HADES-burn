@@ -238,6 +238,45 @@ continuously-growing graph).
 
 ---
 
+## Both sides of the keyboard — the method as context management
+
+The graph is usually described as **context engineering**: it constrains what a
+model may generate, rejecting concepts outside the ontology. But the same
+machinery is **context management** for the people and agents making the
+decisions — and over a project's life that is the heavier half. Three things
+follow.
+
+1. **Decisions are artifacts.** A choice — which backend, which dependency, which
+   version, which license — has its own footprint in the world and can drift, so
+   by [the ratification rule](#the-ratification-rule--the-unit-of-proof-is-the-artifact)
+   it must prove on its own. It gets a **decision record** (the upstream of the
+   `Issue → PRD → Spec → code` chain), traces to the same axioms/requirements,
+   and earns ratification — or the verdict **deferred / pending**, which is a
+   *recorded state*, not a dead end. A parked PRD with its provenance intact is
+   context preserved, not work lost.
+
+2. **Non-connection surfaces holes in decisions, not only in code.** The
+   suspect-set principle generalises off the code graph: when a candidate cannot
+   trace a *compliant* connection to the ratified requirements — no backend that
+   satisfies the contract on the available medium, no license that permits the
+   intended use at the intended scale — that **absence is the architectural
+   hole**, surfaced before it is built. The IS / IS-NOT gate runs on choices the
+   same way it runs on concepts.
+
+3. **The method is self-applying.** Using it to build a thing surfaces the holes
+   in that thing's architecture, and the act of surfacing them produces the
+   artifacts — decision records, specs, the divergence register, durable memory —
+   that keep those holes closed. The living divergence register is a standing
+   query for **humans**, not just for the trainer: it is where a project offloads
+   the working memory it would otherwise re-derive.
+
+So the payoff is symmetric. **Context engineering** keeps the model inside the
+ontology; **context management** keeps the humans and agents from re-deriving
+what was already decided — both reading the same artifacts, both trusting
+non-connection as the signal.
+
+---
+
 ## Canonical instance
 
 `NestedLearning` (`NL`) is the reference implementation: per-source concept

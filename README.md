@@ -8,6 +8,8 @@
 
 The design premise under investigation is that context engineering — the structured construction of what an agent retrieves and reads on each turn — is more often the binding constraint on sustained agent coherence than raw model capability. HADES-Burn pursues this through an ontology-grounded schema and a closed operation vocabulary that together produce traceable, structured retrieval: the kind of context discipline that on-premises agent workflows require to remain coherent across long-horizon tasks.
 
+The context-engineering methodology and schema this rests on — how a foundation document and a codebase become an axiom-gated ("IS / IS-NOT") knowledge graph in which concepts, smells, and code must *earn* their place by tracing to ratified axioms, and in which non-connection becomes a queryable signal — is formalized in **[docs/graph-methodology.md](docs/graph-methodology.md)**.
+
 For the research questions HADES-Burn was built to investigate, see [RESEARCH_GOALS.md](RESEARCH_GOALS.md).
 
 ## Architecture

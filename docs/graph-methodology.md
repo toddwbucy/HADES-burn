@@ -76,7 +76,7 @@ that wire concepts to the gate:
 | `*_axiom_basis_edges` | concept → `IS` | what this concept **is** (`source_field: axiom_basis`) |
 | `*_validated_against_edges` | concept → `IS_NOT` | what this concept is tested **against** |
 | `*_structural_embodiment_edges` | `IS` → concrete definition | the `IS` pole made concrete |
-| `*_axiom_inherits_edges` | per-source container → framework `IS`/`IS_NOT` | inheritance of the top-level identity |
+| `*_axiom_inherits_edges` | per-source container → framework `IS`/`IS_NOT` | the per-source container **derives from** the framework identity (arrow points to what it inherits) |
 
 A concept missing **either** of its two gate edges is a defect, not a style
 choice. (In `NL`: 607 `basis` + 606 `validated-against` — the near-parity is the
@@ -90,14 +90,16 @@ rules**. Each smell record carries:
 - `axiom_basis` — which `IS` container it derives from.
 - `is_axioms` / `is_not_axioms` — the principle ids it **enforces** / **guards**.
 - `validated_against` — the `IS_NOT` linkage.
-- `verbatim_basis` — the grounding quote or reference pseudocode.
+- `verbatim_basis` — the grounding quote, or the reference pseudocode (e.g. the
+  algorithm listing) the axiom traces back to.
 - `forbidden_patterns[]` — concrete code signatures that violate it.
 - `scope` — `python` | `rust` | `cuda` | …
 - `origin` — `operational` (promoted from a recurring real bug) vs `derived`
   (read straight from an axiom).
 
-A smell is promoted to enforcement when it earns it — e.g. `CS-32` was promoted
-after the same bug recurred three times in 48 hours.
+A smell is promoted to enforcement when it earns it — e.g. a smell tracking
+unbounded gradient accumulation is promoted from `derived` to `operational`
+after the same bug recurs three times in 48 hours.
 
 ### Layer 4 — Code ingested and bridged to the concept graph
 
@@ -171,6 +173,8 @@ families (`hope_*`, `atlas_*`, `titans_*`, `nl_*`), the `NL_IS` / `NL_IS_NOT`
 gate (607 basis / 606 validated-against / 13 structural-embodiment / 16 inherits),
 the `nl_code_smells` layer, the `nl_code_{spec,equation}` + `nl_smell_compliance`
 bridges (89 / 151 / 12), and the `nl_code_paper` named graph.
+
+---
 
 ## See also
 

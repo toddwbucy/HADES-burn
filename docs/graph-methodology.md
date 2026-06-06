@@ -70,7 +70,8 @@ description inside a ratified artifact cannot drift on its own, so it rides the
 parent's verdict.
 
 **Lineage and ratification are different edges.** A spec links to its PRD for
-*provenance* (a `*_lineage_*` edge, parent → child), but it earns its *own*
+*provenance* (a lineage edge — an edge collection with
+`materialize_strategy: lineage`, parent → child), but it earns its *own*
 ratification — the spec is a separate file someone can edit without touching the
 PRD. Never conflate the lineage edge with the gate edges (`basis` /
 `validated-against`, artifact → axiom): one records where a node came from, the

@@ -497,6 +497,18 @@ pub fn serialize_graph_for_inference_to_file(
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(std::io::Error::from)?;
 
+    // `NamedTempFile` creates the file mode 0600 (owner-only). The training
+    // service runs as a separate user in the same group and must *read* this
+    // file via LoadGraph, so make it group/world-readable — matching the
+    // group-readable artifact the training path (`serialize_to_file`, via
+    // `File::create`) produces. Without this, cross-user `graph-embed update`
+    // fails at LoadGraph with a permission error surfaced as FileNotFoundError.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    }
+
     info!(
         path = %path.display(),
         size_mb = bytes.len() as f64 / (1024.0 * 1024.0),
@@ -1004,6 +1016,21 @@ mod tests {
         let mapped = MappedGraph::open(&path).unwrap();
         assert_eq!(mapped.num_nodes().unwrap(), graph.num_nodes);
         assert_eq!(mapped.num_edges().unwrap(), graph.num_edges);
+
+        // The training service runs as a separate same-group user and reads
+        // this file via LoadGraph, so it must be group-readable. NamedTempFile
+        // defaults to 0600 (owner-only); the serializer must widen it. Without
+        // this, cross-user `graph-embed update` fails at LoadGraph.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o040,
+                0o040,
+                "inference file not group-readable: {mode:o}"
+            );
+        }
     }
 
     #[test]

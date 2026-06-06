@@ -498,11 +498,18 @@ pub fn serialize_graph_for_inference_to_file(
     tmp.persist(path).map_err(std::io::Error::from)?;
 
     // `NamedTempFile` creates the file mode 0600 (owner-only). The training
-    // service runs as a separate user in the same group and must *read* this
-    // file via LoadGraph, so make it group/world-readable — matching the
-    // group-readable artifact the training path (`serialize_to_file`, via
-    // `File::create`) produces. Without this, cross-user `graph-embed update`
-    // fails at LoadGraph with a permission error surfaced as FileNotFoundError.
+    // service runs as a separate user and must *read* this file via LoadGraph,
+    // so widen it to 0644. Without this, cross-user `graph-embed update` fails
+    // at LoadGraph with a permission error surfaced as FileNotFoundError.
+    //
+    // World-read (0o004) is deliberate, not drift: when the CLI user's group
+    // doesn't match the service's (the common case, unless the checkpoint dir
+    // is setgid to the service group), the world bit is the *only* thing that
+    // lets the service read the file. The sibling training artifact
+    // (`serialize_to_file` via `File::create`, typically 0664) is likewise
+    // world-readable. Restricting to 0640 would reintroduce this bug. The file
+    // is a transient inference graph in the checkpoint dir; its node features
+    // already live in the database the operator can read.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

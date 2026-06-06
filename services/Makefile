@@ -39,7 +39,7 @@ clean:
 	rm -rf $(GEN_DIR)
 
 install:
-	pip install -e .
+	$(PYTHON) -m pip install -e .
 
 # Install the trainer systemd unit + config, substituting this repo's services/
 # path so the unit isn't pinned to any one workstation. Run from services/.

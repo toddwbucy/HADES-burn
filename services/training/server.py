@@ -140,6 +140,12 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
     # -- RPCs -------------------------------------------------------------
     async def InitModel(self, request, context):
         device = self.config.resolve_device(request.device)
+        if device is None:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "no device declared: training requires an explicit device per "
+                "run (hades --gpu N). There is no fallback device by design.",
+            )
         self.device = torch.device(device)
         self.model_config = request.model
         self.opt_config = request.optimizer
@@ -264,6 +270,13 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
 
     async def LoadCheckpoint(self, request, context):
         device = self.config.resolve_device(request.device)
+        if device is None:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "no device declared: checkpoint loading requires an explicit "
+                "device per run (hades --gpu N). There is no fallback device "
+                "by design.",
+            )
         self.device = torch.device(device)
         # weights_only=True: the checkpoint holds only tensors + basic types,
         # and refusing arbitrary unpickling avoids code execution from a
@@ -305,7 +318,7 @@ async def serve() -> None:
             raise RuntimeError(f"Path {socket_path} exists but is not a socket")
 
     server.add_insecure_port(f"unix:{socket_path}")
-    logger.info("Starting training service on %s (default device %s)", socket_path, config.device)
+    logger.info("Starting training service on %s (no fallback device: clients declare per run)", socket_path)
     await server.start()
 
     # Make the socket group-connectable (the `hades` group) so CLI clients can

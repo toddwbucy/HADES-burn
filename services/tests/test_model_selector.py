@@ -25,7 +25,7 @@ from training.server import TrainingServicer  # noqa: E402
 
 
 def _servicer(architecture: str) -> TrainingServicer:
-    s = TrainingServicer(TrainingConfig(device="cpu"))
+    s = TrainingServicer(TrainingConfig())
     s.device = torch.device("cpu")
     s.model_config = training_pb2.ModelConfig(
         num_relations=3,

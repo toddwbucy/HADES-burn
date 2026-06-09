@@ -320,6 +320,17 @@ fn main() -> anyhow::Result<()> {
             prefetch_depth,
             no_export,
         }) => {
+            // GNN training is infrequent, and an infrequently exercised
+            // default device is a forgotten one. No fallback to hades.yaml
+            // gpu.device here: the run must declare its GPU explicitly.
+            if cli.gpu.is_none() {
+                anyhow::bail!(
+                    "graph-embed train requires an explicit GPU declaration: pass --gpu N. \
+                     Training has no default device by design (a rarely exercised default \
+                     is a forgotten default). Check the machine's GPU layout (see the gpu \
+                     section of /etc/hades/hades.yaml) before picking."
+                );
+            }
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::graph_embed_train::run(
@@ -346,6 +357,16 @@ fn main() -> anyhow::Result<()> {
             export_to,
             checkpoint_dir,
         }) => {
+            // Same rule as train: the inductive update places the model on a
+            // GPU too, so it declares its device per run, no fallback.
+            if cli.gpu.is_none() {
+                anyhow::bail!(
+                    "graph-embed update requires an explicit GPU declaration: pass --gpu N. \
+                     Training-service operations have no default device by design (a rarely \
+                     exercised default is a forgotten default). Check the machine's GPU \
+                     layout (see the gpu section of /etc/hades/hades.yaml) before picking."
+                );
+            }
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::graph_embed_update::run(

@@ -80,8 +80,8 @@ embedding:
 # GPU Configuration
 # -----------------------------------------------------------------------------
 gpu:
-  # cuda:2 = RTX 2000 Ada 16GB (dedicated inference GPU)
-  # cuda:0 + cuda:1 = A6000 pair reserved for training
+  # cuda:2 = RTX 2000 Ada, the application-safety GPU (frequent inference-side ops).
+  # GNN training does NOT read this default: graph-embed train/update require --gpu N.
   # Override with: --gpu N or CUDA_VISIBLE_DEVICES
   device: cuda:2
   enabled: true

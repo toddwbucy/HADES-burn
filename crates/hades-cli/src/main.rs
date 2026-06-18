@@ -193,6 +193,7 @@ fn run_codebase_ingest(
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    force: bool,
 ) -> anyhow::Result<()> {
     init_tracing();
     let rt = tokio::runtime::Runtime::new()?;
@@ -202,6 +203,7 @@ fn run_codebase_ingest(
         language,
         batch,
         unparsed_ext,
+        force,
     ));
     match result {
         Ok(()) => Ok(()),
@@ -271,9 +273,10 @@ fn main() -> anyhow::Result<()> {
             language,
             batch,
             unparsed_ext,
-        }) => run_codebase_ingest(&config, path, language.as_deref(), batch, &unparsed_ext),
+            force,
+        }) => run_codebase_ingest(&config, path, language.as_deref(), batch, &unparsed_ext, force),
         Commands::Codebase(CodebaseCmd::Update { path }) => {
-            run_codebase_ingest(&config, path, None, false, &[])
+            run_codebase_ingest(&config, path, None, false, &[], false)
         }
         Commands::Codebase(CodebaseCmd::Stats) => {
             init_tracing();

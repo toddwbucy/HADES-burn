@@ -25,6 +25,14 @@ pub enum CodebaseCmd {
         /// are merged (existing fields preserved), not overwritten.
         #[arg(long = "unparsed-ext", value_delimiter = ',')]
         unparsed_ext: Vec<String>,
+
+        /// Re-ingest each file even if its change-detection digest is
+        /// unchanged. This rebuilds the node's symbols, chunks, and embeddings
+        /// in place — it does NOT drop the file node or its inbound edges, so
+        /// authored bridge edges survive (unlike `db purge`). Use it to refresh
+        /// a node whose stored view has drifted from the source.
+        #[arg(short = 'f', long = "force", alias = "no-skip")]
+        force: bool,
     },
 
     /// Update an existing code graph node.

@@ -181,4 +181,82 @@ async fn syn_ident_line_agrees_with_ra_selection_range() {
     );
     println!("OK: compared {compared} symbols; syn ident line == RA selectionRange line + 1");
     println!("    sibling `build` name-token lines (distinct): {build:?}");
+
+    // THE invariant the symbol key relies on: `keys::symbol_key` is fed
+    // `Symbol::start_line` (syn item-span, 1-based) on the syn side and
+    // `start_line + 1` (RA `range`, 0-based) on the rust-analyzer side. Those
+    // must match for the same symbol, or RA enrichment duplicates the vertex
+    // instead of overwriting it. Assert it directly.
+    let syn_item = syn_item_lines(FIXTURE);
+    let ra_range = ra_range_lines(&symbols);
+    let mut item_compared = 0usize;
+    for (name, syn_lines) in &syn_item {
+        if let Some(r) = ra_range.get(name) {
+            let ra_norm: BTreeSet<usize> = r.iter().map(|l| *l as usize + 1).collect();
+            assert_eq!(
+                *syn_lines, ra_norm,
+                "item-span disagreement for `{name}`: syn={syn_lines:?} ra_range+1={ra_norm:?}"
+            );
+            item_compared += 1;
+        }
+    }
+    assert!(item_compared >= 5, "compared only {item_compared} item spans");
+    println!("OK: syn item-span line == RA range line + 1 for {item_compared} symbols");
+}
+
+fn syn_item_lines(src: &str) -> BTreeMap<String, BTreeSet<usize>> {
+    use syn::spanned::Spanned;
+    fn walk(item: &syn::Item, map: &mut BTreeMap<String, BTreeSet<usize>>) {
+        let (name, span) = match item {
+            syn::Item::Fn(f) => (f.sig.ident.to_string(), f.span()),
+            syn::Item::Struct(s) => (s.ident.to_string(), s.span()),
+            syn::Item::Mod(m) => {
+                if let Some((_, items)) = &m.content {
+                    for it in items {
+                        walk(it, map);
+                    }
+                }
+                (m.ident.to_string(), m.span())
+            }
+            syn::Item::Impl(imp) => {
+                for it in &imp.items {
+                    if let syn::ImplItem::Fn(method) = it {
+                        map.entry(method.sig.ident.to_string())
+                            .or_default()
+                            .insert(method.span().start().line);
+                    }
+                }
+                return;
+            }
+            _ => return,
+        };
+        map.entry(name).or_default().insert(span.start().line);
+    }
+    let file = syn::parse_file(src).expect("parses");
+    let mut map = BTreeMap::new();
+    for item in &file.items {
+        walk(item, &mut map);
+    }
+    map
+}
+
+fn ra_range_lines(symbols: &[Value]) -> BTreeMap<String, BTreeSet<u64>> {
+    fn walk(node: &Value, map: &mut BTreeMap<String, BTreeSet<u64>>) {
+        if let (Some(name), Some(line)) = (
+            node.get("name").and_then(Value::as_str),
+            node.pointer("/range/start/line").and_then(Value::as_u64),
+        ) {
+            map.entry(name.to_string()).or_default().insert(line);
+        }
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            for c in children {
+                walk(c, map);
+            }
+        }
+    }
+    let mut map = BTreeMap::new();
+    for s in symbols {
+        walk(s, &mut map);
+    }
+    map
 }

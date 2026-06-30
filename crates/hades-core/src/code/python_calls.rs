@@ -48,7 +48,7 @@ pub fn build_qualified_index(
             let qname = qualified_name(sym);
             // Value keys on the qualified name so it matches the stored vertex
             // `_key`; the index is *keyed* by qname for qualified-exact lookup.
-            let skey = keys::symbol_key(&fkey, &qname);
+            let skey = keys::symbol_key(&fkey, &qname, sym.start_line);
             let entry = (rel_path.clone(), skey);
             index.entry(qname).or_default().push(entry);
         }
@@ -89,7 +89,7 @@ pub fn resolve_python_calls(
             };
 
             let caller_qname = qualified_name(sym);
-            let caller_skey = keys::symbol_key(&fkey, &caller_qname);
+            let caller_skey = keys::symbol_key(&fkey, &caller_qname, sym.start_line);
             let caller_parent = sym
                 .metadata
                 .get("parent_symbol")
@@ -264,7 +264,7 @@ mod tests {
                 if sym.kind == SymbolKind::Import {
                     continue;
                 }
-                let skey = keys::symbol_key(&fkey, &sym.qualified_name());
+                let skey = keys::symbol_key(&fkey, &sym.qualified_name(), sym.start_line);
                 index
                     .entry(sym.name.clone())
                     .or_default()

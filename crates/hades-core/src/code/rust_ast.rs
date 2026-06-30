@@ -807,6 +807,38 @@ mod helpers {
     }
 
     #[test]
+    fn test_sibling_module_impl_methods_get_distinct_keys() {
+        // #148: `impl Cfg { fn build }` in two sibling inline modules collapse
+        // to the same qualified name (`Cfg::build` -- the module prefix is
+        // dropped for impl methods to match rust-analyzer). Their distinct
+        // definition lines must yield distinct symbol keys, so neither
+        // overwrites the other on insert.
+        use crate::db::keys::{file_key, symbol_key};
+        let src = "mod a {\n    pub struct Cfg;\n    impl Cfg { pub fn build() {} }\n}\nmod b {\n    pub struct Cfg;\n    impl Cfg { pub fn build() {} }\n}\n";
+        let analysis = analyze(src).unwrap();
+        let builds: Vec<&Symbol> = analysis
+            .symbols
+            .iter()
+            .filter(|s| s.name == "build")
+            .collect();
+        assert_eq!(builds.len(), 2, "expected two `build` methods");
+        assert_eq!(builds[0].qualified_name(), "Cfg::build");
+        assert_eq!(builds[1].qualified_name(), "Cfg::build");
+        assert_ne!(
+            builds[0].start_line, builds[1].start_line,
+            "the two methods must sit at different lines"
+        );
+
+        let fk = file_key("src/lib.rs");
+        let k0 = symbol_key(&fk, &builds[0].qualified_name(), builds[0].start_line);
+        let k1 = symbol_key(&fk, &builds[1].qualified_name(), builds[1].start_line);
+        assert_ne!(
+            k0, k1,
+            "sibling-module impl methods must get distinct keys (was: collision)"
+        );
+    }
+
+    #[test]
     fn test_symbol_kinds() {
         let analysis = analyze(SAMPLE_RUST).unwrap();
 

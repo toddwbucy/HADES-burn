@@ -84,22 +84,34 @@ pub fn file_key(rel_path: &str) -> String {
 ///
 /// Format: `{file_key}__{readable}__{hash8}`
 ///
+/// `line` is the symbol's 1-based definition line. It disambiguates symbols
+/// that share a qualified name within one file -- e.g. `impl Foo { fn new }` in
+/// sibling inline modules, whose qualified name collapses to `Foo::new` (the
+/// module prefix is dropped to match the rust-analyzer enrichment key). Both
+/// analyzers agree on this line (syn item-span line == rust-analyzer `range`
+/// line + 1), so a syn-written vertex and its RA enrichment for the same symbol
+/// still derive the same key. See issue #148 and `tests/ra_span_agreement.rs`.
+///
 /// # Examples
 /// ```
 /// # use hades_core::db::keys::{file_key, symbol_key};
-/// let key = symbol_key("src_lib_rs", "Config::new");
+/// let key = symbol_key("src_lib_rs", "Config::new", 12);
 /// assert!(key.starts_with("src_lib_rs__Config__new__"));
 /// assert_eq!(key.len(), "src_lib_rs__Config__new__".len() + 8);
 /// ```
-pub fn symbol_key(file_key: &str, qualified_name: &str) -> String {
+pub fn symbol_key(file_key: &str, qualified_name: &str, line: usize) -> String {
     // Readable prefix: replace :: with __, strip only ArangoDB-invalid chars.
     let readable = qualified_name
         .replace("::", "__")
         .replace(['<', '>', ' ', ',', ':', '\'', '"', '(', ')'], "_");
 
-    // Deterministic 8-char hex hash of the original qualified name.
+    // Deterministic 8-char hex hash of the qualified name plus the definition
+    // line. The line is what makes two same-qualified-name symbols in one file
+    // (sibling-module impl methods, #148) resolve to distinct keys.
     let mut hasher = Sha256::new();
     hasher.update(qualified_name.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(line.to_le_bytes());
     let digest = hasher.finalize();
     let hash8 = hex8(&digest);
 
@@ -257,28 +269,44 @@ mod tests {
 
     #[test]
     fn test_symbol_key() {
-        let key = symbol_key("src_lib_rs", "Config::new");
+        let key = symbol_key("src_lib_rs", "Config::new", 12);
         assert!(key.starts_with("src_lib_rs__Config__new__"), "key: {key}");
         // Hash suffix is 8 hex chars.
         let suffix = key.strip_prefix("src_lib_rs__Config__new__").unwrap();
         assert_eq!(suffix.len(), 8, "hash suffix: {suffix}");
 
-        let key2 = symbol_key("src_lib_rs", "Display for Config");
+        let key2 = symbol_key("src_lib_rs", "Display for Config", 5);
         assert!(
             key2.starts_with("src_lib_rs__Display_for_Config__"),
             "key: {key2}"
         );
 
-        let key3 = symbol_key("src_lib_rs", "Vec<String>");
+        let key3 = symbol_key("src_lib_rs", "Vec<String>", 1);
         assert!(key3.starts_with("src_lib_rs__Vec_String___"), "key: {key3}");
     }
 
     #[test]
     fn test_symbol_key_deterministic() {
-        // Same input → same key.
-        let a = symbol_key("src_lib_rs", "Config::new");
-        let b = symbol_key("src_lib_rs", "Config::new");
+        // Same input (including line) → same key.
+        let a = symbol_key("src_lib_rs", "Config::new", 12);
+        let b = symbol_key("src_lib_rs", "Config::new", 12);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_symbol_key_line_disambiguates() {
+        // #148: two impl methods in sibling inline modules collapse to the same
+        // qualified name (`Cfg::build`) but sit at different definition lines.
+        // The line must make their keys distinct so neither overwrites the
+        // other on insert.
+        let a = symbol_key("src_lib_rs", "Cfg::build", 19);
+        let b = symbol_key("src_lib_rs", "Cfg::build", 26);
+        assert_ne!(a, b, "same qualified name, different line must not collide");
+        // The readable prefix is identical; only the hash suffix differs.
+        assert!(a.starts_with("src_lib_rs__Cfg__build__"));
+        assert!(b.starts_with("src_lib_rs__Cfg__build__"));
+        // Same line → same key (so syn and RA still agree on the same symbol).
+        assert_eq!(a, symbol_key("src_lib_rs", "Cfg::build", 19));
     }
 
     #[test]
@@ -298,8 +326,8 @@ mod tests {
     #[test]
     fn test_symbol_key_no_collision() {
         // Different qualified names → different keys even if readable prefix matches.
-        let a = symbol_key("src_lib_rs", "Vec<T>");
-        let b = symbol_key("src_lib_rs", "Vec_T_");
+        let a = symbol_key("src_lib_rs", "Vec<T>", 1);
+        let b = symbol_key("src_lib_rs", "Vec_T_", 1);
         assert_ne!(a, b, "should not collide: a={a}, b={b}");
     }
 }

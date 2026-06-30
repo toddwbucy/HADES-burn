@@ -10,6 +10,8 @@ use serde::Serialize;
 pub enum Language {
     Python,
     Rust,
+    /// C, C++, and CUDA (analyzed via libclang).
+    Cpp,
 }
 
 impl Language {
@@ -26,6 +28,9 @@ impl Language {
         match ext {
             "py" | "pyi" | "pyw" => Some(Self::Python),
             "rs" => Some(Self::Rust),
+            "c" | "cc" | "cpp" | "cxx" | "c++" | "h" | "hh" | "hpp" | "hxx" | "cu" | "cuh" => {
+                Some(Self::Cpp)
+            }
             _ => None,
         }
     }
@@ -35,6 +40,7 @@ impl Language {
         match self {
             Self::Python => "Python",
             Self::Rust => "Rust",
+            Self::Cpp => "C++",
         }
     }
 }

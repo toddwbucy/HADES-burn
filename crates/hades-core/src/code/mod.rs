@@ -11,6 +11,7 @@
 //! the public API.
 
 mod chunking;
+mod cpp;
 mod language;
 mod python;
 pub mod python_calls;
@@ -31,17 +32,23 @@ pub use symbols::{CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef};
 pub fn analyze(source: &str, file_path: &str) -> Result<FileAnalysis, CodeAnalysisError> {
     let lang = Language::from_path(file_path)
         .ok_or_else(|| CodeAnalysisError::UnsupportedLanguage(file_path.to_string()))?;
-    analyze_with_language(source, lang)
+    analyze_with_language(source, lang, file_path)
 }
 
 /// Analyze source code with an explicitly specified language.
+///
+/// `file_path` is used by analyzers that need it (the C++ path passes it to
+/// libclang for CUDA detection and include resolution); the Python and Rust
+/// paths ignore it.
 pub fn analyze_with_language(
     source: &str,
     lang: Language,
+    file_path: &str,
 ) -> Result<FileAnalysis, CodeAnalysisError> {
     match lang {
         Language::Python => python::analyze(source),
         Language::Rust => rust_ast::analyze(source),
+        Language::Cpp => cpp::analyze(source, file_path),
     }
 }
 

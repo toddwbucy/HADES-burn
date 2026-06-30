@@ -1,9 +1,14 @@
 # HADES Remote Client Authentication and Transport
 
 **Status:** Draft, awaiting ratification
-**Version:** 0.2
+**Version:** 0.3
 **Date:** 2026-06-30
 **Relates to:** [daemon-protocol.md](daemon-protocol.md) (the wire protocol this carries over the network), [model-operation-vocabulary.md](model-operation-vocabulary.md) (the closed command surface)
+
+**v0.3 change:** database creation, deletion, and all `_system` administration are
+local-only. No provisioning broker, and no network path to `_system` Administrate
+for any principal. A network principal may hold full database-level administration
+of databases it owns, granted at provisioning time, and nothing on any other.
 
 ## Why this exists
 
@@ -12,19 +17,23 @@ HADES server over a network. The naive option, running a second HADES instance o
 the laptop, was rejected: two databases to keep in sync and two sources of truth.
 There is one HADES server. Remote callers reach it over an authenticated channel.
 
-Two access patterns drive the design:
+Three access patterns drive the design:
 
 1. **Agent compute on the laptop, agent memory on the HADES node, one hop
    between.** The agent's memory is a database on the HADES server. This path is
    read-write to that one database, not the read-only profile an early draft
    assumed.
-2. **The human operator also uses HADES remotely** to read and evaluate across
-   databases, with no ability to administer the server over the wire.
+2. **The human operator reads and evaluates across databases** remotely, with no
+   writes and no ability to administer the server over the wire.
+3. **The human operator creates and fully administers project databases**, but
+   only databases that principal owns, and with all `_system`-level administration
+   (creating or dropping databases, managing users and grants) staying local.
 
 This is **per-principal** access, not per-machine. Each Weaver agent runs as its
 own Linux user (the Weaver sandbox model). Agent A holding access on a laptop
 does not grant agent C on that same laptop any access. And each enrolled key is
-pinned to **one specific database** with an ArangoDB grant scoped to match.
+pinned to a fixed scope (one database for a Weaver agent, or the set of databases
+the human builder owns) with an ArangoDB grant scoped to match.
 
 This is NOT an MCP server. It reuses the existing daemon protocol verbatim and
 carries it over SSH.
@@ -34,13 +43,19 @@ carries it over SSH.
 - Not a second HADES instance and not a database copy. One server, one graph set.
 - Not box authentication. Two agents on the same laptop are distinct principals.
 - Not an MCP server. The daemon protocol is the interface.
-- Not a path to server administration. No network identity can administer the
-  box, drop a database, or change schema. Admin is local-only (see "Admin is
-  local-only").
-- HADES does not provision Weaver agent users and does not place their keys.
-  HADES owns the server side (enrollment, transport, the daemon, the scoped
-  ArangoDB users) and adapts to whatever Weaver provisions. See "Ownership
-  boundary".
+- Not a path to server administration. No network identity holds `_system`-level
+  rights, can create or drop a database, or can manage ArangoDB users or grants
+  over the wire. Those are local-only (see "Admin and provisioning are local"). A
+  principal may hold full database-level administration of databases it owns, and
+  nothing on any other.
+- Not a self-service database broker. There is no network-reachable path to
+  `_system` Administrate. Databases are created by a local provisioning step
+  (Weaver for agent memory databases, local SSH for the human's project
+  databases), never by a command over the wire.
+- HADES does not provision Weaver agent users, does not place their keys, and does
+  not create their databases. HADES owns the server side of access (enrollment,
+  transport, the daemon, the scoped ArangoDB users) and serves scoped access to
+  databases that already exist. See "Ownership boundary".
 
 ## The actors
 
@@ -48,8 +63,9 @@ carries it over SSH.
 |-----------|------------|-------------|---------------|
 | HADES server | The single daemon plus ArangoDB plus the embedder | n/a | The workstation/server |
 | Weaver agent | An AI coding agent, one dedicated Linux UID each | read-write to one pinned database | The client machine (laptop) |
-| Operator (remote) | The human, reading and evaluating across databases | read-only across databases | The client machine |
-| Operator (admin) | The human administering the server | full, local only | On the server, after SSH and elevation |
+| Operator (evaluator) | The human, reading and evaluating across databases | read-only across databases | The client machine |
+| Operator (builder) | The human, creating and administering own project databases | full DBA on owned databases, none on others | The client machine |
+| Operator (admin) | The human administering the server itself | full, local only | On the server, after SSH and elevation |
 
 ## Architecture
 
@@ -97,12 +113,14 @@ Rule #1).
 |-----------|--------------|----------------|---------------|----------------|
 | Agent A | per-UID key on laptop | `agent` | `hades_agent_a` | Access on `agent_a_mem`, collection RW on its memory collections, RO on protected ones, none elsewhere |
 | Agent B | per-UID key on laptop | `agent` | `hades_agent_b` | same shape, pinned to `agent_b_mem` |
-| Operator (remote) | operator key | `agent` | `hades_ro_all` | Access plus collection RO across databases, Administrate on none |
+| Operator (evaluator) | operator key | `agent` | `hades_ro_all` | Access plus collection RO across databases, Administrate on none |
+| Operator (builder) | operator builder key | `agent` | `hades_build_todd` | database-level Administrate on owned databases (the `todd__*` set), none on every other database |
 | Operator (admin) | local Unix socket | `admin` | the `hades` user | full, local only |
 
-No network principal in this table holds ArangoDB **Administrate** on any
-database. That is the load-bearing invariant of the whole design (see "The
-no-Administrate invariant").
+No network principal holds **server-level** (`_system`) Administrate, and none
+holds any right on a database it does not own. Database-level Administrate is
+granted only on owned databases. That is the load-bearing invariant of the whole
+design (see "The no-server-Administrate invariant").
 
 ## The enrollment unit
 
@@ -119,73 +137,109 @@ Operator inputs from the client side (Weaver):
 Operator decisions (the client does not choose these):
 
 - `session`: the daemon session ceiling.
-- `database`: the one database this key may reach.
-- `grant-spec`: the ArangoDB grant for this key's scoped user, for example
-  `{db: agent_a_mem, access: ro, collections: {memory: rw, audit: ro}}`.
+- `scope`: the database this key may reach. For a single-DB tenant it is one
+  database name. For a builder it is the naming prefix that identifies the owned
+  set (for example `todd__`).
+- `grant-spec`: the ArangoDB grant for this key's scoped user. For a tenant, for
+  example `{db: agent_a_mem, access: ro, collections: {memory: rw, audit: ro}}`.
+  For a builder, database-level Administrate on the owned databases and `none`
+  elsewhere.
 
 Output, written on the server:
 
 - One `authorized_keys` line under the shared service account, with `command=`
-  pinning `--session`, `--client-id`, and `--database`, plus `restrict`.
+  pinning `--session`, `--client-id`, and the scope (`--database` or
+  `--namespace`), plus `restrict`.
 - One ArangoDB user, scoped per the grant-spec, that the daemon process for this
   key authenticates as.
 
 ```
 command="hades daemon-stdio --session agent --client-id agent-a --database agent_a_mem",restrict ssh-ed25519 AAAA...agentApub  agent-a
+command="hades daemon-stdio --session agent --client-id todd-build --namespace todd__",restrict ssh-ed25519 AAAA...toddpub  todd-build
 ```
 
-`--database` joins `--session` and `--client-id` in the set the server pins and
-the client cannot override. The daemon must reject or ignore any client-supplied
-database. This is the command-injection concern of G3 extended to the database.
+The scope (`--database` or `--namespace`) joins `--session` and `--client-id` in
+the set the server pins and the client cannot override. The daemon must reject or
+ignore any client-supplied scope. This is the command-injection concern of G3
+extended to the database scope. Note that a builder's scope still grants nothing
+on databases outside its prefix, because the scoped ArangoDB user has no grant on
+them regardless of what the client sends.
 
 Because the private key stays on the client, the shipped package contains no
 secret. It holds the binary, the pinned server host key, and the host and port.
 It can travel over any channel.
 
-## The capability model: documents over the network, schema only local
+## The capability model: ownership inside two hard floors
 
-The network can populate and modify documents within existing containers. It
-cannot change the schema. This single rule sorts every command.
+Over the wire a principal can do whatever its scoped ArangoDB user permits, inside
+two floors that hold for every principal without exception.
 
-| Network-allowed (gated by the key's ArangoDB user) | Network-forbidden (local admin only) |
-|-----------------------------------------------------|--------------------------------------|
-| reads: `db.get`, `db.list`, `db.count`, `db.recent`, graph traverse, neighbors, shortest-path, `graph-embed` queries | raw AQL (`db.aql`): AQL can write and is expensive, never on the wire |
-| DML: `db.insert`, `db.update`, `db.delete`, succeeding only where the key's ArangoDB user grants collection Read/Write | schema and DDL: create or drop collection, create index, graph create or drop or materialize, `db.schema.init`, create or drop database, `db.purge` |
+The two hard floors, refused on the network transport and withheld from every
+network ArangoDB user:
 
-The current daemon classifies DML (`db.insert`, `db.update`, `db.delete`) as
-Admin tier, next to the destructive DDL commands. This design splits them. DML
-becomes network-reachable, gated by the ArangoDB user rather than by tier. The
-DDL and raw-AQL set is refused on the network transport outright, on top of the
-ArangoDB grant withholding the privilege. Two independent gates then agree: the
-transport will not carry the destructive command, and no network identity could
-execute it.
+- **No `_system` operations.** No creating or dropping databases, no managing
+  ArangoDB users or grants. These need `_system` Administrate, which no network
+  user holds. They happen only through local provisioning.
+- **No raw AQL.** AQL can write and is expensive. The closed operation vocabulary
+  is the only command surface over the wire.
 
-This is why general node create and delete is safe over the network here. The
-catastrophic floor is held by ArangoDB (no Administrate) and by transport
-DDL-refusal, not by restricting the command vocabulary. There is no need for
-net-new `memory.*` commands. Weaver layers memory semantics on top of generic
-scoped CRUD on the client side, which keeps the ownership boundary intact.
+Inside those floors, the scoped ArangoDB user decides the rest:
 
-### The no-Administrate invariant
+| Principal shape | ArangoDB grant | What it can do over the wire |
+|-----------------|----------------|------------------------------|
+| Single-DB tenant (Weaver agent) | DB-level Access on one DB, collection RW/RO | reads, and document create/update/delete in granted collections of that one DB |
+| Namespace owner (human builder) | DB-level Administrate on owned DBs, none elsewhere | all of the above, plus DDL inside owned DBs: create or drop collections, create indexes, graph create or drop or materialize, `db.purge` |
+| Evaluator (human) | DB-level Access plus collection RO across DBs | read and evaluate, no writes |
 
-No network ArangoDB identity ever holds database-level **Administrate** or any
-server-level admin right. Mapped to ArangoDB's two access levels:
+The current daemon classifies DML (`db.insert`, `db.update`, `db.delete`) and DDL
+(`db.create_collection`, graph create or drop, `db.schema.init`, `db.purge`)
+together as Admin tier. This design separates three classes:
 
-- Database level **Access** (not Administrate) lets the user operate inside a
-  database without creating or dropping collections or the database itself.
-- Collection level **Read/Write** lets the user create and delete documents in
-  named collections. Collection level **Read-Only** protects a container from
-  document deletion. Collection level **none** hides it.
+- **DML and DDL become network-reachable, gated by the scoped ArangoDB user.** A
+  tenant's Access-level user cannot run DDL. A builder's Administrate-level user
+  can, but only on its owned databases.
+- **`_system` operations** (create or drop database, user or grant management) are
+  refused on the network transport and impossible for any network user.
+- **Raw AQL** is refused on the network transport.
 
-So "create and delete nodes, but cannot drop the database, and cannot delete
-nodes in a protected container" maps onto `grantDatabase(Access)` plus
-`grantCollection(rw | ro | none)` per collection. This is core ArangoDB
-functionality. Confirm `grantCollection` behaves this way on the deployed
-ArangoDB edition before relying on it.
+Two gates agree on the floors: the transport refuses the `_system` and raw-AQL
+command classes, and no network ArangoDB user could execute them. Production and
+reserved databases are untouchable because no network user is granted any access
+to them, so the scoped user cannot see them at all. There is no need for net-new
+`memory.*` commands. Weaver layers memory semantics on top of generic scoped CRUD
+on the client side, which keeps the ownership boundary intact.
 
-Every "cannot destroy anything over the network" claim in this document depends
-on this invariant holding. It is a precondition, not something daemon code
-provides.
+### The no-server-Administrate invariant
+
+No network ArangoDB identity holds **server-level** (`_system`) Administrate, and
+none holds any right on a database it does not own. Database-level Administrate is
+granted only on owned databases. Mapped to ArangoDB's access levels:
+
+- **Server level (`_system`) Administrate** is never granted to a network user. It
+  is the credential for creating or dropping databases and for managing users and
+  grants. It stays local. This is the absolute floor that keeps production safe
+  even against a daemon compromise, because there is no network path to it at all.
+- **Database-level Administrate** on an owned database lets the owner do DDL inside
+  it (collections, indexes, graphs, purge) with no reach outside it. Granted per
+  owned database, `none` elsewhere.
+- **Database-level Access** plus **collection Read/Write or Read-Only** gives a
+  tenant document CRUD without DDL. Read-Only protects a container from document
+  deletion. `none` hides it.
+
+So "create and drop collections in my own database, but cannot create or drop the
+database itself, cannot touch a database I do not own, and cannot administer the
+server" maps onto `grantDatabase(Administrate)` on owned databases,
+`grantDatabase(none)` elsewhere, and no `_system` grant. This is core ArangoDB
+functionality. Confirm the grant levels behave this way on the deployed ArangoDB
+edition before relying on them.
+
+Production and reserved databases (`_system`, `bident_burn`, every research and
+production database) are protected by the same mechanism: no network user is
+granted any access to them, so they are invisible and untouchable over the wire.
+No runtime denylist is needed in the daemon. The grant is the gate.
+
+Every "cannot reach the server or another tenant" claim in this document depends
+on this invariant. It is a precondition, not something daemon code provides.
 
 ## Two-layer security model
 
@@ -293,21 +347,28 @@ so they scope claim (a) to the local transport and tie claim (b) to the scoped
 per-key ArangoDB users. This document must not land while those two still assert
 the old posture without qualification.
 
-## Admin is local-only
+## Admin and provisioning are local
 
-Administration is not a network session. It is reached only by logging into the
-server and elevating there.
+Two things never cross the wire: server administration, and database provisioning.
+Both happen on the server.
 
 - The ArangoDB endpoint and web interface are bound to `127.0.0.1` only, never
   `0.0.0.0`. They are never advertised on the network.
-- Raw AQL and any DDL or admin action are permitted only from a local ArangoDB
-  user on the server.
-- The operator works remotely by first connecting over SSH to the server, then
-  elevating to the local admin context. There is no remote admin path and no
-  remote `admin` session over the wire.
+- Raw AQL, any `_system` operation, and any database create or drop are permitted
+  only from a local ArangoDB user on the server.
+- The human operator administers the server by first connecting over SSH, then
+  elevating to the local admin context. There is no remote `admin` session over
+  the wire.
+- **Database provisioning is local and out of band.** Weaver creates agent memory
+  databases at agent-birth through its own local provisioning flow (a
+  WeaverTools-owned identity runs the create and grant on the server). This
+  document does not specify that mechanism, since it is WeaverTools' domain. The
+  human creates project databases by local SSH. In both cases the `_system`
+  operation executes on the server, and the network principal only ever receives a
+  scoped ArangoDB user on databases that already exist. See "Ownership boundary".
 
-Localhost-only binding is what makes "admin is local" enforceable rather than
-aspirational.
+Localhost-only binding and out-of-band provisioning together are what keep
+`_system` Administrate off the network entirely.
 
 ## Write consistency across the hop
 
@@ -352,15 +413,20 @@ without any server-side change, because the server still only sees a public key.
 | The daemon, the `daemon-stdio` transport, the wire protocol | HADES |
 | The server `authorized_keys` and `command=` template | HADES (operator) |
 | The scoped per-key ArangoDB users and their grants | HADES (operator) |
-| Session and database assignment per enrolled key | HADES (operator) |
+| Session and scope assignment per enrolled key | HADES (operator) |
+| Serving scoped network access to databases that already exist | HADES |
+| Creating agent memory databases (the local `_system` create and grant) | WeaverTools |
+| Creating the human's project databases (local SSH) | Operator (local admin) |
 | What agent memory writes mean (memory semantics) | WeaverTools |
 | Provisioning Weaver agent Linux users | WeaverTools |
 | Generating agent keypairs and placing private keys in agent stores | WeaverTools |
 | Submitting `{public_key, label}` for enrollment | WeaverTools |
 
-HADES is the access path and the DBA gate. It serves scoped node CRUD on a pinned
-database. Weaver owns the meaning layered on top. HADES does not modify Weaver
-users, Weaver ACLs, or the per-agent embedders.
+HADES is the access path and the DBA gate. It serves scoped access to databases
+that already exist. It does not create databases and does not hold a
+`_system`-capable credential reachable over the wire. Weaver owns provisioning of
+agent users and agent memory databases, and the meaning layered on top. HADES does
+not modify Weaver users, Weaver ACLs, or the per-agent embedders.
 
 ## Network underlay (optional)
 
@@ -397,7 +463,11 @@ design provides.
   anchor for all identity, session, and database assignment.
 - The client enforces the pinned host key strictly, with no TOFU and no
   `accept-new`.
-- No network ArangoDB user holds Administrate. See the no-Administrate invariant.
+- No network ArangoDB user holds server-level (`_system`) Administrate, and none
+  holds any right on a database it does not own. See the no-server-Administrate
+  invariant.
+- No daemon process reachable over the wire holds a `_system`-capable ArangoDB
+  credential.
 
 ### The gates
 
@@ -410,8 +480,8 @@ consequence the one below could otherwise leave uncovered.
 | G2a | Per-UID key isolation | OS file permissions | Another unprivileged user on the client reading the key | Malicious client root | G2b |
 | G2b | Key non-extractability | FIDO or TPM hardware | Copying the key off the machine at all, even by root | Physical compromise of the token or TPM | Physical custody |
 | G3 | Forced command plus restrict | sshd and `authorized_keys` | Shell, forwarding, pty, pivot, and client-chosen session or database | A forced-command line that reads `$SSH_ORIGINAL_COMMAND` or client env | Review and test that the forced command ignores all client input |
-| G4 | Daemon session and DDL refusal | daemon code | An agent session invoking admin, DDL, or raw AQL | A bug in the gating path | G5 |
-| G5 | Scoped ArangoDB user | ArangoDB | Writes or data access outside the key's grant, regardless of daemon behavior | The daemon process holding an over-privileged credential | Process-level credential isolation (one scoped user per key) |
+| G4 | Transport refusal of `_system` and raw AQL | daemon code | Any principal invoking create or drop database, user or grant management, or raw AQL over the wire | A bug in the refusal path | G5 |
+| G5 | Scoped ArangoDB user | ArangoDB | Writes, DDL, or data access outside the key's grant, and any reach into a non-owned or reserved database, regardless of daemon behavior | The daemon process holding an over-privileged or `_system` credential | Process-level credential isolation (one scoped user per key, never `_system`) |
 | G6 | Host-key pin | client `known_hosts` | MITM or redirection to an impostor server | Loss of the pinned host key with no rotation path | SSH host certificate under a pinned CA |
 
 ### Residual risks
@@ -435,7 +505,10 @@ consequence the one below could otherwise leave uncovered.
   active session or process on revoke, or a per-request revocation-list check in
   the daemon, plus a daemon-enforced maximum session duration. The session-
   lifetime bound must be enforced actively by the daemon, not assumed from the
-  key or certificate.
+  key or certificate. Separately, revoking a builder key must not strand or
+  auto-drop the databases that key owns. The ownership record and the databases
+  outlive the key. Define a lifecycle (retain, transfer, or archive owned
+  databases on revoke), and never auto-drop on revoke.
 - **R-5 Host-key rotation invalidates every client bundle.** A raw pinned host key
   means a server reinstall or key compromise requires re-shipping to all clients.
   Mitigation: pin a CA via `@cert-authority` and issue a host certificate, so the
@@ -450,7 +523,11 @@ consequence the one below could otherwise leave uncovered.
 - **R-7 Resource exhaustion.** Agent vector search and traversals are expensive,
   and a channel is connect-once issue-many. Mitigation: per-key concurrency caps,
   sshd `MaxSessions` and `MaxStartups`, and per-query cost limits on top of the
-  existing 16 MiB and `MAX_LIMIT=1000` floors.
+  existing 16 MiB and `MAX_LIMIT=1000` floors. Database creation is a local,
+  human- or Weaver-gated step, not a self-service over-the-wire vector, so it is
+  not an exhaustion path from a network client. The local provisioning flow should
+  still enforce per-owner quotas (maximum databases, maximum total size) so a
+  builder namespace cannot exhaust disk.
 - **R-8 Orphaned daemon processes.** A roaming client that reconnects often spawns
   a new `daemon-stdio` per link. Mitigation: clean exit on stdin EOF so dropped
   channels do not accumulate processes holding ArangoDB connections.
@@ -468,18 +545,22 @@ If any of these is false, the corresponding claim is overstated.
 1. The private key is only ever in a per-UID location (per-agent isolation).
 2. The shipped package contains no secret (safe to deliver over any channel).
 3. The forced command ignores all client-supplied input, including
-   `$SSH_ORIGINAL_COMMAND` and environment (no session, database, or argument
+   `$SSH_ORIGINAL_COMMAND` and environment (no session, scope, or argument
    injection).
 4. The client enforces the pinned host key with no interactive fallback (instance
    binding).
-5. No network ArangoDB user holds Administrate (nothing destructive over the
-   wire).
+5. No network ArangoDB user holds server-level (`_system`) Administrate or any
+   right on a non-owned database, and no wire-reachable daemon process holds a
+   `_system`-capable credential (nothing reaches the server or another tenant over
+   the wire).
 6. Each remote `daemon-stdio` process holds only its key's scoped ArangoDB
    credential (per-database isolation independent of daemon correctness).
 7. Memory writes are atomic and idempotent (no torn state across the hop).
-8. Every command is logged with its `--client-id` and key fingerprint, since all
-   principals share one ArangoDB-side service identity per database and the DB
-   logs cannot otherwise attribute (attribution).
+8. Every command is logged daemon-side with its `--client-id` and key fingerprint,
+   giving command-level attribution. ArangoDB attributes at the database and user
+   level through the per-key scoped user. The two layers together attribute fully.
+   The earlier claim that principals share one ArangoDB identity per database does
+   not hold in the scoped-user model and is dropped (attribution).
 
 ## Open questions
 
@@ -497,6 +578,16 @@ If any of these is false, the corresponding claim is overstated.
   follow-on.
 - The provisioning and rotation cadence for the per-key ArangoDB users, and the
   enrollment ledger format.
+- Where the ownership record lives. The scoped ArangoDB user's effective grants
+  already encode which databases a principal owns, so a separate ledger may be
+  redundant. Decide whether `orient` and a `list-my-databases` view derive owned
+  databases from the grants directly, or from a ledger maintained at provisioning
+  time. The ledger, if kept, must outlive the key for the revocation lifecycle
+  (R-4).
+- Raw AQL on owned databases. A builder arguably has "full admin" of an owned
+  database, which could include raw AQL. Recommendation: keep raw AQL off the wire
+  even for owned databases, since it is the worst footgun (writes plus cost). If
+  allowed later, only against owned databases and with hard time and cost caps.
 
 ## What this delivers
 
@@ -505,14 +596,19 @@ If any of these is false, the corresponding claim is overstated.
   machine.
 - Per-database tenancy, enforced by a scoped ArangoDB user per key, independent of
   daemon correctness.
-- Nothing destructive over the wire. No network identity can drop a database,
-  drop a collection, change schema, or run raw AQL.
+- Nothing reaches the server or another tenant over the wire. No network identity
+  can administer the server, create or drop a database, manage users or grants,
+  run raw AQL, or touch a database it does not own.
+- Full database-level administration of owned databases over the wire for the
+  human builder: DDL inside its own databases, and nothing outside them.
 - Document create and delete within a pinned database for agents that need it,
   bounded by collection-level grants.
-- Read and evaluate across databases for the remote operator, with no write and no
+- Read and evaluate across databases for the evaluator, with no write and no
   admin.
-- Admin reachable only by local SSH and elevation, with ArangoDB bound to
-  localhost.
+- Admin and database provisioning reachable only locally. HADES provisions
+  nothing over the wire: databases are created by Weaver (agent memory) or by
+  local SSH (the human's project databases), and HADES serves scoped access to
+  what exists. ArangoDB is bound to localhost.
 - Mutual authentication, with the client verifying the server and the server
   verifying the principal.
 - A binary bound to one HADES instance by the pinned server host key.

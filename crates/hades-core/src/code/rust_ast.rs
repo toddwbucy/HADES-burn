@@ -266,6 +266,28 @@ impl SymbolCollector {
                     end_line,
                     metadata: json!({ "visibility": vis_str(&m.vis) }),
                 });
+
+                // Descend into an inline module body (`mod foo { ... }`). syn does
+                // not do this for us: without it, every symbol declared inside an
+                // inline module is invisible to both the symbol graph and the
+                // `symbol_hash` change-detection digest. The digest then never
+                // moves when such a symbol is added or removed, so a genuinely
+                // changed file silently false-skips on re-ingest (#145).
+                //
+                // Symbols produced by the recursion are tagged with this module's
+                // name (see `prepend_module_path`) so their qualified keys stay
+                // unique across sibling modules and line up with the rust-analyzer
+                // enrichment convention.
+                if let Some((_, items)) = &m.content {
+                    let inner_start = self.symbols.len();
+                    for inner in items {
+                        self.visit_top_level_item(inner);
+                    }
+                    let module_name = m.ident.to_string();
+                    for sym in &mut self.symbols[inner_start..] {
+                        prepend_module_path(&mut sym.metadata, &module_name);
+                    }
+                }
             }
 
             _ => {}
@@ -542,6 +564,37 @@ fn vis_str(vis: &Visibility) -> &'static str {
     }
 }
 
+/// Tag a symbol with the inline module it was found in, prepending `module_name`
+/// to any module path the inner recursion already recorded so nested modules
+/// build a full `outer::inner` path.
+///
+/// Symbols carrying an `impl_context` are left untouched: methods inside an
+/// `impl` are qualified by their `Self` type alone, matching the rust-analyzer
+/// enrichment path (whose impl-block recursion drops the surrounding module
+/// context). Keeping the two analyzers in agreement is what lets rust-analyzer
+/// overwrite syn's vertex by `_key` instead of duplicating it.
+fn prepend_module_path(metadata: &mut serde_json::Value, module_name: &str) {
+    let in_impl = metadata
+        .get("impl_context")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if in_impl {
+        return;
+    }
+
+    let joined = match metadata.get("module_path").and_then(|v| v.as_str()) {
+        Some(existing) if !existing.is_empty() => format!("{module_name}::{existing}"),
+        _ => module_name.to_string(),
+    };
+
+    match metadata {
+        serde_json::Value::Object(map) => {
+            map.insert("module_path".to_string(), json!(joined));
+        }
+        _ => *metadata = json!({ "module_path": joined }),
+    }
+}
+
 fn type_name(ty: &syn::Type) -> String {
     match ty {
         syn::Type::Path(p) => path_name(&p.path),
@@ -706,6 +759,51 @@ pub fn run(items: &[String]) -> usize {
         assert!(names.contains(&"new"), "missing new method");
         assert!(names.contains(&"load"), "missing load method");
         assert!(names.contains(&"run"), "missing run function");
+    }
+
+    #[test]
+    fn test_inline_module_symbols_are_extracted() {
+        // Symbols declared inside an inline `mod { ... }` must be extracted —
+        // both as graph vertices and so the change-detection digest sees them
+        // (#145: a fn added inside an inline module used to false-skip).
+        let src = r#"
+pub struct Registry { n: usize }
+impl Registry {
+    pub fn new() -> Self { Self { n: 0 } }
+}
+mod helpers {
+    pub fn existing() -> u32 { 1 }
+    pub mod inner {
+        pub fn deep() -> u32 { 2 }
+    }
+}
+"#;
+        let analysis = analyze(src).unwrap();
+        let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"existing"), "missing module fn: {names:?}");
+        assert!(names.contains(&"deep"), "missing nested-module fn: {names:?}");
+
+        // Qualified names carry the full module path, so sibling-module
+        // collisions cannot collapse onto one `_key`.
+        let existing = analysis.symbols.iter().find(|s| s.name == "existing").unwrap();
+        assert_eq!(existing.qualified_name(), "helpers::existing");
+        let deep = analysis.symbols.iter().find(|s| s.name == "deep").unwrap();
+        assert_eq!(deep.qualified_name(), "helpers::inner::deep");
+
+        // Top-level impl methods are unaffected (no module prefix).
+        let new = analysis.symbols.iter().find(|s| s.name == "new").unwrap();
+        assert_eq!(new.qualified_name(), "Registry::new");
+    }
+
+    #[test]
+    fn test_inline_module_edit_moves_digest() {
+        // Adding a symbol inside an inline module must change `symbol_hash`,
+        // otherwise the file false-skips on re-ingest (#145 root cause).
+        let before = "mod m { pub fn a() {} }";
+        let after = "mod m { pub fn a() {} pub fn b() {} }";
+        let h1 = analyze(before).unwrap().symbol_hash;
+        let h2 = analyze(after).unwrap().symbol_hash;
+        assert_ne!(h1, h2, "digest must move when a module-inner symbol is added");
     }
 
     #[test]

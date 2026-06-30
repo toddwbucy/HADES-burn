@@ -109,6 +109,7 @@ pub async fn run(
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    force: bool,
 ) -> Result<()> {
     let cmd_start = Instant::now();
 
@@ -245,6 +246,7 @@ pub async fn run(
                 &rel_path,
                 lang_override,
                 &mut imports,
+                force,
             )
             .await
         };
@@ -625,6 +627,7 @@ fn discover_files(
 // ── Per-file ingest ─────────────────────────────────────────────────────
 
 /// Ingest a single source file: analyze → chunk → embed → store.
+#[allow(clippy::too_many_arguments)]
 async fn ingest_file(
     db: &ArangoPool,
     embedder: Option<&EmbeddingClient>,
@@ -633,6 +636,7 @@ async fn ingest_file(
     rel_path: &str,
     lang_override: Option<Language>,
     imports: &mut ImportContext,
+    force: bool,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -666,10 +670,14 @@ async fn ingest_file(
 
     // Check for incremental skip via symbol_hash.
     // Only skip if the code is unchanged AND embeddings aren't needed (either
-    // already present or no embedder available to backfill).
+    // already present or no embedder available to backfill). `--force` bypasses
+    // this entirely, re-ingesting in place (#145) — the per-file purge below
+    // touches only this file's own symbols and outbound edges, so inbound
+    // authored bridge edges are preserved (unlike a cascading `db purge`).
     let fkey = keys::file_key(rel_path);
-    if let Some(true) =
-        check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await?
+    if !force
+        && check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await?
+            == Some(true)
     {
         debug!(
             path = rel_path,

@@ -54,6 +54,19 @@ impl Symbol {
         {
             return format!("{parent}.{}", self.name);
         }
+        // Items declared directly inside an inline `mod foo { ... }` carry the
+        // `::`-joined module path (`"foo"`, `"foo::bar"`), set in `rust_ast.rs`.
+        // This both keeps their `_key` unique across same-named items in sibling
+        // modules and matches the qualified names the rust-analyzer enrichment
+        // path emits, so the two analyzers overwrite the same vertex rather than
+        // producing duplicates. Methods inside an `impl` keep only `impl_context`
+        // (handled above) — rust-analyzer drops the module prefix there, so we do
+        // too, deliberately.
+        if let Some(module) = self.metadata.get("module_path").and_then(|v| v.as_str())
+            && !module.is_empty()
+        {
+            return format!("{module}::{}", self.name);
+        }
         self.name.clone()
     }
 }

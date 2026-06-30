@@ -4,6 +4,14 @@
 > foundation document and a codebase. This is the **context-engineering
 > methodology** behind graphs like NestedLearning (`NL`) — the schema and edge
 > structure are *the engineering*, not an afterthought.
+>
+> **Layer 3 of the foundation family** — the ArangoDB/HADES *reference
+> implementation* (the *how on this backend*). It realizes the backend-agnostic
+> architecture in [`foundation/the-bastion.md`](foundation/the-bastion.md)
+> (Layer 2), which serves the principles in
+> [`foundation/bastion-of-context.md`](foundation/bastion-of-context.md)
+> (Layer 1). Everything below is specific to ArangoDB; the substrate-neutral
+> method, the backend contract, and the de-ratification rite live one layer up.
 
 The graph is built to behave as an **immune system**: a concept, a smell, or a
 file *earns* its place only by tracing — through ratified edges — back to an
@@ -165,7 +173,7 @@ after the same bug recurs three times in 48 hours.
 ### Layer 4 — Code ingested and bridged to the concept graph
 
 Ingest the codebase the standard way (`hades codebase ingest` → `codebase_*`
-collections + structural edges; see [codebase-graph-ontology.md](codebase-graph-ontology.md)).
+collections + structural edges; see [codebase-graph-ontology.md](../docs/codebase-graph-ontology.md)).
 Then add **bridge edges** from code to the concept graph:
 
 | Bridge edge | Direction | `rel` | Evidence |
@@ -201,7 +209,7 @@ standing query. Non-connection is the signal.
 
 ## `relation_order` — what trains
 
-For structural embeddings (see [declarative-schema.md](declarative-schema.md)),
+For structural embeddings (see [declarative-schema.md](../docs/declarative-schema.md)),
 `relation_order` scopes which relations the model trains on. Include the
 **semantic + structural** relations (concept edges, gate edges, bridge edges, and
 the `codebase_*` edges). **Exclude** process / project-management relations — a
@@ -225,11 +233,12 @@ continuously-growing graph).
 4. **Derive the smells** from the axioms (Layer 3).
 5. **`schema apply`** a YAML declaring the collections, edge definitions, the
    named graph, `relation_order`, `feature_dim`, and `model_type`
-   (see [declarative-schema.md](declarative-schema.md)).
+   (see [declarative-schema.md](../docs/declarative-schema.md)).
 6. **Ingest the codebase last** and add the bridge edges (Layer 4).
 7. **Run the suspect-set queries** (Layer 5); optionally train structural
-   embeddings (`graph-embed train`; `model_type` picks RGCN or inductive
-   GraphSAGE) once every trained node carries a feature.
+   embeddings (`graph-embed train --gpu N`, the device declaration is
+   mandatory; `model_type` picks RGCN or inductive GraphSAGE) once every
+   trained node carries a feature.
 
 > Per-graph *design* (the specific concept families, principles, smells for one
 > document) belongs in that graph's **companion document**, not in code or this
@@ -289,6 +298,6 @@ bridges (89 / 151 / 12), and the `nl_code_paper` named graph.
 
 ## See also
 
-- [declarative-schema.md](declarative-schema.md) — the `schema apply` YAML format (`relation_order`, `feature_dim`).
-- [codebase-graph-ontology.md](codebase-graph-ontology.md) — the `codebase_*` collections + structural edges.
+- [declarative-schema.md](../docs/declarative-schema.md) — the `schema apply` YAML format (`relation_order`, `feature_dim`).
+- [codebase-graph-ontology.md](../docs/codebase-graph-ontology.md) — the `codebase_*` collections + structural edges.
 - HADES CLI skill (`~/.claude/skills/hades/`) — the command mechanics this method drives.

@@ -781,11 +781,18 @@ mod helpers {
         let analysis = analyze(src).unwrap();
         let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"existing"), "missing module fn: {names:?}");
-        assert!(names.contains(&"deep"), "missing nested-module fn: {names:?}");
+        assert!(
+            names.contains(&"deep"),
+            "missing nested-module fn: {names:?}"
+        );
 
         // Qualified names carry the full module path, so sibling-module
         // collisions cannot collapse onto one `_key`.
-        let existing = analysis.symbols.iter().find(|s| s.name == "existing").unwrap();
+        let existing = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "existing")
+            .unwrap();
         assert_eq!(existing.qualified_name(), "helpers::existing");
         let deep = analysis.symbols.iter().find(|s| s.name == "deep").unwrap();
         assert_eq!(deep.qualified_name(), "helpers::inner::deep");
@@ -803,7 +810,42 @@ mod helpers {
         let after = "mod m { pub fn a() {} pub fn b() {} }";
         let h1 = analyze(before).unwrap().symbol_hash;
         let h2 = analyze(after).unwrap().symbol_hash;
-        assert_ne!(h1, h2, "digest must move when a module-inner symbol is added");
+        assert_ne!(
+            h1, h2,
+            "digest must move when a module-inner symbol is added"
+        );
+    }
+
+    #[test]
+    fn test_sibling_module_impl_methods_get_distinct_keys() {
+        // #148: `impl Cfg { fn build }` in two sibling inline modules collapse
+        // to the same qualified name (`Cfg::build` -- the module prefix is
+        // dropped for impl methods to match rust-analyzer). Their distinct
+        // definition lines must yield distinct symbol keys, so neither
+        // overwrites the other on insert.
+        use crate::db::keys::{file_key, symbol_key};
+        let src = "mod a {\n    pub struct Cfg;\n    impl Cfg { pub fn build() {} }\n}\nmod b {\n    pub struct Cfg;\n    impl Cfg { pub fn build() {} }\n}\n";
+        let analysis = analyze(src).unwrap();
+        let builds: Vec<&Symbol> = analysis
+            .symbols
+            .iter()
+            .filter(|s| s.name == "build")
+            .collect();
+        assert_eq!(builds.len(), 2, "expected two `build` methods");
+        assert_eq!(builds[0].qualified_name(), "Cfg::build");
+        assert_eq!(builds[1].qualified_name(), "Cfg::build");
+        assert_ne!(
+            builds[0].start_line, builds[1].start_line,
+            "the two methods must sit at different lines"
+        );
+
+        let fk = file_key("src/lib.rs");
+        let k0 = symbol_key(&fk, &builds[0].qualified_name(), builds[0].start_line);
+        let k1 = symbol_key(&fk, &builds[1].qualified_name(), builds[1].start_line);
+        assert_ne!(
+            k0, k1,
+            "sibling-module impl methods must get distinct keys (was: collision)"
+        );
     }
 
     #[test]

@@ -760,7 +760,7 @@ async fn ingest_file(
                         .copied()
                         .unwrap_or(source.len());
                     if c.start_char < sym_end && sym_start < c.end_char {
-                        Some(keys::symbol_key(&fkey, &s.qualified_name()))
+                        Some(keys::symbol_key(&fkey, &s.qualified_name(), s.start_line))
                     } else {
                         None
                     }
@@ -788,7 +788,7 @@ async fn ingest_file(
         .filter(|s| s.kind.is_primitive())
         .map(|s| {
             let qname = s.qualified_name();
-            let skey = keys::symbol_key(&fkey, &qname);
+            let skey = keys::symbol_key(&fkey, &qname, s.start_line);
             json!({
                 "_key": skey,
                 "file_key": fkey,
@@ -810,7 +810,7 @@ async fn ingest_file(
         .iter()
         .filter(|s| s.kind.is_primitive())
         .map(|s| {
-            let skey = keys::symbol_key(&fkey, &s.qualified_name());
+            let skey = keys::symbol_key(&fkey, &s.qualified_name(), s.start_line);
             let edge_key = keys::edge_key(&fkey, "defines", &skey);
             json!({
                 "_key": edge_key,
@@ -1537,7 +1537,7 @@ fn build_python_symbol_index(
             // Index is keyed by the bare name (call sites use bare names), but
             // the value must be the qualified-name-derived key so edges target
             // the actual stored vertex (#113).
-            let skey = keys::symbol_key(&fkey, &sym.qualified_name());
+            let skey = keys::symbol_key(&fkey, &sym.qualified_name(), sym.start_line);
             index
                 .entry(sym.name.clone())
                 .or_default()

@@ -157,7 +157,7 @@ impl RustEdgeResolver {
                 };
 
                 let fk = keys::file_key(rel_path);
-                let sk = keys::symbol_key(&fk, &sym.qualified_name);
+                let sk = keys::symbol_key(&fk, &sym.qualified_name, sym.start_line as usize + 1);
 
                 documents.push(SymbolDocument {
                     key: sk,
@@ -200,7 +200,7 @@ impl RustEdgeResolver {
             let fk = keys::file_key(rel_path);
 
             for sym in &extraction.symbols {
-                let sk = keys::symbol_key(&fk, &sym.qualified_name);
+                let sk = keys::symbol_key(&fk, &sym.qualified_name, sym.start_line as usize + 1);
 
                 // 1. defines: file → symbol
                 let from = format!("codebase_files/{fk}");
@@ -278,7 +278,7 @@ impl RustEdgeResolver {
                 if sym.qualified_name.is_empty() {
                     continue;
                 }
-                let sk = keys::symbol_key(&fk, &sym.qualified_name);
+                let sk = keys::symbol_key(&fk, &sym.qualified_name, sym.start_line as usize + 1);
                 let entry = (rel_path.clone(), sk);
 
                 self.symbol_index

@@ -46,25 +46,40 @@ pub fn analyze(source: &str, file_path: &str) -> Result<FileAnalysis, super::Cod
     })
 }
 
-fn is_cuda(file_path: &str, source: &str) -> bool {
-    file_path.ends_with(".cu")
+enum Mode {
+    Cuda,
+    C,
+    Cpp,
+}
+
+fn detect_mode(file_path: &str, source: &str) -> Mode {
+    if file_path.ends_with(".cu")
         || file_path.ends_with(".cuh")
         || source.contains("__global__")
         || source.contains("__device__")
+        || source.contains("__host__")
+    {
+        Mode::Cuda
+    } else if file_path.ends_with(".c") {
+        // Plain C, not C++ -- C-only constructs would misparse under -x c++.
+        Mode::C
+    } else {
+        Mode::Cpp
+    }
 }
 
-fn parse_args(cuda: bool) -> Vec<&'static str> {
-    if cuda {
-        vec![
+fn parse_args(mode: &Mode) -> Vec<&'static str> {
+    match mode {
+        Mode::Cuda => vec![
             "-x",
             "cuda",
             "--cuda-host-only",
             "--cuda-path=/usr/local/cuda",
             "--no-cuda-version-check",
             "-std=c++17",
-        ]
-    } else {
-        vec!["-x", "c++", "-std=c++17"]
+        ],
+        Mode::C => vec!["-x", "c", "-std=c17"],
+        Mode::Cpp => vec!["-x", "c++", "-std=c++17"],
     }
 }
 
@@ -75,7 +90,7 @@ fn extract(source: &str, file_path: &str) -> Result<(Vec<Symbol>, Vec<TopLevelDe
 
     let clang = Clang::new()?;
     let index = Index::new(&clang, false, false);
-    let args = parse_args(is_cuda(file_path, source));
+    let args = parse_args(&detect_mode(file_path, source));
 
     let tu = index
         .parser(file_path)
@@ -128,6 +143,7 @@ fn collect(
                 && matches!(
                     kind,
                     EntityKind::FunctionDecl
+                        | EntityKind::Method
                         | EntityKind::StructDecl
                         | EntityKind::ClassDecl
                         | EntityKind::EnumDecl
@@ -177,14 +193,16 @@ fn func_symbol(entity: &Entity, lines: &[&str]) -> Option<Symbol> {
 
     // CUDA execution-space qualifiers, read from the declaration line (libclang
     // anchors a FunctionDecl range at the qualifier, e.g. `__global__ void k`).
+    // Recorded independently: `__host__ __device__` functions carry both.
     if let Some(line) = lines.get(start_line.saturating_sub(1)) {
         if line.contains("__global__") {
-            meta.insert("cuda".into(), json!("global"));
             meta.insert("is_kernel".into(), json!(true));
-        } else if line.contains("__device__") {
-            meta.insert("cuda".into(), json!("device"));
-        } else if line.contains("__host__") {
-            meta.insert("cuda".into(), json!("host"));
+        }
+        if line.contains("__device__") {
+            meta.insert("is_device".into(), json!(true));
+        }
+        if line.contains("__host__") {
+            meta.insert("is_host".into(), json!(true));
         }
     }
 
@@ -298,5 +316,38 @@ struct Cfg { int a; void reset(); };\n";
 
         // Digest is stable and non-empty.
         assert!(!analysis.symbol_hash.is_empty());
+    }
+
+    #[test]
+    fn analyze_c_file_parses_as_c() {
+        let analysis = analyze("int add(int a, int b) { return a + b; }\n", "math.c").unwrap();
+        if analysis.symbols.is_empty() {
+            eprintln!("SKIP: libclang unavailable");
+            return;
+        }
+        assert!(
+            analysis.symbols.iter().any(|s| s.name == "add"),
+            "C function should be extracted: {:?}",
+            analysis.symbols
+        );
+    }
+
+    #[test]
+    fn out_of_line_method_gets_top_level_def() {
+        let src = "struct C { void reset(); };\nvoid C::reset() {}\n";
+        let analysis = analyze(src, "c.cpp").unwrap();
+        if analysis.symbols.is_empty() {
+            eprintln!("SKIP: libclang unavailable");
+            return;
+        }
+        // The out-of-line definition (line 2) must produce a chunk boundary.
+        assert!(
+            analysis
+                .top_level_defs
+                .iter()
+                .any(|d| d.name == "reset" && d.start_line == 2),
+            "out-of-line method should be a top-level def: {:?}",
+            analysis.top_level_defs
+        );
     }
 }

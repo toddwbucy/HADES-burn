@@ -15,14 +15,15 @@ fn collect_functions(entity: clang::Entity, out: &mut Vec<(String, u32)>) {
             .get_location()
             .map(|l| l.is_in_main_file())
             .unwrap_or(false);
-        if in_main && child.get_kind() == clang::EntityKind::FunctionDecl {
-            if let Some(name) = child.get_name() {
-                let line = child
-                    .get_location()
-                    .map(|l| l.get_file_location().line)
-                    .unwrap_or(0);
-                out.push((name, line));
-            }
+        if in_main
+            && child.get_kind() == clang::EntityKind::FunctionDecl
+            && let Some(name) = child.get_name()
+        {
+            let line = child
+                .get_location()
+                .map(|l| l.get_file_location().line)
+                .unwrap_or(0);
+            out.push((name, line));
         }
         collect_functions(child, out);
     }

@@ -648,25 +648,28 @@ async fn ingest_file(
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
 
     // Analyze.
-    let mut analysis = match code::analyze_with_language(&source, lang, rel_path) {
-        Ok(a) => a,
-        Err(CodeAnalysisError::ParseError(msg)) => {
-            warn!(path = rel_path, error = %msg, "parse error, skipping");
-            return Ok(FileResult {
-                path: rel_path.to_string(),
-                success: true,
-                language: Some(lang.name().to_string()),
-                num_symbols: None,
-                num_chunks: None,
-                num_embeddings: None,
-                embedding_error: None,
-                skipped: Some(true),
-                error: Some(format!("parse error: {msg}")),
-                duration_ms: 0,
-            });
-        }
-        Err(e) => return Err(e.into()),
-    };
+    // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
+    // consistently regardless of cwd. Keys and logging still use rel_path.
+    let mut analysis =
+        match code::analyze_with_language(&source, lang, &file_path.to_string_lossy()) {
+            Ok(a) => a,
+            Err(CodeAnalysisError::ParseError(msg)) => {
+                warn!(path = rel_path, error = %msg, "parse error, skipping");
+                return Ok(FileResult {
+                    path: rel_path.to_string(),
+                    success: true,
+                    language: Some(lang.name().to_string()),
+                    num_symbols: None,
+                    num_chunks: None,
+                    num_embeddings: None,
+                    embedding_error: None,
+                    skipped: Some(true),
+                    error: Some(format!("parse error: {msg}")),
+                    duration_ms: 0,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
 
     // Check for incremental skip via symbol_hash.
     // Only skip if the code is unchanged AND embeddings aren't needed (either

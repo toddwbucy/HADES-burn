@@ -8,7 +8,9 @@
 
 The design premise under investigation is that context engineering — the structured construction of what an agent retrieves and reads on each turn — is more often the binding constraint on sustained agent coherence than raw model capability. HADES-Burn pursues this through an ontology-grounded schema and a closed operation vocabulary that together produce traceable, structured retrieval: the kind of context discipline that on-premises agent workflows require to remain coherent across long-horizon tasks.
 
-The context-engineering methodology and schema this rests on — how a foundation document and a codebase become an axiom-gated ("IS / IS-NOT") knowledge graph in which concepts, smells, and code must *earn* their place by tracing to ratified axioms, and in which non-connection becomes a queryable signal — is formalized in **[docs/graph-methodology.md](docs/graph-methodology.md)**.
+The context-engineering methodology and schema this rests on — how a foundation document and a codebase become an axiom-gated ("IS / IS-NOT") knowledge graph in which concepts, smells, and code must *earn* their place by tracing to ratified axioms, and in which non-connection becomes a queryable signal — is formalized in **[Bastion/graph-methodology.md](Bastion/graph-methodology.md)**.
+
+HADES is one *species* of a more general method — a **bastion**: a project's canon stood up as a context graph and wired into the code and release pipeline as a governance layer, on any graph-capable backend. The backend-agnostic founding document is **[Bastion/foundation/the-bastion.md](Bastion/foundation/the-bastion.md)** (the architecture), serving the philosophical foundation in **[Bastion/foundation/bastion-of-context.md](Bastion/foundation/bastion-of-context.md)** (the *why*). `graph-methodology.md` is the ArangoDB reference implementation of that method.
 
 For the research questions HADES-Burn was built to investigate, see [RESEARCH_GOALS.md](RESEARCH_GOALS.md).
 
@@ -332,6 +334,10 @@ The project is open to collaboration from academic and industry researchers work
 
 | Document | Description |
 | --- | --- |
+| [Bastion/foundation/bastion-of-context.md](Bastion/foundation/bastion-of-context.md) | Foundation Layer 1 — the philosophical *why*: cathedral / bazaar / bastion, the twelve load-bearing principles |
+| [Bastion/foundation/the-bastion.md](Bastion/foundation/the-bastion.md) | Foundation Layer 2 — the backend-agnostic architecture: invariants, the two operating modes, the construction layer (wall / scaffolding / delta ledger), code-against-documentation conformance, the backend contract, the de-ratification rite |
+| [Bastion/foundation/bastion-playbook.md](Bastion/foundation/bastion-playbook.md) | The operational playbook — how to stand up or retrofit a bastion in a Claude Code session, phase by phase, greenfield and brownfield |
+| [Bastion/graph-methodology.md](Bastion/graph-methodology.md) | Foundation Layer 3 — the ArangoDB/HADES reference implementation of the bastion method |
 | [RESEARCH_GOALS.md](RESEARCH_GOALS.md) | Research questions, context-management framing, measurement points |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and convention for adding entries |
 | [docs/specs/workstation-specific-tests.md](docs/specs/workstation-specific-tests.md) | Convention for integration tests that depend on workstation-specific resources |

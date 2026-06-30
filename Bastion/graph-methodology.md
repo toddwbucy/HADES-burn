@@ -4,6 +4,14 @@
 > foundation document and a codebase. This is the **context-engineering
 > methodology** behind graphs like NestedLearning (`NL`) — the schema and edge
 > structure are *the engineering*, not an afterthought.
+>
+> **Layer 3 of the foundation family** — the ArangoDB/HADES *reference
+> implementation* (the *how on this backend*). It realizes the backend-agnostic
+> architecture in [`foundation/the-bastion.md`](foundation/the-bastion.md)
+> (Layer 2), which serves the principles in
+> [`foundation/bastion-of-context.md`](foundation/bastion-of-context.md)
+> (Layer 1). Everything below is specific to ArangoDB; the substrate-neutral
+> method, the backend contract, and the de-ratification rite live one layer up.
 
 The graph is built to behave as an **immune system**: a concept, a smell, or a
 file *earns* its place only by tracing — through ratified edges — back to an
@@ -165,7 +173,7 @@ after the same bug recurs three times in 48 hours.
 ### Layer 4 — Code ingested and bridged to the concept graph
 
 Ingest the codebase the standard way (`hades codebase ingest` → `codebase_*`
-collections + structural edges; see [codebase-graph-ontology.md](codebase-graph-ontology.md)).
+collections + structural edges; see [codebase-graph-ontology.md](../docs/codebase-graph-ontology.md)).
 Then add **bridge edges** from code to the concept graph:
 
 | Bridge edge | Direction | `rel` | Evidence |
@@ -201,7 +209,7 @@ standing query. Non-connection is the signal.
 
 ## `relation_order` — what trains
 
-For structural embeddings (see [declarative-schema.md](declarative-schema.md)),
+For structural embeddings (see [declarative-schema.md](../docs/declarative-schema.md)),
 `relation_order` scopes which relations the model trains on. Include the
 **semantic + structural** relations (concept edges, gate edges, bridge edges, and
 the `codebase_*` edges). **Exclude** process / project-management relations — a
@@ -225,16 +233,56 @@ continuously-growing graph).
 4. **Derive the smells** from the axioms (Layer 3).
 5. **`schema apply`** a YAML declaring the collections, edge definitions, the
    named graph, `relation_order`, `feature_dim`, and `model_type`
-   (see [declarative-schema.md](declarative-schema.md)).
+   (see [declarative-schema.md](../docs/declarative-schema.md)).
 6. **Ingest the codebase last** and add the bridge edges (Layer 4).
 7. **Run the suspect-set queries** (Layer 5); optionally train structural
-   embeddings (`graph-embed train`; `model_type` picks RGCN or inductive
-   GraphSAGE) once every trained node carries a feature.
+   embeddings (`graph-embed train --gpu N`, the device declaration is
+   mandatory; `model_type` picks RGCN or inductive GraphSAGE) once every
+   trained node carries a feature.
 
 > Per-graph *design* (the specific concept families, principles, smells for one
 > document) belongs in that graph's **companion document**, not in code or this
 > spec. This file is the invariant method; the companion document is one
 > application of it.
+
+---
+
+## Both sides of the keyboard — the method as context management
+
+The graph is usually described as **context engineering**: it constrains what a
+model may generate, rejecting concepts outside the ontology. But the same
+machinery is **context management** for the people and agents making the
+decisions — and over a project's life that is the heavier half. Three things
+follow.
+
+1. **Decisions are artifacts.** A choice — which backend, which dependency, which
+   version, which license — has its own footprint in the world and can drift, so
+   by [the ratification rule](#the-ratification-rule--the-unit-of-proof-is-the-artifact)
+   it must prove on its own. It gets a **decision record** (the upstream of the
+   `Issue → PRD → Spec → code` chain), traces to the same axioms/requirements,
+   and earns ratification — or the verdict **deferred / pending**, which is a
+   *recorded state*, not a dead end. A parked PRD with its provenance intact is
+   context preserved, not work lost.
+
+2. **Non-connection surfaces holes in decisions, not only in code.** The
+   suspect-set principle generalises off the code graph: when a candidate cannot
+   trace a *compliant* connection to the ratified requirements — no backend that
+   satisfies the contract on the available medium, no license that permits the
+   intended use at the intended scale — that **absence is the architectural
+   hole**, surfaced before it is built. The IS / IS-NOT gate runs on choices the
+   same way it runs on concepts.
+
+3. **The method is self-applying.** Using it to build a thing surfaces the holes
+   in that thing's architecture, and the act of surfacing them produces the
+   artifacts — decision records, specs, the divergence register, durable memory —
+   that keep those holes closed. The living divergence register is a standing
+   query for **humans**, not just for the trainer: it is where a project offloads
+   the working memory it would otherwise re-derive.
+
+So the payoff is symmetric. **Context engineering** keeps the model inside the
+ontology; **context management** keeps the humans and agents from re-deriving
+what was already decided — both reading the same artifacts, both trusting
+non-connection as the signal.
 
 ---
 
@@ -250,6 +298,6 @@ bridges (89 / 151 / 12), and the `nl_code_paper` named graph.
 
 ## See also
 
-- [declarative-schema.md](declarative-schema.md) — the `schema apply` YAML format (`relation_order`, `feature_dim`).
-- [codebase-graph-ontology.md](codebase-graph-ontology.md) — the `codebase_*` collections + structural edges.
+- [declarative-schema.md](../docs/declarative-schema.md) — the `schema apply` YAML format (`relation_order`, `feature_dim`).
+- [codebase-graph-ontology.md](../docs/codebase-graph-ontology.md) — the `codebase_*` collections + structural edges.
 - HADES CLI skill (`~/.claude/skills/hades/`) — the command mechanics this method drives.

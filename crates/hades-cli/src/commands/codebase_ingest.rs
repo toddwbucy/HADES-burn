@@ -648,7 +648,7 @@ async fn ingest_file(
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
 
     // Analyze.
-    let mut analysis = match code::analyze_with_language(&source, lang) {
+    let mut analysis = match code::analyze_with_language(&source, lang, rel_path) {
         Ok(a) => a,
         Err(CodeAnalysisError::ParseError(msg)) => {
             warn!(path = rel_path, error = %msg, "parse error, skipping");

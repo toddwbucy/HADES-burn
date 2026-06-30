@@ -74,7 +74,10 @@ fn clang_extracts_cuda_kernel_symbols() {
         eprintln!("  {line:>4}  {n}");
     }
 
-    assert!(!funcs.is_empty(), "no functions extracted from the CUDA file");
+    assert!(
+        !funcs.is_empty(),
+        "no functions extracted from the CUDA file"
+    );
     assert!(
         names.contains(&"sigmoid_kernel"),
         "missing __global__ kernel `sigmoid_kernel`: {names:?}"

@@ -274,7 +274,14 @@ fn main() -> anyhow::Result<()> {
             batch,
             unparsed_ext,
             force,
-        }) => run_codebase_ingest(&config, path, language.as_deref(), batch, &unparsed_ext, force),
+        }) => run_codebase_ingest(
+            &config,
+            path,
+            language.as_deref(),
+            batch,
+            &unparsed_ext,
+            force,
+        ),
         Commands::Codebase(CodebaseCmd::Update { path }) => {
             run_codebase_ingest(&config, path, None, false, &[], false)
         }

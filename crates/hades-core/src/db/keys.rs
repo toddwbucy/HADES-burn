@@ -111,7 +111,9 @@ pub fn symbol_key(file_key: &str, qualified_name: &str, line: usize) -> String {
     let mut hasher = Sha256::new();
     hasher.update(qualified_name.as_bytes());
     hasher.update(b"\n");
-    hasher.update(line.to_le_bytes());
+    // Fixed-width u64 encoding so keys are identical across architectures
+    // (usize::to_le_bytes() is 8 bytes on 64-bit, 4 on 32-bit).
+    hasher.update((line as u64).to_le_bytes());
     let digest = hasher.finalize();
     let hash8 = hex8(&digest);
 

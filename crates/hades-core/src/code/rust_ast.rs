@@ -781,11 +781,18 @@ mod helpers {
         let analysis = analyze(src).unwrap();
         let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"existing"), "missing module fn: {names:?}");
-        assert!(names.contains(&"deep"), "missing nested-module fn: {names:?}");
+        assert!(
+            names.contains(&"deep"),
+            "missing nested-module fn: {names:?}"
+        );
 
         // Qualified names carry the full module path, so sibling-module
         // collisions cannot collapse onto one `_key`.
-        let existing = analysis.symbols.iter().find(|s| s.name == "existing").unwrap();
+        let existing = analysis
+            .symbols
+            .iter()
+            .find(|s| s.name == "existing")
+            .unwrap();
         assert_eq!(existing.qualified_name(), "helpers::existing");
         let deep = analysis.symbols.iter().find(|s| s.name == "deep").unwrap();
         assert_eq!(deep.qualified_name(), "helpers::inner::deep");
@@ -803,7 +810,10 @@ mod helpers {
         let after = "mod m { pub fn a() {} pub fn b() {} }";
         let h1 = analyze(before).unwrap().symbol_hash;
         let h2 = analyze(after).unwrap().symbol_hash;
-        assert_ne!(h1, h2, "digest must move when a module-inner symbol is added");
+        assert_ne!(
+            h1, h2,
+            "digest must move when a module-inner symbol is added"
+        );
     }
 
     #[test]

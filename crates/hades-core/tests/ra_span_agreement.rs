@@ -94,7 +94,8 @@ fn ra_sel_lines(symbols: &[Value]) -> BTreeMap<String, BTreeSet<u64>> {
     fn walk(node: &Value, map: &mut BTreeMap<String, BTreeSet<u64>>) {
         if let (Some(name), Some(line)) = (
             node.get("name").and_then(Value::as_str),
-            node.pointer("/selectionRange/start/line").and_then(Value::as_u64),
+            node.pointer("/selectionRange/start/line")
+                .and_then(Value::as_u64),
         ) {
             map.entry(name.to_string()).or_default().insert(line);
         }
@@ -139,10 +140,22 @@ async fn syn_ident_line_agrees_with_ra_selection_range() {
         }
     };
 
-    let symbols = session
-        .document_symbols(Path::new("src/lib.rs"))
-        .await
-        .expect("documentSymbol request");
+    // documentSymbol can briefly return empty while rust-analyzer is still
+    // settling after start. Poll with a short backoff rather than failing on
+    // the first empty result.
+    let mut symbols = Vec::new();
+    for attempt in 0..10 {
+        symbols = session
+            .document_symbols(Path::new("src/lib.rs"))
+            .await
+            .expect("documentSymbol request");
+        if !symbols.is_empty() {
+            break;
+        }
+        if attempt < 9 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
     let _ = session.shutdown().await;
 
     let syn_map = syn_ident_lines(FIXTURE);
@@ -200,7 +213,10 @@ async fn syn_ident_line_agrees_with_ra_selection_range() {
             item_compared += 1;
         }
     }
-    assert!(item_compared >= 5, "compared only {item_compared} item spans");
+    assert!(
+        item_compared >= 5,
+        "compared only {item_compared} item spans"
+    );
     println!("OK: syn item-span line == RA range line + 1 for {item_compared} symbols");
 }
 

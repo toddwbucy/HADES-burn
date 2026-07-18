@@ -624,6 +624,7 @@ fn compute_metrics(source: &str) -> CodeMetrics {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
 
     const CUDA: &str = "__global__ void my_kernel(float* x, int n) {}\n\
 extern \"C\" void launch(float* x, int n) { my_kernel<<<1, 1>>>(x, n); }\n\
@@ -640,6 +641,10 @@ namespace engine { struct Cfg { int a; void reset(); }; }\n";
 
     #[test]
     fn analyze_cuda_extracts_kernel_call_method_and_type() {
+        if !Path::new("/usr/local/cuda").is_dir() {
+            eprintln!("SKIP: default CUDA toolkit unavailable at /usr/local/cuda");
+            return;
+        }
         let analysis = analyze(CUDA, "test.cu", None).unwrap();
         if !available(&analysis) {
             return;

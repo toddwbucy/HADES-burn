@@ -44,6 +44,14 @@ impl Symbol {
     /// Mirrors the qualified names produced by the rust-analyzer enrichment
     /// path, which has always keyed correctly.
     pub fn qualified_name(&self) -> String {
+        // Compiler-grade analyzers can provide the authoritative qualified
+        // name directly (namespaces, classes, overload owners, templates).
+        // Prefer it over reconstructing language-specific ownership here.
+        if let Some(qualified) = self.metadata.get("qualified_name").and_then(|v| v.as_str())
+            && !qualified.is_empty()
+        {
+            return qualified.to_string();
+        }
         if let Some(ctx) = self.metadata.get("impl_context").and_then(|v| v.as_str())
             && !ctx.is_empty()
         {

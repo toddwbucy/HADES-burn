@@ -93,7 +93,7 @@ Five primitives. Every vertex in the codebase graph is exactly one of these. Eve
 | Primitive | Stored in | What it represents |
 |-----------|-----------|-------------------|
 | `file` | `codebase_files` | A source file — the top-level container |
-| `module` | `codebase_symbols` | A namespace container (Rust `mod`, Python module/package) |
+| `module` | `codebase_symbols` | A namespace container (Rust `mod`, Python module/package, C++ namespace) |
 | `type` | `codebase_symbols` | A type definition (struct, enum, trait, class, type alias) |
 | `callable` | `codebase_symbols` | Something that can be invoked (function, method, macro) |
 | `value` | `codebase_symbols` | A named binding (constant, variable, static) |
@@ -111,17 +111,17 @@ The `lang_kind` field on symbol documents preserves the original AST classificat
 
 | `lang_kind` | Primitive (`kind`) | Languages |
 |-------------|-------------------|-----------|
-| `function` | `callable` | Rust, Python |
+| `function` | `callable` | Rust, Python, C/C++/CUDA |
 | `method` | `callable` | Python |
 | `macro` | `callable` | Rust |
 | `struct` | `type` | Rust |
-| `enum` | `type` | Rust |
+| `enum` | `type` | Rust, C/C++/CUDA |
 | `trait` | `type` | Rust |
-| `class` | `type` | Python |
-| `type_alias` | `type` | Rust |
+| `class` | `type` | Python, C++/CUDA |
+| `type_alias` | `type` | Rust, C/C++/CUDA |
 | `constant` | `value` | Rust, Python |
 | `variable` | `value` | Python |
-| `module` | `module` | Rust, Python |
+| `module` | `module` | Rust, Python, C++/CUDA |
 
 Chunking happens at `callable` and `type` boundaries universally — not "function in Rust" or "def in Python." The chunker sees primitives, not language artifacts.
 
@@ -192,7 +192,7 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 | `start_line` | integer | yes | all | 1-indexed start line |
 | `end_line` | integer | yes | all | 1-indexed end line (inclusive) |
 | `visibility` | string | no | rust-analyzer, syn | `"pub"`, `"pub(crate)"`, `"pub(super)"`, `"private"` |
-| `signature` | string | no | rust-analyzer | Full type signature (e.g., `fn new(config: &Config) -> Self`) |
+| `signature` | string | no | rust-analyzer, libclang | Full type signature (e.g., `fn new(config: &Config) -> Self`) |
 | `parent_symbol` | string | no | rust-analyzer | Enclosing symbol's qualified name (e.g., `Config` for `Config::new`) |
 | `impl_trait` | string | no | rust-analyzer | Trait being implemented (e.g., `Display` for `impl Display for Config`) |
 | `is_pyo3` | boolean | no | rust-analyzer | `true` if exposed to Python via `#[pyfunction]`/`#[pymethods]` |
@@ -205,7 +205,8 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 | `docstring` | string | no | python | First line of docstring |
 | `bases` | string[] | no | python | Base classes (e.g., `["BaseModel", "ABC"]`) |
 | `parameters` | string[] | no | python | Function parameter names |
-| `source` | string | no | all | Extraction provenance: `"syn"`, `"rust-analyzer"`, `"python-ast"` |
+| `metadata` | object | no | all | Analyzer-specific data. libclang records `usr`, `signature`, template flags, qualified name, analyzer, and analysis tier here. |
+| `source` | string | no | all | Extraction provenance: `"syn"`, `"rust-analyzer"`, `"python-ast"`, `"libclang"` |
 | `analyzed_at` | string | no | all | ISO 8601 timestamp of extraction |
 
 #### Key Generation

@@ -20,11 +20,18 @@ pub enum CodebaseCmd {
         batch: bool,
 
         /// Comma-separated extensions to embed without a parser (e.g.
-        /// `cu,cuh`). Files with these extensions are chunked by size and
+        /// `wgsl,vert`). Files with these extensions are chunked by size and
         /// embedded as features — no symbol/edge extraction. Their file nodes
         /// are merged (existing fields preserved), not overwritten.
         #[arg(long = "unparsed-ext", value_delimiter = ',')]
         unparsed_ext: Vec<String>,
+
+        /// Path to `compile_commands.json` (or its containing directory) for
+        /// compiler-grade C/C++/CUDA include, define, standard, and target
+        /// configuration. When omitted, source ancestors and `build/` are
+        /// searched automatically.
+        #[arg(long = "compile-commands")]
+        compile_commands: Option<PathBuf>,
 
         /// Re-ingest each file even if its change-detection digest is
         /// unchanged. This rebuilds the node's symbols, chunks, and embeddings

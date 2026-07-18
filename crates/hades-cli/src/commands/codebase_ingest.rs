@@ -26,8 +26,10 @@ use hades_core::chunking::ChunkingStrategy;
 use hades_core::code::rust_analyzer::{
     EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
 };
-use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
-use hades_core::code::{python_calls, rust_imports};
+use hades_core::code::{
+    self, AnalysisOptions, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind,
+};
+use hades_core::code::{cpp_edges, python_calls, rust_imports};
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
@@ -99,6 +101,8 @@ struct ImportContext {
     rust_imports: HashMap<String, Vec<String>>,
     /// Rust: rel_path → all symbols (for building the resolution index).
     rust_file_symbols: HashMap<String, Vec<Symbol>>,
+    /// C/C++/CUDA: rel_path → semantic symbols and resolved call metadata.
+    cpp_file_symbols: HashMap<String, Vec<Symbol>>,
 }
 
 /// Run the codebase ingest command.
@@ -109,6 +113,7 @@ pub async fn run(
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    compile_commands: Option<&Path>,
     force: bool,
 ) -> Result<()> {
     let cmd_start = Instant::now();
@@ -132,7 +137,10 @@ pub async fn run(
             let lang = match l.to_lowercase().as_str() {
                 "python" | "py" => Language::Python,
                 "rust" | "rs" => Language::Rust,
-                other => bail!("unsupported language: {other}. Supported: python, rust"),
+                "c" | "cpp" | "c++" | "cuda" | "cu" => Language::Cpp,
+                other => {
+                    bail!("unsupported language: {other}. Supported: python, rust, c/c++/cuda")
+                }
             };
             Some(lang)
         }
@@ -187,6 +195,7 @@ pub async fn run(
         python_file_symbols: HashMap::new(),
         rust_imports: HashMap::new(),
         rust_file_symbols: HashMap::new(),
+        cpp_file_symbols: HashMap::new(),
     };
     // Collect absolute paths for Rust files — used for rust-analyzer post-loop phase.
     let mut rust_abs_paths: Vec<PathBuf> = Vec::new();
@@ -246,6 +255,7 @@ pub async fn run(
                 &rel_path,
                 lang_override,
                 &mut imports,
+                compile_commands,
                 force,
             )
             .await
@@ -312,6 +322,22 @@ pub async fn run(
             crud::insert_documents(&db, CODEBASE.calls_edges, &py_call_edges, true).await
         {
             warn!(error = %e, "failed to store Python call edges");
+        }
+    }
+
+    // Resolve compiler-grade C/C++/CUDA calls, including CUDA kernel launches.
+    // libclang records target USRs and definition spans during each file parse;
+    // this batch phase maps them onto HADES's cross-file span keys.
+    let cpp_call_edges = cpp_edges::resolve_cpp_calls(&base, &imports.cpp_file_symbols);
+    if !cpp_call_edges.is_empty() {
+        info!(
+            edge_count = cpp_call_edges.len(),
+            "resolved C/C++/CUDA call edges"
+        );
+        if let Err(e) =
+            crud::insert_documents(&db, CODEBASE.calls_edges, &cpp_call_edges, true).await
+        {
+            warn!(error = %e, "failed to store C/C++/CUDA call edges");
         }
     }
 
@@ -399,6 +425,7 @@ pub async fn run(
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
         "python_call_edges": py_call_edges.len(),
+        "cpp_call_edges": cpp_call_edges.len(),
         "rust_analyzer": {
             "symbols": ra_stats.symbols,
             "edges": ra_stats.edges,
@@ -636,6 +663,7 @@ async fn ingest_file(
     rel_path: &str,
     lang_override: Option<Language>,
     imports: &mut ImportContext,
+    compile_commands: Option<&Path>,
     force: bool,
 ) -> Result<FileResult> {
     // Read source.
@@ -650,8 +678,11 @@ async fn ingest_file(
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
     // consistently regardless of cwd. Keys and logging still use rel_path.
+    let options = AnalysisOptions {
+        compilation_database: compile_commands.map(Path::to_path_buf),
+    };
     let mut analysis =
-        match code::analyze_with_language(&source, lang, &file_path.to_string_lossy()) {
+        match code::analyze_with_options(&source, lang, &file_path.to_string_lossy(), &options) {
             Ok(a) => a,
             Err(CodeAnalysisError::ParseError(msg)) => {
                 warn!(path = rel_path, error = %msg, "parse error, skipping");
@@ -940,6 +971,11 @@ async fn ingest_file(
         Language::Python => {
             imports
                 .python_file_symbols
+                .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
+        }
+        Language::Cpp => {
+            imports
+                .cpp_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
         _ => {}
@@ -1743,17 +1779,17 @@ mod tests {
     #[test]
     fn test_discover_files_unparsed_ext() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("kernel.cu"), "__global__ void k(){}\n").unwrap();
-        fs::write(dir.path().join("header.cuh"), "#pragma once\n").unwrap();
+        fs::write(dir.path().join("shader.wgsl"), "fn main() {}\n").unwrap();
+        fs::write(dir.path().join("shader.vert"), "void main() {}\n").unwrap();
         fs::write(dir.path().join("app.py"), "x = 1\n").unwrap();
         fs::write(dir.path().join("readme.md"), "# hi\n").unwrap();
 
-        // Without the allowlist: only the .py is picked up (.cu/.cuh skipped).
+        // Without the allowlist: only the .py is picked up.
         let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1);
 
-        // With cu,cuh allowlisted: .py + .cu + .cuh, still not .md.
-        let allow: HashSet<String> = ["cu", "cuh"].iter().map(|s| s.to_string()).collect();
+        // Explicitly allowlisted extensions are ingested as raw text.
+        let allow: HashSet<String> = ["wgsl", "vert"].iter().map(|s| s.to_string()).collect();
         let files = discover_files(dir.path(), None, &allow).unwrap();
         assert_eq!(files.len(), 3);
     }
@@ -1761,14 +1797,14 @@ mod tests {
     #[test]
     fn test_discover_files_unparsed_single_file() {
         let dir = TempDir::new().unwrap();
-        let cu = dir.path().join("backward.cu");
-        fs::write(&cu, "__global__ void b(){}\n").unwrap();
+        let shader = dir.path().join("backward.wgsl");
+        fs::write(&shader, "fn main() {}\n").unwrap();
 
         // Single unparsed file is rejected without the allowlist...
-        assert!(discover_files(&cu, None, &HashSet::new()).is_err());
+        assert!(discover_files(&shader, None, &HashSet::new()).is_err());
         // ...and accepted with it.
-        let allow: HashSet<String> = ["cu"].iter().map(|s| s.to_string()).collect();
-        let files = discover_files(&cu, None, &allow).unwrap();
+        let allow: HashSet<String> = ["wgsl"].iter().map(|s| s.to_string()).collect();
+        let files = discover_files(&shader, None, &allow).unwrap();
         assert_eq!(files.len(), 1);
     }
 

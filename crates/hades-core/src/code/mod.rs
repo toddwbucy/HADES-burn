@@ -10,8 +10,11 @@
 //! integration can be added alongside these parsers without changing
 //! the public API.
 
+use std::path::PathBuf;
+
 mod chunking;
 mod cpp;
+pub mod cpp_edges;
 mod language;
 mod python;
 pub mod python_calls;
@@ -23,6 +26,15 @@ mod symbols;
 pub use chunking::AstChunking;
 pub use language::Language;
 pub use symbols::{CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef};
+
+/// Optional project context used by analyzers that need build-system data.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisOptions {
+    /// Path to `compile_commands.json` or the directory containing it.
+    /// C/C++/CUDA analysis uses the matching command's include paths,
+    /// defines, language standard, and CUDA target flags.
+    pub compilation_database: Option<PathBuf>,
+}
 
 /// Analyze a source file, extracting symbols, metrics, and structure.
 ///
@@ -45,10 +57,20 @@ pub fn analyze_with_language(
     lang: Language,
     file_path: &str,
 ) -> Result<FileAnalysis, CodeAnalysisError> {
+    analyze_with_options(source, lang, file_path, &AnalysisOptions::default())
+}
+
+/// Analyze source with per-project build context.
+pub fn analyze_with_options(
+    source: &str,
+    lang: Language,
+    file_path: &str,
+    options: &AnalysisOptions,
+) -> Result<FileAnalysis, CodeAnalysisError> {
     match lang {
         Language::Python => python::analyze(source),
         Language::Rust => rust_ast::analyze(source),
-        Language::Cpp => cpp::analyze(source, file_path),
+        Language::Cpp => cpp::analyze(source, file_path, options.compilation_database.as_deref()),
     }
 }
 

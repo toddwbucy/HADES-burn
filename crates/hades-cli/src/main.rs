@@ -193,6 +193,7 @@ fn run_codebase_ingest(
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    compile_commands: Option<&std::path::Path>,
     force: bool,
 ) -> anyhow::Result<()> {
     init_tracing();
@@ -203,6 +204,7 @@ fn run_codebase_ingest(
         language,
         batch,
         unparsed_ext,
+        compile_commands,
         force,
     ));
     match result {
@@ -273,6 +275,7 @@ fn main() -> anyhow::Result<()> {
             language,
             batch,
             unparsed_ext,
+            compile_commands,
             force,
         }) => run_codebase_ingest(
             &config,
@@ -280,10 +283,11 @@ fn main() -> anyhow::Result<()> {
             language.as_deref(),
             batch,
             &unparsed_ext,
+            compile_commands.as_deref(),
             force,
         ),
         Commands::Codebase(CodebaseCmd::Update { path }) => {
-            run_codebase_ingest(&config, path, None, false, &[], false)
+            run_codebase_ingest(&config, path, None, false, &[], None, false)
         }
         Commands::Codebase(CodebaseCmd::Stats) => {
             init_tracing();

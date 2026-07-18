@@ -1,4 +1,5 @@
 pub mod batch;
+pub(crate) mod canonical_json;
 pub mod chunking;
 pub mod code;
 pub mod config;

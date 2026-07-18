@@ -264,6 +264,11 @@ pub fn compute_symbol_hash(symbols: &[Symbol]) -> String {
     hex_encode(&digest)
 }
 
+/// Compute a stable content digest for parser-free incremental ingestion.
+pub fn compute_content_hash(source: &str) -> String {
+    hex_encode(&Sha256::digest(source.as_bytes()))
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -443,5 +448,14 @@ mod tests {
         assert_eq!(SymbolKind::Function.lang_kind(), "function");
         assert_eq!(SymbolKind::Import.lang_kind(), "import");
         assert_eq!(SymbolKind::Impl.lang_kind(), "impl");
+    }
+
+    #[test]
+    fn test_content_hash_tracks_raw_text_changes() {
+        assert_eq!(compute_content_hash("same"), compute_content_hash("same"));
+        assert_ne!(
+            compute_content_hash("before"),
+            compute_content_hash("after")
+        );
     }
 }

@@ -351,7 +351,7 @@ fn query_cache_key(aql: &str, bind_vars: Option<&Value>, batch_size: Option<u32>
     let mut hasher = DefaultHasher::new();
     aql.hash(&mut hasher);
     if let Some(vars) = bind_vars {
-        vars.to_string().hash(&mut hasher);
+        crate::canonical_json::to_vec(vars).hash(&mut hasher);
     }
     batch_size.hash(&mut hasher);
     hasher.finish()
@@ -389,6 +389,20 @@ mod tests {
         let k1 = query_cache_key("RETURN @a", Some(&v1), None);
         let k2 = query_cache_key("RETURN @a", Some(&v2), None);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_query_cache_key_ignores_bind_var_insertion_order() {
+        let mut first = serde_json::Map::new();
+        first.insert("a".into(), serde_json::json!(1));
+        first.insert("b".into(), serde_json::json!(2));
+        let mut second = serde_json::Map::new();
+        second.insert("b".into(), serde_json::json!(2));
+        second.insert("a".into(), serde_json::json!(1));
+
+        let k1 = query_cache_key("RETURN @a + @b", Some(&Value::Object(first)), None);
+        let k2 = query_cache_key("RETURN @a + @b", Some(&Value::Object(second)), None);
+        assert_eq!(k1, k2);
     }
 
     #[test]

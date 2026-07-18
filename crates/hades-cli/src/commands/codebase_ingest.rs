@@ -259,6 +259,7 @@ pub async fn run(
                 &rel_path,
                 None,
                 "no registered language or grammar",
+                force,
                 allow_analysis_downgrade,
             )
             .await
@@ -717,8 +718,7 @@ async fn ingest_file(
     let mut analysis =
         match code::analyze_with_fallback(&source, lang, &file_path.to_string_lossy(), &options) {
             AnalyzerOutcome::Success(analysis) => analysis,
-            AnalyzerOutcome::Unavailable { analyzer, reason }
-            | AnalyzerOutcome::Failed { analyzer, reason } => {
+            AnalyzerOutcome::Failed { analyzer, reason } => {
                 warn!(
                     path = rel_path,
                     analyzer,
@@ -733,6 +733,7 @@ async fn ingest_file(
                     rel_path,
                     Some(lang.name()),
                     &reason,
+                    force,
                     allow_analysis_downgrade,
                 )
                 .await;
@@ -1052,11 +1053,12 @@ async fn ingest_file(
                 .python_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
-        Language::Cpp => {
+        Language::Cpp if uses_semantic_cpp_resolver(lang, analysis.analysis_tier) => {
             imports
                 .cpp_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
+        Language::Cpp => {}
         Language::Go => {}
         _ => {}
     }
@@ -1082,6 +1084,10 @@ async fn ingest_file(
         error: None,
         duration_ms: 0,
     })
+}
+
+fn uses_semantic_cpp_resolver(language: Language, tier: AnalysisTier) -> bool {
+    language == Language::Cpp && tier == AnalysisTier::Semantic
 }
 
 // ── Unparsed-language fallback (#121) ────────────────────────────────────
@@ -1118,6 +1124,7 @@ async fn ingest_unparsed_file(
     rel_path: &str,
     language_label: Option<&str>,
     fallback_reason: &str,
+    force: bool,
     allow_analysis_downgrade: bool,
 ) -> Result<FileResult> {
     let source = std::fs::read_to_string(file_path)
@@ -1140,6 +1147,23 @@ async fn ingest_unparsed_file(
             embedding_error: None,
             skipped: Some(true),
             error: Some("higher-fidelity stored analysis preserved".to_string()),
+            duration_ms: 0,
+        });
+    }
+    let content_hash = code::compute_content_hash(&source);
+    if !force && check_unchanged(db, &fkey, &content_hash, embedder.is_some()).await? == Some(true)
+    {
+        debug!(path = rel_path, "unchanged raw text, skipping");
+        return Ok(FileResult {
+            path: rel_path.to_string(),
+            success: true,
+            language: Some(lang_label.to_string()),
+            num_symbols: Some(0),
+            num_chunks: None,
+            num_embeddings: None,
+            embedding_error: None,
+            skipped: Some(true),
+            error: None,
             duration_ms: 0,
         });
     }
@@ -1237,6 +1261,7 @@ async fn ingest_unparsed_file(
         "rel_path": rel_path,
         "kind": "file",
         "language": lang_label,
+        "symbol_hash": content_hash,
         "symbol_count": 0,
         "chunk_count": num_chk,
         "embedding_count": num_embeddings_written,
@@ -1940,6 +1965,22 @@ mod tests {
             Some(AnalysisTier::Structural),
             AnalysisTier::Semantic,
             false
+        ));
+    }
+
+    #[test]
+    fn test_only_semantic_cpp_uses_libclang_edge_resolver() {
+        assert!(uses_semantic_cpp_resolver(
+            Language::Cpp,
+            AnalysisTier::Semantic
+        ));
+        assert!(!uses_semantic_cpp_resolver(
+            Language::Cpp,
+            AnalysisTier::Structural
+        ));
+        assert!(!uses_semantic_cpp_resolver(
+            Language::Go,
+            AnalysisTier::Semantic
         ));
     }
 

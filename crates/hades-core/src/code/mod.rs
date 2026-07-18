@@ -24,7 +24,9 @@ pub mod tree_sitter_edges;
 
 pub use chunking::AstChunking;
 pub use language::Language;
-pub use symbols::{AnalysisTier, CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef};
+pub use symbols::{
+    AnalysisTier, CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef, compute_content_hash,
+};
 
 /// Optional project context used by analyzers that need build-system data.
 #[derive(Debug, Clone, Default)]
@@ -68,9 +70,6 @@ pub fn analyze_with_options(
 ) -> Result<FileAnalysis, CodeAnalysisError> {
     match analyze_with_fallback(source, lang, file_path, options) {
         AnalyzerOutcome::Success(analysis) => Ok(analysis),
-        AnalyzerOutcome::Unavailable { analyzer, reason } => Err(
-            CodeAnalysisError::AnalyzerUnavailable(format!("{analyzer}: {reason}")),
-        ),
         AnalyzerOutcome::Failed { analyzer, reason } => Err(CodeAnalysisError::ParseError(
             format!("{analyzer}: {reason}"),
         )),
@@ -81,10 +80,6 @@ pub fn analyze_with_options(
 #[derive(Debug)]
 pub enum AnalyzerOutcome {
     Success(FileAnalysis),
-    Unavailable {
-        analyzer: &'static str,
-        reason: String,
-    },
     Failed {
         analyzer: &'static str,
         reason: String,
@@ -111,12 +106,6 @@ pub fn analyze_with_fallback(
         }
         Err(semantic_failure) => {
             let fallback_reason = semantic_failure.to_string();
-            if !tree_sitter::has_grammar(lang) {
-                return AnalyzerOutcome::Unavailable {
-                    analyzer: "tree-sitter",
-                    reason: format!("{fallback_reason}; no registered grammar for {lang}"),
-                };
-            }
             match tree_sitter::analyze(source, lang) {
                 Ok(mut analysis) => {
                     annotate(

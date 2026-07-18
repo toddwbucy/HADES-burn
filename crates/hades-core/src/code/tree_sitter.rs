@@ -7,26 +7,20 @@ use tree_sitter::{Language as TsLanguage, Node, Parser};
 use super::Language;
 use super::symbols::{AnalysisTier, CodeMetrics, FileAnalysis, Symbol, SymbolKind, TopLevelDef};
 
-/// Whether a structural grammar is registered for a language.
-pub fn has_grammar(language: Language) -> bool {
-    matches!(
-        language,
-        Language::Cpp | Language::Go | Language::Python | Language::Rust
-    )
-}
-
-fn grammar(language: Language) -> Option<TsLanguage> {
+fn grammar(language: Language) -> TsLanguage {
     match language {
-        Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
-        Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
-        Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
-        Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
+        Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
     }
 }
 
 /// Parse a file structurally. The result never claims compiler resolution.
 pub fn analyze(source: &str, language: Language) -> Result<FileAnalysis, String> {
-    let grammar = grammar(language).ok_or_else(|| format!("no grammar for {language}"))?;
+    // This exhaustive match is the grammar registry: adding a Language now
+    // requires choosing its structural grammar at compile time.
+    let grammar = grammar(language);
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
@@ -56,7 +50,8 @@ pub fn analyze(source: &str, language: Language) -> Result<FileAnalysis, String>
         ));
     }
 
-    let encoded = serde_json::to_vec(&collector.symbols).unwrap_or_default();
+    let value = serde_json::to_value(&collector.symbols).unwrap_or(Value::Null);
+    let encoded = crate::canonical_json::to_vec(&value);
     let symbol_hash = Sha256::digest(encoded)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -127,7 +122,8 @@ impl Collector<'_> {
                     push_metadata_array(&mut self.symbols[index].metadata, "calls", call);
                 }
             }
-            if top_level && kind.is_primitive() {
+            let namespace_container = self.language == Language::Cpp && kind == SymbolKind::Module;
+            if top_level && kind.is_primitive() && !namespace_container {
                 self.defs.push(TopLevelDef {
                     name: name.clone(),
                     kind,
@@ -146,13 +142,30 @@ impl Collector<'_> {
             ) {
                 child_scopes.push(name);
             }
+
+            let children_are_top_level = top_level && namespace_container;
+
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                self.walk(child, &child_scopes, child_callable, children_are_top_level);
+            }
+            return;
         } else if let Some(import) = self.import_symbol(node) {
             self.symbols.push(import);
         }
 
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            self.walk(child, &child_scopes, child_callable, false);
+            // C++ wraps namespace/template contents in transparent grammar
+            // nodes such as declaration_list/template_declaration. Carry the
+            // boundary eligibility through those wrappers until a real
+            // definition consumes it.
+            self.walk(
+                child,
+                &child_scopes,
+                child_callable,
+                self.language == Language::Cpp && top_level,
+            );
         }
     }
 
@@ -402,6 +415,23 @@ void launch(float* out) { kernel<<<1, 1>>>(out); }
                 .iter()
                 .any(|call| call["name"] == "kernel" && call["is_kernel_launch"] == true)
         }));
+        let defs: Vec<&str> = analysis
+            .top_level_defs
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert!(
+            defs.contains(&"kernel"),
+            "namespace function lost as chunk boundary"
+        );
+        assert!(
+            defs.contains(&"launch"),
+            "namespace function lost as chunk boundary"
+        );
+        assert!(
+            !defs.contains(&"gpu"),
+            "namespace container must not swallow child chunks"
+        );
     }
 
     #[test]

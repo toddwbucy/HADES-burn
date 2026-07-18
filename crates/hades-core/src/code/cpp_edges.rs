@@ -18,6 +18,7 @@ struct IndexedSymbol {
     path: String,
     key: String,
     line: usize,
+    end_line: usize,
 }
 
 /// Resolve semantic call records into `codebase_calls_edges` documents.
@@ -34,6 +35,7 @@ pub fn resolve_cpp_calls(base: &Path, file_symbols: &HashMap<String, Vec<Symbol>
                 path: rel_path.clone(),
                 key: keys::symbol_key(&fkey, &qname, symbol.start_line),
                 line: symbol.start_line,
+                end_line: symbol.end_line,
             };
             by_qname.entry(qname).or_default().push(indexed.clone());
             by_location
@@ -142,18 +144,29 @@ fn pick<'a>(
     preferred_path: Option<&str>,
     preferred_line: Option<usize>,
 ) -> Option<&'a IndexedSymbol> {
-    entries
+    let path_matches: Vec<&IndexedSymbol> = entries
         .iter()
-        .find(|entry| {
-            preferred_path.is_none_or(|path| entry.path == path)
-                && preferred_line.is_none_or(|line| entry.line == line)
-        })
-        .or_else(|| {
-            entries
-                .iter()
-                .find(|entry| preferred_path.is_some_and(|path| entry.path == path))
-        })
-        .or_else(|| entries.first())
+        .filter(|entry| preferred_path.is_none_or(|path| entry.path == path))
+        .collect();
+    if preferred_path.is_some() && path_matches.is_empty() {
+        return None;
+    }
+
+    if let Some(line) = preferred_line {
+        let span_matches: Vec<&IndexedSymbol> = path_matches
+            .iter()
+            .copied()
+            .filter(|entry| entry.line <= line && line <= entry.end_line)
+            .collect();
+        if span_matches.len() == 1 {
+            return span_matches.first().copied();
+        }
+        if span_matches.len() > 1 {
+            return None;
+        }
+    }
+
+    (path_matches.len() == 1).then(|| path_matches[0])
 }
 
 #[cfg(test)]
@@ -235,5 +248,62 @@ mod tests {
             )],
         );
         assert!(resolve_cpp_calls(Path::new("."), &files).is_empty());
+    }
+
+    #[test]
+    fn refuses_ambiguous_qname_fallback() {
+        let mut files = HashMap::new();
+        files.insert(
+            "caller.cpp".into(),
+            vec![function(
+                "caller",
+                1,
+                json!({
+                    "qualified_name": "caller",
+                    "calls": [{"name": "run", "qualified_name": "run"}]
+                }),
+            )],
+        );
+        files.insert(
+            "a.cpp".into(),
+            vec![function("run", 5, json!({"qualified_name": "run"}))],
+        );
+        files.insert(
+            "b.cpp".into(),
+            vec![function("run", 9, json!({"qualified_name": "run"}))],
+        );
+
+        assert!(resolve_cpp_calls(Path::new("."), &files).is_empty());
+    }
+
+    #[test]
+    fn target_line_inside_definition_span_resolves() {
+        let mut target = function(
+            "templated",
+            5,
+            json!({"qualified_name": "templated", "usr": "target-usr"}),
+        );
+        target.end_line = 9;
+        let mut files = HashMap::new();
+        files.insert(
+            "caller.cpp".into(),
+            vec![function(
+                "caller",
+                1,
+                json!({
+                    "qualified_name": "caller",
+                    "calls": [{
+                        "name": "templated",
+                        "qualified_name": "templated",
+                        "target_usr": "target-usr",
+                        "target_file": "target.cpp",
+                        "target_line": 7
+                    }]
+                }),
+            )],
+        );
+        files.insert("target.cpp".into(), vec![target]);
+
+        assert_eq!(resolve_cpp_calls(Path::new("."), &files).len(), 1);
     }
 }

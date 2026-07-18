@@ -40,7 +40,7 @@ pub fn analyze(
     // structure. Hash serialized symbols rather than bare names so an edited
     // call site triggers authoritative re-ingest even when declarations did
     // not change.
-    let encoded = serde_json::to_vec(&symbols).unwrap_or_default();
+    let encoded = cpp_symbol_digest_input(&symbols);
     let symbol_hash = Sha256::digest(encoded)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -56,6 +56,32 @@ pub fn analyze(
         analyzer: "libclang".to_string(),
         fallback_reason: None,
     })
+}
+
+fn cpp_symbol_digest_input(symbols: &[Symbol]) -> Vec<u8> {
+    let mut value = serde_json::to_value(symbols).unwrap_or(Value::Null);
+    remove_machine_local_paths(&mut value);
+    crate::canonical_json::to_vec(&value)
+}
+
+fn remove_machine_local_paths(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                remove_machine_local_paths(value);
+            }
+        }
+        Value::Object(fields) => {
+            // The resolved USR, qualified name, target line, and call site are
+            // stable semantic identity. libclang's absolute target path is
+            // machine-local provenance and must not invalidate the digest.
+            fields.remove("target_file");
+            for value in fields.values_mut() {
+                remove_machine_local_paths(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -728,5 +754,31 @@ void f(double) {}\n";
         if available(&a) && available(&b) {
             assert_ne!(a.symbol_hash, b.symbol_hash);
         }
+    }
+
+    #[test]
+    fn machine_local_target_paths_do_not_affect_incremental_digest() {
+        let symbol = |target_file: &str| Symbol {
+            name: "caller".into(),
+            kind: SymbolKind::Function,
+            start_line: 1,
+            end_line: 3,
+            metadata: json!({
+                "qualified_name": "caller",
+                "calls": [{
+                    "name": "target",
+                    "qualified_name": "ns::target",
+                    "target_usr": "stable-usr",
+                    "target_file": target_file,
+                    "target_line": 10,
+                    "call_line": 2
+                }]
+            }),
+        };
+
+        assert_eq!(
+            cpp_symbol_digest_input(&[symbol("/checkout-a/src/target.cpp")]),
+            cpp_symbol_digest_input(&[symbol("/checkout-b/src/target.cpp")])
+        );
     }
 }

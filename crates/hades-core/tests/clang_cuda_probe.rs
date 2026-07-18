@@ -24,6 +24,8 @@ fn clang_extracts_cuda_kernel_symbols() {
 
     let source = std::fs::read_to_string(fixture).unwrap();
     let analysis = code::analyze(&source, fixture).expect("CUDA analysis should succeed");
+    assert_eq!(analysis.analysis_tier, code::AnalysisTier::Semantic);
+    assert_eq!(analysis.analyzer, "libclang");
     let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
     eprintln!("extracted {} symbols from elementwise.cu", names.len());
 

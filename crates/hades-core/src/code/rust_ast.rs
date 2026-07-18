@@ -15,6 +15,7 @@ use super::symbols::{
 
 /// Analyze Rust source code, returning symbols, metrics, and structure.
 pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
+    syn::parse_file(source).map_err(|e| super::CodeAnalysisError::ParseError(e.to_string()))?;
     let symbols = extract_symbols(source);
     let metrics = compute_metrics(source);
     let top_level_defs = extract_top_level_defs(source);
@@ -26,6 +27,9 @@ pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
         metrics,
         symbol_hash,
         top_level_defs,
+        analysis_tier: super::AnalysisTier::Semantic,
+        analyzer: "syn".to_string(),
+        fallback_reason: None,
     })
 }
 

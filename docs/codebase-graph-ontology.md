@@ -147,6 +147,9 @@ One document per ingested source file. Primitive kind: `file`. The primary verte
 | `embedding_count` | integer | yes | ingest | Number of embeddings stored (0 if embedder unavailable) |
 | `total_lines` | integer | yes | ingest | Total line count |
 | `metrics` | object | yes | ingest | See **Metrics Object** below |
+| `analysis_tier` | string | yes | analyzer dispatch | `"semantic"`, `"structural"`, or `"text"`; tiers are ordered and cannot silently downgrade on re-ingest |
+| `analyzer` | string | yes | analyzer dispatch | Producer such as `"libclang"`, `"syn"`, `"tree-sitter"`, or `"raw-text"` |
+| `fallback_reason` | string | no | analyzer dispatch | Why the preferred analyzer could not be used |
 | `ra_analyzed` | boolean | no | rust-analyzer | `true` if rust-analyzer enrichment completed |
 | `ra_symbol_count` | integer | no | rust-analyzer | Symbol count from rust-analyzer (may differ from syn count) |
 | `ra_analyzed_at` | string | no | rust-analyzer | ISO 8601 timestamp of rust-analyzer pass |
@@ -206,6 +209,8 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 | `bases` | string[] | no | python | Base classes (e.g., `["BaseModel", "ABC"]`) |
 | `parameters` | string[] | no | python | Function parameter names |
 | `metadata` | object | no | all | Analyzer-specific data. libclang records `usr`, `signature`, template flags, qualified name, analyzer, and analysis tier here. |
+| `analysis_tier` | string | yes | analyzer dispatch | Fidelity tier; Tree-sitter symbols are always `"structural"` |
+| `analyzer` | string | yes | analyzer dispatch | Artifact producer |
 | `source` | string | no | all | Extraction provenance: `"syn"`, `"rust-analyzer"`, `"python-ast"`, `"libclang"` |
 | `analyzed_at` | string | no | all | ISO 8601 timestamp of extraction |
 
@@ -246,6 +251,8 @@ One document per text chunk. Chunks are contiguous spans of source code text, pr
 | `start_char` | integer | yes | Byte offset from start of file |
 | `end_char` | integer | yes | Byte offset of chunk end |
 | `symbols` | string[] | yes | Symbol keys (`codebase_symbols._key`) whose span overlaps this chunk |
+| `analysis_tier` | string | yes | Fidelity tier inherited from the file analysis |
+| `analyzer` | string | yes | Artifact producer |
 
 The `symbols` field is populated during ingest via interval intersection in Rust. Both symbol spans (from syn/AST) and chunk byte offsets are in memory concurrently — the intersection is a single O(symbols + chunks) sorted merge, microseconds per file.
 

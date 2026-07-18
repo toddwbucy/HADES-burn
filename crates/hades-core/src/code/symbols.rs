@@ -205,6 +205,47 @@ pub struct FileAnalysis {
     pub symbol_hash: String,
     /// Top-level definition boundaries for chunking.
     pub top_level_defs: Vec<TopLevelDef>,
+    /// Fidelity tier of the selected analyzer.
+    pub analysis_tier: AnalysisTier,
+    /// Analyzer implementation that produced this result.
+    pub analyzer: String,
+    /// Why a lower-priority analyzer was selected, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+/// Ordered fidelity tiers used to prevent accidental graph downgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisTier {
+    Text,
+    Structural,
+    Semantic,
+}
+
+impl AnalysisTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Structural => "structural",
+            Self::Semantic => "semantic",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "text" => Some(Self::Text),
+            "structural" => Some(Self::Structural),
+            "semantic" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for AnalysisTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Compute a deterministic hash of symbol names for change detection.

@@ -12,6 +12,8 @@ pub enum Language {
     Rust,
     /// C, C++, and CUDA (analyzed via libclang).
     Cpp,
+    /// Go (gopls is authoritative when available; Tree-sitter is the fallback).
+    Go,
 }
 
 impl Language {
@@ -31,6 +33,7 @@ impl Language {
             "c" | "cc" | "cpp" | "cxx" | "c++" | "h" | "hh" | "hpp" | "hxx" | "cu" | "cuh" => {
                 Some(Self::Cpp)
             }
+            "go" => Some(Self::Go),
             _ => None,
         }
     }
@@ -41,6 +44,7 @@ impl Language {
             Self::Python => "Python",
             Self::Rust => "Rust",
             Self::Cpp => "C++",
+            Self::Go => "Go",
         }
     }
 }
@@ -61,6 +65,7 @@ mod tests {
         assert_eq!(Language::from_extension("pyi"), Some(Language::Python));
         assert_eq!(Language::from_extension("pyw"), Some(Language::Python));
         assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("go"), Some(Language::Go));
         assert_eq!(Language::from_extension("js"), None);
         assert_eq!(Language::from_extension(""), None);
     }

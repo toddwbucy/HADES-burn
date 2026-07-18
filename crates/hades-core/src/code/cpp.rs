@@ -26,13 +26,14 @@ pub fn analyze(
     file_path: &str,
     compilation_database: Option<&Path>,
 ) -> Result<FileAnalysis, super::CodeAnalysisError> {
-    let (symbols, top_level_defs) = match extract(source, file_path, compilation_database) {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!(error = %e, file = file_path, "libclang analysis failed, no C++ symbols");
-            (Vec::new(), Vec::new())
-        }
-    };
+    let (symbols, top_level_defs) =
+        extract(source, file_path, compilation_database).map_err(|e| {
+            if e.starts_with("libclang unavailable:") {
+                super::CodeAnalysisError::AnalyzerUnavailable(e)
+            } else {
+                super::CodeAnalysisError::ParseError(e)
+            }
+        })?;
     let metrics = compute_metrics(source);
 
     // Calls, namespace ownership, and template identity are part of the graph
@@ -51,6 +52,9 @@ pub fn analyze(
         metrics,
         symbol_hash,
         top_level_defs,
+        analysis_tier: super::AnalysisTier::Semantic,
+        analyzer: "libclang".to_string(),
+        fallback_reason: None,
     })
 }
 
@@ -109,7 +113,7 @@ fn extract(
     // poisoned lock rather than cascading failures across the ingest batch.
     let _guard = CLANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let clang = Clang::new()?;
+    let clang = Clang::new().map_err(|e| format!("libclang unavailable: {e}"))?;
     let index = Index::new(&clang, false, false);
     let mode = detect_mode(file_path, source);
     let (args, from_database) = compilation_arguments(file_path, compilation_database)

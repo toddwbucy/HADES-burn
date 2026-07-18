@@ -115,6 +115,7 @@ pub fn resolve_cpp_calls(base: &Path, file_symbols: &HashMap<String, Vec<Symbol>
                         .unwrap_or(false),
                     "resolution": "semantic",
                     "analyzer": "libclang",
+                    "analysis_tier": "semantic",
                 }));
             }
         }

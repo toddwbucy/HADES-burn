@@ -38,8 +38,15 @@ pub enum CodebaseCmd {
         /// in place — it does NOT drop the file node or its inbound edges, so
         /// authored bridge edges survive (unlike `db purge`). Use it to refresh
         /// a node whose stored view has drifted from the source.
+        /// This never permits an analyzer-fidelity downgrade by itself.
         #[arg(short = 'f', long = "force", alias = "no-skip")]
         force: bool,
+
+        /// Permit a lower-fidelity analyzer to replace previously stored
+        /// semantic artifacts. This is separate from `--force` so a temporary
+        /// analyzer outage cannot silently degrade the graph.
+        #[arg(long = "allow-analysis-downgrade")]
+        allow_analysis_downgrade: bool,
     },
 
     /// Update an existing code graph node.

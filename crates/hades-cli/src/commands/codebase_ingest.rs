@@ -10,6 +10,7 @@
 //! - Language auto-detection from file extension
 //! - Incremental ingestion via symbol_hash comparison
 //! - Python import graph resolution (file→file edges)
+//! - Rust and Go semantic enrichment through language servers
 //! - Per-file error isolation in batch mode
 
 use std::collections::HashMap;
@@ -23,8 +24,11 @@ use tracing::{debug, error, info, warn};
 
 use hades_core::HadesConfig;
 use hades_core::chunking::ChunkingStrategy;
-use hades_core::code::rust_analyzer::{
-    EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
+use hades_core::code::lsp::go_symbols::GoSymbolExtractor;
+use hades_core::code::lsp::symbols::FileExtraction;
+use hades_core::code::lsp::{
+    EdgeKind, GoplsSession, LspEdgeResolver, RustAnalyzerSession, RustSymbolExtractor,
+    group_files_by_crate, group_files_by_go_module,
 };
 use hades_core::code::{
     self, AnalysisOptions, AnalysisTier, AnalyzerOutcome, AstChunking, Language, Symbol, SymbolKind,
@@ -205,6 +209,9 @@ pub async fn run(
     };
     // Collect absolute paths for Rust files — used for rust-analyzer post-loop phase.
     let mut rust_abs_paths: Vec<PathBuf> = Vec::new();
+    // Go starts with Tree-sitter and is semantically enriched by gopls after
+    // the full module file set is available.
+    let mut go_abs_paths: Vec<PathBuf> = Vec::new();
 
     // Auto-activate batch mode for large input sets.
     let batch_mode = batch || files.len() > 5;
@@ -248,6 +255,11 @@ pub async fn run(
             && (lang_override == Some(Language::Rust) || file_ext.as_deref() == Some("rs"));
         if is_rust {
             rust_abs_paths.push(file_path.clone());
+        }
+        let is_go = !is_unparsed
+            && (lang_override == Some(Language::Go) || file_ext.as_deref() == Some("go"));
+        if is_go {
+            go_abs_paths.push(file_path.clone());
         }
 
         let result = if is_unparsed {
@@ -400,18 +412,38 @@ pub async fn run(
                 info!(
                     symbols = stats.symbols,
                     edges = stats.edges,
-                    crates = stats.crates,
+                    crates = stats.workspaces,
                     "rust-analyzer enrichment complete"
                 );
                 stats
             }
             Err(e) => {
                 warn!(error = %e, "rust-analyzer enrichment failed, syn-based data retained");
-                RustAnalyzerStats::default()
+                SemanticLspStats::default()
             }
         }
     } else {
-        RustAnalyzerStats::default()
+        SemanticLspStats::default()
+    };
+
+    let gopls_stats = if !go_abs_paths.is_empty() {
+        match run_gopls_phase(&db, &base, &go_abs_paths).await {
+            Ok(stats) => {
+                info!(
+                    symbols = stats.symbols,
+                    edges = stats.edges,
+                    modules = stats.workspaces,
+                    "gopls semantic enrichment complete"
+                );
+                stats
+            }
+            Err(error) => {
+                warn!(%error, "gopls enrichment failed; Tree-sitter Go data retained");
+                SemanticLspStats::default()
+            }
+        }
+    } else {
+        SemanticLspStats::default()
     };
 
     // Output summary.
@@ -462,7 +494,12 @@ pub async fn run(
         "rust_analyzer": {
             "symbols": ra_stats.symbols,
             "edges": ra_stats.edges,
-            "crates_analyzed": ra_stats.crates,
+            "crates_analyzed": ra_stats.workspaces,
+        },
+        "gopls": {
+            "symbols": gopls_stats.symbols,
+            "edges": gopls_stats.edges,
+            "modules_analyzed": gopls_stats.workspaces,
         },
         "results": results,
         "duration_ms": duration_ms,
@@ -1483,14 +1520,14 @@ async fn check_unchanged(
     }
 }
 
-// ── rust-analyzer enrichment ───────────────────────────────────────────
+// ── semantic language-server enrichment ───────────────────────────────
 
 /// Stats returned from the rust-analyzer enrichment phase.
 #[derive(Default)]
-struct RustAnalyzerStats {
+struct SemanticLspStats {
     symbols: usize,
     edges: usize,
-    crates: usize,
+    workspaces: usize,
 }
 
 /// Run rust-analyzer over ingested Rust files to produce rich symbols and edges.
@@ -1506,10 +1543,10 @@ async fn run_rust_analyzer_phase(
     db: &ArangoPool,
     base: &Path,
     rust_files: &[PathBuf],
-) -> Result<RustAnalyzerStats> {
+) -> Result<SemanticLspStats> {
     let groups = group_files_by_crate(rust_files);
     if groups.is_empty() {
-        return Ok(RustAnalyzerStats::default());
+        return Ok(SemanticLspStats::default());
     }
 
     info!(
@@ -1565,32 +1602,89 @@ async fn run_rust_analyzer_phase(
         }
     }
 
+    store_lsp_extractions(db, all_extractions, crates_analyzed, "rust-analyzer", "ra").await
+}
+
+/// Run gopls over each discovered Go module. Tree-sitter artifacts remain in
+/// place when gopls is absent or a module fails, satisfying the #152 fallback
+/// contract without a database-wide language mode.
+async fn run_gopls_phase(
+    db: &ArangoPool,
+    base: &Path,
+    go_files: &[PathBuf],
+) -> Result<SemanticLspStats> {
+    let groups = group_files_by_go_module(go_files);
+    if groups.is_empty() {
+        return Ok(SemanticLspStats::default());
+    }
+    info!(
+        module_count = groups.len(),
+        file_count = go_files.len(),
+        "starting gopls semantic enrichment"
+    );
+    let mut all_extractions = HashMap::new();
+    let mut modules_analyzed = 0;
+    for (module_root, module_files) in &groups {
+        let session = match GoplsSession::start(module_root).await {
+            Ok(session) => session,
+            Err(error) => {
+                warn!(
+                    module_root = %module_root.display(),
+                    %error,
+                    "gopls unavailable for module; Tree-sitter data retained"
+                );
+                continue;
+            }
+        };
+        let extractor = GoSymbolExtractor::new(&session, true);
+        let file_refs: Vec<&Path> = module_files.iter().map(PathBuf::as_path).collect();
+        for (absolute, extraction) in extractor.extract_module(&file_refs).await {
+            let absolute = Path::new(&absolute);
+            let relative = absolute
+                .strip_prefix(base)
+                .unwrap_or(absolute)
+                .to_string_lossy()
+                .into_owned();
+            all_extractions.insert(relative, extraction);
+        }
+        modules_analyzed += 1;
+        if let Err(error) = session.shutdown().await {
+            debug!(%error, "gopls shutdown warning (non-fatal)");
+        }
+    }
+    store_lsp_extractions(db, all_extractions, modules_analyzed, "gopls", "gopls").await
+}
+
+/// Persist language-neutral LSP symbol documents and semantic edges.
+async fn store_lsp_extractions(
+    db: &ArangoPool,
+    all_extractions: HashMap<String, FileExtraction>,
+    workspaces: usize,
+    analyzer: &'static str,
+    metadata_prefix: &'static str,
+) -> Result<SemanticLspStats> {
     if all_extractions.is_empty() {
-        return Ok(RustAnalyzerStats {
-            crates: crates_analyzed,
+        return Ok(SemanticLspStats {
+            workspaces,
             ..Default::default()
         });
     }
-
-    // Collect per-file stats before the resolver takes ownership.
     let file_patches: Vec<(String, usize, String)> = all_extractions
         .iter()
-        .map(|(rel_path, extraction)| {
+        .map(|(path, extraction)| {
             (
-                rel_path.clone(),
+                path.clone(),
                 extraction.symbols.len(),
                 extraction.analyzed_at.clone(),
             )
         })
         .collect();
-
-    // Build rich symbol documents and edges via RustEdgeResolver.
-    let resolver = RustEdgeResolver::new(all_extractions);
+    let resolver = LspEdgeResolver::new(all_extractions, analyzer);
     let symbol_docs = resolver.build_symbol_documents();
-    let crate_edges = resolver.build_edges();
+    let semantic_edges = resolver.build_edges();
 
     let sym_count = symbol_docs.len();
-    let edge_count = crate_edges.len();
+    let edge_count = semantic_edges.len();
 
     // Store enriched symbol documents (overwrite=true for idempotent re-runs).
     if !symbol_docs.is_empty() {
@@ -1600,14 +1694,14 @@ async fn run_rust_analyzer_phase(
             .collect();
         crud::insert_documents(db, CODEBASE.symbols, &docs, true)
             .await
-            .context("failed to store rust-analyzer symbol documents")?;
-        info!(count = docs.len(), "stored rust-analyzer symbol documents");
+            .with_context(|| format!("failed to store {analyzer} symbol documents"))?;
+        info!(count = docs.len(), analyzer, "stored LSP symbol documents");
     }
 
     // Store edges grouped by collection (collection-per-relation).
-    if !crate_edges.is_empty() {
+    if !semantic_edges.is_empty() {
         // Build edge documents with deterministic keys.
-        let edge_docs: Vec<(EdgeKind, Value)> = crate_edges
+        let edge_docs: Vec<(EdgeKind, Value)> = semantic_edges
             .iter()
             .map(|e| {
                 let from_suffix = e.from.rsplit('/').next().unwrap_or(&e.from);
@@ -1618,7 +1712,7 @@ async fn run_rust_analyzer_phase(
                     "_from": e.from,
                     "_to": e.to,
                     "analysis_tier": "semantic",
-                    "analyzer": "rust-analyzer",
+                    "analyzer": analyzer,
                     "resolution": "semantic",
                 });
                 // Merge edge metadata.
@@ -1647,20 +1741,24 @@ async fn run_rust_analyzer_phase(
             }
         }
 
-        info!(count = edge_docs.len(), "stored rust-analyzer edges");
+        info!(
+            count = edge_docs.len(),
+            analyzer, "stored LSP semantic edges"
+        );
     }
 
-    // Patch file documents with rust-analyzer metadata (partial update — preserves existing fields).
     let mut patched_count = 0;
     for (rel_path, sym_count, analyzed_at) in &file_patches {
         let fkey = keys::file_key(rel_path);
-        let patch = json!({
-            "ra_analyzed": true,
-            "ra_symbol_count": sym_count,
-            "ra_analyzed_at": analyzed_at,
+        let mut patch = json!({
             "analysis_tier": "semantic",
-            "analyzer": "rust-analyzer",
+            "analyzer": analyzer,
         });
+        if let Value::Object(fields) = &mut patch {
+            fields.insert(format!("{metadata_prefix}_analyzed"), json!(true));
+            fields.insert(format!("{metadata_prefix}_symbol_count"), json!(sym_count));
+            fields.insert(format!("{metadata_prefix}_analyzed_at"), json!(analyzed_at));
+        }
         match crud::update_document(db, CODEBASE.files, &fkey, &patch).await {
             Ok(_) => patched_count += 1,
             Err(e) => {
@@ -1671,12 +1769,12 @@ async fn run_rust_analyzer_phase(
     if patched_count > 0 {
         info!(
             count = patched_count,
-            "patched file documents with rust-analyzer metadata"
+            analyzer, "patched file documents with semantic LSP metadata"
         );
     }
 
     // Recompute `symbol_count` from the authoritative stored set for every
-    // RA-touched file. Enrichment adds symbols (struct fields, methods) beyond
+    // LSP-touched file. Enrichment adds symbols (struct fields, methods) beyond
     // the syn primitives that `ingest_file` counted, so the syn-based
     // `symbol_count` is now stale (#126). Counting the actually-stored symbols
     // keeps the denorm consistent — the same "count from the stored set" stance
@@ -1708,19 +1806,20 @@ async fn run_rust_analyzer_phase(
         {
             Ok(_) => debug!(
                 files = n,
-                "recomputed symbol_count from stored set after RA enrichment"
+                analyzer, "recomputed symbol_count after semantic LSP enrichment"
             ),
             Err(e) => warn!(
                 error = %e,
-                "failed to recompute symbol_count after RA enrichment (non-fatal)"
+                analyzer,
+                "failed to recompute symbol_count after LSP enrichment (non-fatal)"
             ),
         }
     }
 
-    Ok(RustAnalyzerStats {
+    Ok(SemanticLspStats {
         symbols: sym_count,
         edges: edge_count,
-        crates: crates_analyzed,
+        workspaces,
     })
 }
 

@@ -148,11 +148,14 @@ One document per ingested source file. Primitive kind: `file`. The primary verte
 | `total_lines` | integer | yes | ingest | Total line count |
 | `metrics` | object | yes | ingest | See **Metrics Object** below |
 | `analysis_tier` | string | yes | analyzer dispatch | `"semantic"`, `"structural"`, or `"text"`; tiers are ordered and cannot silently downgrade on re-ingest |
-| `analyzer` | string | yes | analyzer dispatch | Producer such as `"libclang"`, `"syn"`, `"tree-sitter"`, or `"raw-text"` |
+| `analyzer` | string | yes | analyzer dispatch | Producer such as `"libclang"`, `"syn"`, `"gopls"`, `"tree-sitter"`, or `"raw-text"` |
 | `fallback_reason` | string | no | analyzer dispatch | Why the preferred analyzer could not be used |
 | `ra_analyzed` | boolean | no | rust-analyzer | `true` if rust-analyzer enrichment completed |
 | `ra_symbol_count` | integer | no | rust-analyzer | Symbol count from rust-analyzer (may differ from syn count) |
 | `ra_analyzed_at` | string | no | rust-analyzer | ISO 8601 timestamp of rust-analyzer pass |
+| `gopls_analyzed` | boolean | no | gopls | `true` if gopls enrichment completed |
+| `gopls_symbol_count` | integer | no | gopls | Symbol count from gopls |
+| `gopls_analyzed_at` | string | no | gopls | ISO 8601 timestamp of gopls pass |
 
 #### Metrics Object
 
@@ -194,9 +197,9 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 | `file_path` | string | yes | all | Relative path (denormalized for query convenience) |
 | `start_line` | integer | yes | all | 1-indexed start line |
 | `end_line` | integer | yes | all | 1-indexed end line (inclusive) |
-| `visibility` | string | no | rust-analyzer, syn | `"pub"`, `"pub(crate)"`, `"pub(super)"`, `"private"` |
-| `signature` | string | no | rust-analyzer, libclang | Full type signature (e.g., `fn new(config: &Config) -> Self`) |
-| `parent_symbol` | string | no | rust-analyzer | Enclosing symbol's qualified name (e.g., `Config` for `Config::new`) |
+| `visibility` | string | no | LSP, syn | Language-specific exported/private visibility |
+| `signature` | string | no | LSP, libclang | Full type signature (e.g., `fn new(config: &Config) -> Self`) |
+| `parent_symbol` | string | no | LSP | Enclosing symbol or Go receiver name |
 | `impl_trait` | string | no | rust-analyzer | Trait being implemented (e.g., `Display` for `impl Display for Config`) |
 | `is_pyo3` | boolean | no | rust-analyzer | `true` if exposed to Python via `#[pyfunction]`/`#[pymethods]` |
 | `is_ffi` | boolean | no | rust-analyzer | `true` if exposed via `extern "C"` or `#[no_mangle]` |
@@ -211,7 +214,7 @@ One document per code symbol. Only primitives get symbol documents: `module`, `t
 | `metadata` | object | no | all | Analyzer-specific data. libclang records `usr`, `signature`, template flags, qualified name, analyzer, and analysis tier here. |
 | `analysis_tier` | string | yes | analyzer dispatch | Fidelity tier; Tree-sitter symbols are always `"structural"` |
 | `analyzer` | string | yes | analyzer dispatch | Artifact producer |
-| `source` | string | no | all | Extraction provenance: `"syn"`, `"rust-analyzer"`, `"python-ast"`, `"libclang"` |
+| `source` | string | no | all | Extraction provenance: `"syn"`, `"rust-analyzer"`, `"gopls"`, `"python-ast"`, `"libclang"` |
 | `analyzed_at` | string | no | all | ISO 8601 timestamp of extraction |
 
 #### Key Generation
@@ -231,9 +234,9 @@ Symbols may be written twice during a single ingest run:
 
 1. **First pass (syn/AST):** Creates the document with `name`, `qualified_name`, `kind`, `lang_kind`, `file_key`, `file_path`, `start_line`, `end_line`, and language-specific metadata. Sets `source: "syn"` or `source: "python-ast"`. Syn produces qualified names from AST context — methods inside `impl Foo` get `qualified_name: "Foo::bar"`, not bare `"bar"`.
 
-2. **Second pass (rust-analyzer):** Overwrites with the full document including `signature`, `parent_symbol`, `impl_trait`, PyO3/FFI flags, derives. Sets `source: "rust-analyzer"`.
+2. **Second pass (language server):** Rust-analyzer or gopls overwrites matching fallback symbols with semantic signatures and parent/receiver metadata, then adds resolved call and implementation edges. Go interface satisfaction is resolved from interface methods to concrete receiver methods.
 
-Both passes use the same `qualified_name` → same `_key`. The second pass uses `overwrite: true` (ArangoDB replace semantics). This is safe because rust-analyzer output is strictly a superset of syn output for the same symbol.
+Both passes use the same file, qualified name, and source line identity. The semantic pass uses `overwrite: true` (ArangoDB replace semantics); if the language server is absent or fails, the structural artifact remains available.
 
 ---
 
@@ -613,8 +616,8 @@ codebase_graph (Named Graph)
 | Collection | From | To | Count per file | Produced by |
 |-----------|------|----|---------------|-------------|
 | `codebase_defines_edges` | file | symbol | 1 per symbol | syn/AST extraction |
-| `codebase_calls_edges` | callable | callable | 0..N per callable | rust-analyzer |
-| `codebase_implements_edges` | callable | callable | 0..N per impl block | rust-analyzer |
+| `codebase_calls_edges` | callable | callable | 0..N per callable | language server / structural resolver |
+| `codebase_implements_edges` | callable | type or callable | 0..N per implementation | rust-analyzer / gopls |
 | `codebase_imports_edges` | file | symbol or file | 0..N per import stmt | import resolution |
 
 ### Index Summary

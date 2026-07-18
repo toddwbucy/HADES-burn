@@ -1043,17 +1043,17 @@ async fn ingest_file(
             .insert(rel_path.to_string(), analysis.symbols.clone());
     }
     match lang {
-        Language::Rust => {
+        Language::Rust if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
             imports
                 .rust_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
-        Language::Python => {
+        Language::Python if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
             imports
                 .python_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
-        Language::Cpp if uses_semantic_cpp_resolver(lang, analysis.analysis_tier) => {
+        Language::Cpp if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
             imports
                 .cpp_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
@@ -1086,8 +1086,9 @@ async fn ingest_file(
     })
 }
 
-fn uses_semantic_cpp_resolver(language: Language, tier: AnalysisTier) -> bool {
-    language == Language::Cpp && tier == AnalysisTier::Semantic
+fn uses_semantic_relationship_resolver(language: Language, tier: AnalysisTier) -> bool {
+    matches!(language, Language::Rust | Language::Python | Language::Cpp)
+        && tier == AnalysisTier::Semantic
 }
 
 // ── Unparsed-language fallback (#121) ────────────────────────────────────
@@ -1969,16 +1970,18 @@ mod tests {
     }
 
     #[test]
-    fn test_only_semantic_cpp_uses_libclang_edge_resolver() {
-        assert!(uses_semantic_cpp_resolver(
-            Language::Cpp,
-            AnalysisTier::Semantic
-        ));
-        assert!(!uses_semantic_cpp_resolver(
-            Language::Cpp,
-            AnalysisTier::Structural
-        ));
-        assert!(!uses_semantic_cpp_resolver(
+    fn test_only_semantic_languages_use_dedicated_edge_resolvers() {
+        for language in [Language::Rust, Language::Python, Language::Cpp] {
+            assert!(uses_semantic_relationship_resolver(
+                language,
+                AnalysisTier::Semantic
+            ));
+            assert!(!uses_semantic_relationship_resolver(
+                language,
+                AnalysisTier::Structural
+            ));
+        }
+        assert!(!uses_semantic_relationship_resolver(
             Language::Go,
             AnalysisTier::Semantic
         ));

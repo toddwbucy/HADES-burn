@@ -26,8 +26,10 @@ use hades_core::chunking::ChunkingStrategy;
 use hades_core::code::rust_analyzer::{
     EdgeKind, RustAnalyzerSession, RustEdgeResolver, RustSymbolExtractor, group_files_by_crate,
 };
-use hades_core::code::{self, AstChunking, CodeAnalysisError, Language, Symbol, SymbolKind};
-use hades_core::code::{python_calls, rust_imports};
+use hades_core::code::{
+    self, AnalysisOptions, AnalysisTier, AnalyzerOutcome, AstChunking, Language, Symbol, SymbolKind,
+};
+use hades_core::code::{cpp_edges, python_calls, rust_imports, tree_sitter_edges};
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::crud;
 use hades_core::db::keys;
@@ -99,17 +101,24 @@ struct ImportContext {
     rust_imports: HashMap<String, Vec<String>>,
     /// Rust: rel_path → all symbols (for building the resolution index).
     rust_file_symbols: HashMap<String, Vec<Symbol>>,
+    /// C/C++/CUDA: rel_path → semantic symbols and resolved call metadata.
+    cpp_file_symbols: HashMap<String, Vec<Symbol>>,
+    /// Lower-fidelity files used for syntax-only relationship resolution.
+    structural_file_symbols: HashMap<String, Vec<Symbol>>,
 }
 
 /// Run the codebase ingest command.
 // TODO: support --batch to enable parallel/batched ingestion
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: &HadesConfig,
     path: PathBuf,
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    compile_commands: Option<&Path>,
     force: bool,
+    allow_analysis_downgrade: bool,
 ) -> Result<()> {
     let cmd_start = Instant::now();
 
@@ -132,7 +141,11 @@ pub async fn run(
             let lang = match l.to_lowercase().as_str() {
                 "python" | "py" => Language::Python,
                 "rust" | "rs" => Language::Rust,
-                other => bail!("unsupported language: {other}. Supported: python, rust"),
+                "c" | "cpp" | "c++" | "cuda" | "cu" => Language::Cpp,
+                "go" | "golang" => Language::Go,
+                other => {
+                    bail!("unsupported language: {other}. Supported: python, rust, go, c/c++/cuda")
+                }
             };
             Some(lang)
         }
@@ -187,6 +200,8 @@ pub async fn run(
         python_file_symbols: HashMap::new(),
         rust_imports: HashMap::new(),
         rust_file_symbols: HashMap::new(),
+        cpp_file_symbols: HashMap::new(),
+        structural_file_symbols: HashMap::new(),
     };
     // Collect absolute paths for Rust files — used for rust-analyzer post-loop phase.
     let mut rust_abs_paths: Vec<PathBuf> = Vec::new();
@@ -236,7 +251,18 @@ pub async fn run(
         }
 
         let result = if is_unparsed {
-            ingest_unparsed_file(&db, embedder.as_ref(), config, file_path, &rel_path).await
+            ingest_unparsed_file(
+                &db,
+                embedder.as_ref(),
+                config,
+                file_path,
+                &rel_path,
+                None,
+                "no registered language or grammar",
+                force,
+                allow_analysis_downgrade,
+            )
+            .await
         } else {
             ingest_file(
                 &db,
@@ -246,7 +272,9 @@ pub async fn run(
                 &rel_path,
                 lang_override,
                 &mut imports,
+                compile_commands,
                 force,
+                allow_analysis_downgrade,
             )
             .await
         };
@@ -315,6 +343,34 @@ pub async fn run(
         }
     }
 
+    // Resolve compiler-grade C/C++/CUDA calls, including CUDA kernel launches.
+    // libclang records target USRs and definition spans during each file parse;
+    // this batch phase maps them onto HADES's cross-file span keys.
+    let cpp_call_edges = cpp_edges::resolve_cpp_calls(&base, &imports.cpp_file_symbols);
+    if !cpp_call_edges.is_empty() {
+        info!(
+            edge_count = cpp_call_edges.len(),
+            "resolved C/C++/CUDA call edges"
+        );
+        if let Err(e) =
+            crud::insert_documents(&db, CODEBASE.calls_edges, &cpp_call_edges, true).await
+        {
+            warn!(error = %e, "failed to store C/C++/CUDA call edges");
+        }
+    }
+
+    let structural_edges = tree_sitter_edges::resolve(&imports.structural_file_symbols);
+    if !structural_edges.calls.is_empty() {
+        crud::insert_documents(&db, CODEBASE.calls_edges, &structural_edges.calls, true)
+            .await
+            .context("failed to store Tree-sitter call edges")?;
+    }
+    if !structural_edges.imports.is_empty() {
+        crud::insert_documents(&db, CODEBASE.imports_edges, &structural_edges.imports, true)
+            .await
+            .context("failed to store Tree-sitter import edges")?;
+    }
+
     // Resolve Rust import graph edges (file → symbol).
     let rust_symbol_index = rust_imports::build_symbol_index(&imports.rust_file_symbols);
     let rs_import_edges =
@@ -331,7 +387,8 @@ pub async fn run(
         }
     }
 
-    let total_import_edges = py_import_edges.len() + rs_import_edges.len();
+    let total_import_edges =
+        py_import_edges.len() + rs_import_edges.len() + structural_edges.imports.len();
 
     // ── rust-analyzer deep analysis ────────────────────────────────────
     // When Rust files were ingested, optionally use rust-analyzer for richer
@@ -399,6 +456,9 @@ pub async fn run(
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
         "python_call_edges": py_call_edges.len(),
+        "cpp_call_edges": cpp_call_edges.len(),
+        "structural_call_edges": structural_edges.calls.len(),
+        "structural_import_edges": structural_edges.imports.len(),
         "rust_analyzer": {
             "symbols": ra_stats.symbols,
             "edges": ra_stats.edges,
@@ -636,7 +696,9 @@ async fn ingest_file(
     rel_path: &str,
     lang_override: Option<Language>,
     imports: &mut ImportContext,
+    compile_commands: Option<&Path>,
     force: bool,
+    allow_analysis_downgrade: bool,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -650,26 +712,40 @@ async fn ingest_file(
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
     // consistently regardless of cwd. Keys and logging still use rel_path.
+    let options = AnalysisOptions {
+        compilation_database: compile_commands.map(Path::to_path_buf),
+    };
     let mut analysis =
-        match code::analyze_with_language(&source, lang, &file_path.to_string_lossy()) {
-            Ok(a) => a,
-            Err(CodeAnalysisError::ParseError(msg)) => {
-                warn!(path = rel_path, error = %msg, "parse error, skipping");
-                return Ok(FileResult {
-                    path: rel_path.to_string(),
-                    success: true,
-                    language: Some(lang.name().to_string()),
-                    num_symbols: None,
-                    num_chunks: None,
-                    num_embeddings: None,
-                    embedding_error: None,
-                    skipped: Some(true),
-                    error: Some(format!("parse error: {msg}")),
-                    duration_ms: 0,
-                });
+        match code::analyze_with_fallback(&source, lang, &file_path.to_string_lossy(), &options) {
+            AnalyzerOutcome::Success(analysis) => analysis,
+            AnalyzerOutcome::Failed { analyzer, reason } => {
+                warn!(
+                    path = rel_path,
+                    analyzer,
+                    reason,
+                    "semantic and structural analysis unavailable; using raw text fallback"
+                );
+                return ingest_unparsed_file(
+                    db,
+                    embedder,
+                    config,
+                    file_path,
+                    rel_path,
+                    Some(lang.name()),
+                    &reason,
+                    force,
+                    allow_analysis_downgrade,
+                )
+                .await;
             }
-            Err(e) => return Err(e.into()),
         };
+    info!(
+        path = rel_path,
+        analyzer = analysis.analyzer,
+        analysis_tier = %analysis.analysis_tier,
+        fallback_reason = analysis.fallback_reason.as_deref(),
+        "selected code analyzer"
+    );
 
     // Check for incremental skip via symbol_hash.
     // Only skip if the code is unchanged AND embeddings aren't needed (either
@@ -678,6 +754,26 @@ async fn ingest_file(
     // touches only this file's own symbols and outbound edges, so inbound
     // authored bridge edges are preserved (unlike a cascading `db purge`).
     let fkey = keys::file_key(rel_path);
+    if preserve_higher_fidelity(db, &fkey, analysis.analysis_tier, allow_analysis_downgrade).await?
+    {
+        warn!(
+            path = rel_path,
+            incoming_tier = %analysis.analysis_tier,
+            "preserving higher-fidelity stored analysis"
+        );
+        return Ok(FileResult {
+            path: rel_path.to_string(),
+            success: true,
+            language: Some(lang.name().to_string()),
+            num_symbols: None,
+            num_chunks: None,
+            num_embeddings: None,
+            embedding_error: None,
+            skipped: Some(true),
+            error: Some("higher-fidelity stored analysis preserved".to_string()),
+            duration_ms: 0,
+        });
+    }
     if !force
         && check_unchanged(db, &fkey, &analysis.symbol_hash, embedder.is_some()).await?
             == Some(true)
@@ -780,6 +876,8 @@ async fn ingest_file(
                 "start_char": c.start_char,
                 "end_char": c.end_char,
                 "symbols": overlapping_symbols,
+                "analysis_tier": analysis.analysis_tier.as_str(),
+                "analyzer": analysis.analyzer,
             })
         })
         .collect();
@@ -803,6 +901,8 @@ async fn ingest_file(
                 "start_line": s.start_line,
                 "end_line": s.end_line,
                 "metadata": s.metadata,
+                "analysis_tier": analysis.analysis_tier.as_str(),
+                "analyzer": analysis.analyzer,
             })
         })
         .collect();
@@ -821,6 +921,9 @@ async fn ingest_file(
                 "_to": format!("{}/{}", CODEBASE.symbols, skey),
                 "file_path": rel_path,
                 "symbol_name": s.name,
+                "analysis_tier": analysis.analysis_tier.as_str(),
+                "analyzer": analysis.analyzer,
+                "resolution": if analysis.analysis_tier == AnalysisTier::Semantic { "semantic" } else { "syntactic" },
             })
         })
         .collect();
@@ -893,6 +996,9 @@ async fn ingest_file(
         "embedding_count": num_embeddings_written,
         "total_lines": analysis.metrics.total_lines,
         "status": "PROCESSED",
+        "analysis_tier": analysis.analysis_tier.as_str(),
+        "analyzer": analysis.analyzer,
+        "fallback_reason": analysis.fallback_reason,
         "ingested_at": chrono::Utc::now().to_rfc3339(),
     });
 
@@ -930,18 +1036,30 @@ async fn ingest_file(
         .await
         .context("failed to store file document")?;
 
-    // Transfer symbols into the import index (avoids cloning).
+    // Transfer symbols into relationship indexes.
+    if analysis.analysis_tier == AnalysisTier::Structural {
+        imports
+            .structural_file_symbols
+            .insert(rel_path.to_string(), analysis.symbols.clone());
+    }
     match lang {
-        Language::Rust => {
+        Language::Rust if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
             imports
                 .rust_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
-        Language::Python => {
+        Language::Python if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
             imports
                 .python_file_symbols
                 .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
         }
+        Language::Cpp if uses_semantic_relationship_resolver(lang, analysis.analysis_tier) => {
+            imports
+                .cpp_file_symbols
+                .insert(rel_path.to_string(), std::mem::take(&mut analysis.symbols));
+        }
+        Language::Cpp => {}
+        Language::Go => {}
         _ => {}
     }
 
@@ -968,6 +1086,11 @@ async fn ingest_file(
     })
 }
 
+fn uses_semantic_relationship_resolver(language: Language, tier: AnalysisTier) -> bool {
+    matches!(language, Language::Rust | Language::Python | Language::Cpp)
+        && tier == AnalysisTier::Semantic
+}
+
 // ── Unparsed-language fallback (#121) ────────────────────────────────────
 
 /// Map an unparsed file extension to a language label for the file node.
@@ -983,6 +1106,7 @@ fn unparsed_language_label(rel_path: &str) -> &'static str {
         // simplification. The label is for human display / RGCN features only,
         // not parsing, so the ambiguity is harmless here.
         Some("c") | Some("h") => "c",
+        Some("go") => "go",
         _ => "other",
     }
 }
@@ -992,17 +1116,61 @@ fn unparsed_language_label(rel_path: &str) -> &'static str {
 /// symbol/edge extraction. The file node is *merged* (existing fields
 /// preserved), not overwritten, so a pre-existing node's metadata survives
 /// (e.g. an externally-created stub's `note`/`source`). See #121.
+#[allow(clippy::too_many_arguments)]
 async fn ingest_unparsed_file(
     db: &ArangoPool,
     embedder: Option<&EmbeddingClient>,
     config: &HadesConfig,
     file_path: &Path,
     rel_path: &str,
+    language_label: Option<&str>,
+    fallback_reason: &str,
+    force: bool,
+    allow_analysis_downgrade: bool,
 ) -> Result<FileResult> {
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("failed to read {}", file_path.display()))?;
     let fkey = keys::file_key(rel_path);
-    let lang_label = unparsed_language_label(rel_path);
+    let lang_label = language_label.unwrap_or_else(|| unparsed_language_label(rel_path));
+
+    if preserve_higher_fidelity(db, &fkey, AnalysisTier::Text, allow_analysis_downgrade).await? {
+        warn!(
+            path = rel_path,
+            fallback_reason, "raw fallback skipped to preserve higher-fidelity stored analysis"
+        );
+        return Ok(FileResult {
+            path: rel_path.to_string(),
+            success: true,
+            language: Some(lang_label.to_string()),
+            num_symbols: None,
+            num_chunks: None,
+            num_embeddings: None,
+            embedding_error: None,
+            skipped: Some(true),
+            error: Some("higher-fidelity stored analysis preserved".to_string()),
+            duration_ms: 0,
+        });
+    }
+    let content_hash = code::compute_content_hash(&source);
+    if !force && check_unchanged(db, &fkey, &content_hash, embedder.is_some()).await? == Some(true)
+    {
+        debug!(path = rel_path, "unchanged raw text, skipping");
+        return Ok(FileResult {
+            path: rel_path.to_string(),
+            success: true,
+            language: Some(lang_label.to_string()),
+            num_symbols: Some(0),
+            num_chunks: None,
+            num_embeddings: None,
+            embedding_error: None,
+            skipped: Some(true),
+            error: None,
+            duration_ms: 0,
+        });
+    }
+    if allow_analysis_downgrade {
+        purge_file_symbols_and_edges(db, &fkey).await;
+    }
 
     // Parser-free chunking: empty defs => whole file, split at line boundaries
     // to stay under the max chunk size.
@@ -1024,6 +1192,8 @@ async fn ingest_unparsed_file(
                 "start_char": c.start_char,
                 "end_char": c.end_char,
                 "symbols": [],
+                "analysis_tier": "text",
+                "analyzer": "raw-text",
             })
         })
         .collect();
@@ -1092,11 +1262,15 @@ async fn ingest_unparsed_file(
         "rel_path": rel_path,
         "kind": "file",
         "language": lang_label,
+        "symbol_hash": content_hash,
         "symbol_count": 0,
         "chunk_count": num_chk,
         "embedding_count": num_embeddings_written,
         "total_lines": total_lines,
         "status": "PROCESSED",
+        "analysis_tier": "text",
+        "analyzer": "raw-text",
+        "fallback_reason": fallback_reason,
         "ingested_at": chrono::Utc::now().to_rfc3339(),
     });
     upsert_merge_file_node(db, &fkey, fields).await?;
@@ -1237,6 +1411,32 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 }
 
 // ── Incremental check ───────────────────────────────────────────────────
+
+/// Return true when replacing the stored artifacts would lower fidelity.
+fn should_preserve_tier(
+    stored: Option<AnalysisTier>,
+    incoming: AnalysisTier,
+    allow_downgrade: bool,
+) -> bool {
+    !allow_downgrade && stored.is_some_and(|tier| tier > incoming)
+}
+
+/// Enforce monotonic analyzer fidelity before any destructive per-file write.
+async fn preserve_higher_fidelity(
+    db: &ArangoPool,
+    file_key: &str,
+    incoming: AnalysisTier,
+    allow_downgrade: bool,
+) -> Result<bool> {
+    match crud::get_document(db, CODEBASE.files, file_key).await {
+        Ok(doc) => {
+            let stored = doc["analysis_tier"].as_str().and_then(AnalysisTier::parse);
+            Ok(should_preserve_tier(stored, incoming, allow_downgrade))
+        }
+        Err(e) if e.is_not_found() => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// Check if a file can be skipped during incremental ingest.
 ///
@@ -1417,6 +1617,9 @@ async fn run_rust_analyzer_phase(
                     "_key": edge_key,
                     "_from": e.from,
                     "_to": e.to,
+                    "analysis_tier": "semantic",
+                    "analyzer": "rust-analyzer",
+                    "resolution": "semantic",
                 });
                 // Merge edge metadata.
                 if let Value::Object(meta) = &e.metadata
@@ -1455,6 +1658,8 @@ async fn run_rust_analyzer_phase(
             "ra_analyzed": true,
             "ra_symbol_count": sym_count,
             "ra_analyzed_at": analyzed_at,
+            "analysis_tier": "semantic",
+            "analyzer": "rust-analyzer",
         });
         match crud::update_document(db, CODEBASE.files, &fkey, &patch).await {
             Ok(_) => patched_count += 1,
@@ -1741,19 +1946,61 @@ mod tests {
     }
 
     #[test]
+    fn test_analysis_fidelity_is_monotonic_without_explicit_downgrade() {
+        assert!(should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            false
+        ));
+        assert!(should_preserve_tier(
+            Some(AnalysisTier::Structural),
+            AnalysisTier::Text,
+            false
+        ));
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            true
+        ));
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Structural),
+            AnalysisTier::Semantic,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_only_semantic_languages_use_dedicated_edge_resolvers() {
+        for language in [Language::Rust, Language::Python, Language::Cpp] {
+            assert!(uses_semantic_relationship_resolver(
+                language,
+                AnalysisTier::Semantic
+            ));
+            assert!(!uses_semantic_relationship_resolver(
+                language,
+                AnalysisTier::Structural
+            ));
+        }
+        assert!(!uses_semantic_relationship_resolver(
+            Language::Go,
+            AnalysisTier::Semantic
+        ));
+    }
+
+    #[test]
     fn test_discover_files_unparsed_ext() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("kernel.cu"), "__global__ void k(){}\n").unwrap();
-        fs::write(dir.path().join("header.cuh"), "#pragma once\n").unwrap();
+        fs::write(dir.path().join("shader.wgsl"), "fn main() {}\n").unwrap();
+        fs::write(dir.path().join("shader.vert"), "void main() {}\n").unwrap();
         fs::write(dir.path().join("app.py"), "x = 1\n").unwrap();
         fs::write(dir.path().join("readme.md"), "# hi\n").unwrap();
 
-        // Without the allowlist: only the .py is picked up (.cu/.cuh skipped).
+        // Without the allowlist: only the .py is picked up.
         let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1);
 
-        // With cu,cuh allowlisted: .py + .cu + .cuh, still not .md.
-        let allow: HashSet<String> = ["cu", "cuh"].iter().map(|s| s.to_string()).collect();
+        // Explicitly allowlisted extensions are ingested as raw text.
+        let allow: HashSet<String> = ["wgsl", "vert"].iter().map(|s| s.to_string()).collect();
         let files = discover_files(dir.path(), None, &allow).unwrap();
         assert_eq!(files.len(), 3);
     }
@@ -1761,14 +2008,14 @@ mod tests {
     #[test]
     fn test_discover_files_unparsed_single_file() {
         let dir = TempDir::new().unwrap();
-        let cu = dir.path().join("backward.cu");
-        fs::write(&cu, "__global__ void b(){}\n").unwrap();
+        let shader = dir.path().join("backward.wgsl");
+        fs::write(&shader, "fn main() {}\n").unwrap();
 
         // Single unparsed file is rejected without the allowlist...
-        assert!(discover_files(&cu, None, &HashSet::new()).is_err());
+        assert!(discover_files(&shader, None, &HashSet::new()).is_err());
         // ...and accepted with it.
-        let allow: HashSet<String> = ["cu"].iter().map(|s| s.to_string()).collect();
-        let files = discover_files(&cu, None, &allow).unwrap();
+        let allow: HashSet<String> = ["wgsl"].iter().map(|s| s.to_string()).collect();
+        let files = discover_files(&shader, None, &allow).unwrap();
         assert_eq!(files.len(), 1);
     }
 
@@ -1787,10 +2034,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.path().join("c.go"), "package demo\n").unwrap();
+        fs::write(dir.path().join("d.cpp"), "void run() {}\n").unwrap();
         fs::write(dir.path().join("readme.md"), "# hi\n").unwrap();
 
         let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
-        assert_eq!(files.len(), 2); // .py + .rs, not .md
+        assert_eq!(files.len(), 4); // all registered languages, not .md
     }
 
     #[test]

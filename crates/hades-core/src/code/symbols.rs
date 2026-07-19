@@ -44,6 +44,14 @@ impl Symbol {
     /// Mirrors the qualified names produced by the rust-analyzer enrichment
     /// path, which has always keyed correctly.
     pub fn qualified_name(&self) -> String {
+        // Compiler-grade analyzers can provide the authoritative qualified
+        // name directly (namespaces, classes, overload owners, templates).
+        // Prefer it over reconstructing language-specific ownership here.
+        if let Some(qualified) = self.metadata.get("qualified_name").and_then(|v| v.as_str())
+            && !qualified.is_empty()
+        {
+            return qualified.to_string();
+        }
         if let Some(ctx) = self.metadata.get("impl_context").and_then(|v| v.as_str())
             && !ctx.is_empty()
         {
@@ -197,6 +205,47 @@ pub struct FileAnalysis {
     pub symbol_hash: String,
     /// Top-level definition boundaries for chunking.
     pub top_level_defs: Vec<TopLevelDef>,
+    /// Fidelity tier of the selected analyzer.
+    pub analysis_tier: AnalysisTier,
+    /// Analyzer implementation that produced this result.
+    pub analyzer: String,
+    /// Why a lower-priority analyzer was selected, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+/// Ordered fidelity tiers used to prevent accidental graph downgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisTier {
+    Text,
+    Structural,
+    Semantic,
+}
+
+impl AnalysisTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Structural => "structural",
+            Self::Semantic => "semantic",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "text" => Some(Self::Text),
+            "structural" => Some(Self::Structural),
+            "semantic" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for AnalysisTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Compute a deterministic hash of symbol names for change detection.
@@ -213,6 +262,11 @@ pub fn compute_symbol_hash(symbols: &[Symbol]) -> String {
     let joined = names.join("\n");
     let digest = Sha256::digest(joined.as_bytes());
     hex_encode(&digest)
+}
+
+/// Compute a stable content digest for parser-free incremental ingestion.
+pub fn compute_content_hash(source: &str) -> String {
+    hex_encode(&Sha256::digest(source.as_bytes()))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -394,5 +448,14 @@ mod tests {
         assert_eq!(SymbolKind::Function.lang_kind(), "function");
         assert_eq!(SymbolKind::Import.lang_kind(), "import");
         assert_eq!(SymbolKind::Impl.lang_kind(), "impl");
+    }
+
+    #[test]
+    fn test_content_hash_tracks_raw_text_changes() {
+        assert_eq!(compute_content_hash("same"), compute_content_hash("same"));
+        assert_ne!(
+            compute_content_hash("before"),
+            compute_content_hash("after")
+        );
     }
 }

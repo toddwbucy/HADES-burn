@@ -19,6 +19,8 @@ use super::symbols::{
 
 /// Analyze Python source code, returning symbols, metrics, and structure.
 pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
+    parser::parse(source, parser::Mode::Module, "<input>")
+        .map_err(|e| super::CodeAnalysisError::ParseError(e.to_string()))?;
     let line_offsets = build_line_offsets(source);
 
     // Parse once — share the AST across all extraction phases.
@@ -44,6 +46,9 @@ pub fn analyze(source: &str) -> Result<FileAnalysis, super::CodeAnalysisError> {
         metrics,
         symbol_hash,
         top_level_defs,
+        analysis_tier: super::AnalysisTier::Semantic,
+        analyzer: "rustpython-parser".to_string(),
+        fallback_reason: None,
     })
 }
 
@@ -1176,6 +1181,6 @@ def f():
     #[test]
     fn test_syntax_error_graceful() {
         let analysis = analyze("def foo(:\n    pass");
-        let _ = analysis; // Should not panic — returns Ok with empty symbols.
+        assert!(analysis.is_err());
     }
 }

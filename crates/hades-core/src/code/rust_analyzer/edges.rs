@@ -119,6 +119,8 @@ pub struct SymbolDocument {
     pub derives: Vec<String>,
     pub python_name: Option<String>,
     pub analyzed_at: String,
+    pub analysis_tier: String,
+    pub analyzer: String,
 }
 
 /// Resolves file-level extraction data into symbol documents and edges.
@@ -179,6 +181,8 @@ impl RustEdgeResolver {
                     derives: sym.derives.clone(),
                     python_name: sym.python_name.clone(),
                     analyzed_at: extraction.analyzed_at.clone(),
+                    analysis_tier: "semantic".to_string(),
+                    analyzer: "rust-analyzer".to_string(),
                 });
             }
         }

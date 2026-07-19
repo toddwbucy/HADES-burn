@@ -511,7 +511,8 @@ fn extract_signature_from_hover(hover: &Value) -> Option<String> {
         v.to_string()
     } else if let Some(s) = contents.as_str() {
         s.to_string()
-    } else if let Some(arr) = contents.as_array() {
+    } else {
+        let arr = contents.as_array()?;
         arr.iter()
             .filter_map(|c| {
                 c.get("value")
@@ -520,8 +521,6 @@ fn extract_signature_from_hover(hover: &Value) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    } else {
-        return None;
     };
 
     // Extract Rust code blocks from markdown.

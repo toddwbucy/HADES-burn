@@ -55,7 +55,7 @@ For the research questions HADES-Burn was built to investigate, see [RESEARCH_GO
 
 **Tier-aware command dispatch.** The query daemon at `/run/hades/hades.sock` classifies commands into three tiers — Agent (safe reads and task management), Internal (diagnostics), and Admin (writes, DDL, raw AQL) — and supports opt-in client self-restriction via the request's `session` field. An AI-agent harness can declare `"session": "agent"` to have the daemon reject any commands above the Agent tier, preventing accidental admin actions from a model that was only meant to read. The tier metadata is documentation as much as enforcement: it makes the agent-safe command set inspectable. *Security against malicious clients is not the goal here; that is enforced at the ArangoDB layer via ACL grants on the dedicated `hades` ArangoDB user (configured at install time).* See [docs/daemon-protocol.md](docs/daemon-protocol.md).
 
-**AST-level code ingestion.** Rust source is parsed with `syn` and rust-analyzer; Python with `rustpython-parser`. Chunking respects symbol boundaries, and cross-file import resolution produces typed edges in the graph. Embedding is optional and decoupled from structural ingestion.
+**Tiered multilingual code ingestion.** Rust uses `syn` plus rust-analyzer, Python uses `rustpython-parser`, and C, C++, and CUDA use libclang. C-family ingestion understands namespaces, templates, overloads, calls, and CUDA kernel launches; it can consume a project's `compile_commands.json`. Registered Tree-sitter grammars provide lower-fidelity structural coverage for Go and for temporary dedicated-analyzer failures. Every artifact records `semantic`, `structural`, or `text` provenance, and re-ingest will not replace a higher tier unless `--allow-analysis-downgrade` is explicit.
 
 ## Requirements
 
@@ -290,9 +290,12 @@ shell — it takes precedence over anything in YAML.
 hades --db <name> db query "attention mechanism" -n 5
 hades --db <name> db graph traverse "papers/example_paper_key" -d outbound --max-depth 3
 hades --db <name> codebase ingest /path/to/project --lang rust
+hades --db <name> codebase ingest /path/to/cuda-project --compile-commands /path/to/build
 hades --db <name> db schema init --seed nl
 hades daemon
 ```
+
+For C/C++/CUDA, `--compile-commands` accepts either the JSON file or its containing directory. If omitted, HADES searches source ancestors and their `build/` directories. One database may contain files from every supported language; language detection and analysis happen per file.
 
 All output is JSON to stdout; progress and logs are written to stderr. The full command set is documented in [docs/daemon-protocol.md](docs/daemon-protocol.md).
 

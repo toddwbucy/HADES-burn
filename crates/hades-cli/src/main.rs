@@ -187,13 +187,16 @@ fn init_tracing() {
 }
 
 /// Run `codebase ingest` (or update) with shared runtime + error handling.
+#[allow(clippy::too_many_arguments)]
 fn run_codebase_ingest(
     config: &hades_core::config::HadesConfig,
     path: PathBuf,
     language: Option<&str>,
     batch: bool,
     unparsed_ext: &[String],
+    compile_commands: Option<&std::path::Path>,
     force: bool,
+    allow_analysis_downgrade: bool,
 ) -> anyhow::Result<()> {
     init_tracing();
     let rt = tokio::runtime::Runtime::new()?;
@@ -203,7 +206,9 @@ fn run_codebase_ingest(
         language,
         batch,
         unparsed_ext,
+        compile_commands,
         force,
+        allow_analysis_downgrade,
     ));
     match result {
         Ok(()) => Ok(()),
@@ -273,17 +278,21 @@ fn main() -> anyhow::Result<()> {
             language,
             batch,
             unparsed_ext,
+            compile_commands,
             force,
+            allow_analysis_downgrade,
         }) => run_codebase_ingest(
             &config,
             path,
             language.as_deref(),
             batch,
             &unparsed_ext,
+            compile_commands.as_deref(),
             force,
+            allow_analysis_downgrade,
         ),
         Commands::Codebase(CodebaseCmd::Update { path }) => {
-            run_codebase_ingest(&config, path, None, false, &[], false)
+            run_codebase_ingest(&config, path, None, false, &[], None, false, false)
         }
         Commands::Codebase(CodebaseCmd::Stats) => {
             init_tracing();

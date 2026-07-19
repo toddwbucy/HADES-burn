@@ -59,10 +59,6 @@ pub enum ExportError {
     /// Duplicate indices would make output-row ownership ambiguous.
     #[error("duplicate node index {index} in embedding subset")]
     DuplicateNodeIndex { index: u32 },
-
-    /// The ID map cannot be represented by the training protocol's U32 IDs.
-    #[error("ID map contains {num_nodes} nodes, exceeding the u32 node-index limit")]
-    TooManyNodes { num_nodes: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -148,13 +144,9 @@ pub async fn export_embeddings(
     embed_dim: usize,
     config: &ExportConfig,
 ) -> Result<ExportResult, ExportError> {
-    let node_indices: Vec<u32> = (0..id_map.len())
-        .map(u32::try_from)
-        .collect::<Result<_, _>>()
-        .map_err(|_| ExportError::TooManyNodes {
-            num_nodes: id_map.len(),
-        })?;
-    export_embeddings_subset(pool, id_map, &node_indices, embeddings, embed_dim, config).await
+    validate_embedding_dimensions(id_map.len(), embeddings, embed_dim)?;
+    let groups = id_map.nodes_by_collection();
+    export_grouped_embeddings(pool, &groups, embeddings, embed_dim, config).await
 }
 
 /// Write a compact embedding matrix for selected global node indices.
@@ -190,16 +182,7 @@ fn validate_subset_export(
     embeddings: &[f32],
     embed_dim: usize,
 ) -> Result<(), ExportError> {
-    let num_nodes = node_indices.len();
-    let expected = num_nodes * embed_dim;
-    if embeddings.len() != expected {
-        return Err(ExportError::DimensionMismatch {
-            actual: embeddings.len(),
-            expected,
-            num_nodes,
-            embed_dim,
-        });
-    }
+    validate_embedding_dimensions(node_indices.len(), embeddings, embed_dim)?;
 
     let mut seen = HashSet::with_capacity(node_indices.len());
     for &index in node_indices {
@@ -212,6 +195,23 @@ fn validate_subset_export(
         if !seen.insert(index) {
             return Err(ExportError::DuplicateNodeIndex { index });
         }
+    }
+    Ok(())
+}
+
+fn validate_embedding_dimensions(
+    num_nodes: usize,
+    embeddings: &[f32],
+    embed_dim: usize,
+) -> Result<(), ExportError> {
+    let expected = num_nodes * embed_dim;
+    if embeddings.len() != expected {
+        return Err(ExportError::DimensionMismatch {
+            actual: embeddings.len(),
+            expected,
+            num_nodes,
+            embed_dim,
+        });
     }
     Ok(())
 }

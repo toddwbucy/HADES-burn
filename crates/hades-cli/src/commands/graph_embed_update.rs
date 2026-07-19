@@ -13,6 +13,7 @@
 //! 5. Full forward pass, or a bounded-neighbourhood forward for new nodes
 //! 6. Export the full or compact embedding matrix back to ArangoDB
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -54,6 +55,20 @@ pub async fn run(
 
     info!(db = %export_pool.database(), "export target validated");
 
+    // Preserve the full-update fast-fail path: unlike `--new-nodes`, it has
+    // no possible no-op result that would justify loading the graph first.
+    let checkpoint_path = PathBuf::from(checkpoint_dir).join("best.pt");
+    let preflight_training_client = if new_nodes {
+        None
+    } else {
+        validate_checkpoint(&checkpoint_path)?;
+        Some(
+            TrainingClient::connect(TrainingClientConfig::default())
+                .await
+                .context("failed to connect to HADES training service")?,
+        )
+    };
+
     // ── Load graph from ArangoDB ────────────────────────────────────
     info!("loading runtime schema");
     let schema = hades_core::graph::RuntimeSchema::load(&source_pool)
@@ -76,27 +91,45 @@ pub async fn run(
     );
 
     // ── Select destination nodes for an incremental update ──────────
-    let selected_indices = if new_nodes {
+    let selection = if new_nodes {
         if schema.meta.resolved_model_type() != "hetero_sage" {
             anyhow::bail!(
                 "--new-nodes requires schema model_type 'hetero_sage'; database schema selects '{}'",
                 schema.meta.resolved_model_type()
             );
         }
-        let indices = find_nodes_missing_structural_embeddings(&export_pool, &id_map)
+        let selection = find_nodes_missing_structural_embeddings(&export_pool, &id_map)
             .await
             .context("failed to select nodes missing structural embeddings")?;
         info!(
-            selected = indices.len(),
+            selected = selection.indices.len(),
+            absent_from_target = selection.absent_from_target,
             "selected new nodes for inductive update"
         );
-        Some(indices)
+        if selection.absent_from_target > 0 {
+            warn!(
+                absent_from_target = selection.absent_from_target,
+                target_db = %export_pool.database(),
+                "source graph nodes are absent from the export target"
+            );
+        }
+        Some(selection)
     } else {
         None
     };
 
-    let checkpoint_path = PathBuf::from(checkpoint_dir).join("best.pt");
-    if selected_indices.as_ref().is_some_and(Vec::is_empty) {
+    if selection
+        .as_ref()
+        .is_some_and(|selection| selection.indices.is_empty())
+    {
+        let absent_from_target = selection
+            .as_ref()
+            .map_or(0, |selection| selection.absent_from_target);
+        let message = if absent_from_target == 0 {
+            "all graph nodes already have structural embeddings"
+        } else {
+            "no destination documents need embeddings; some source graph nodes are absent from the target"
+        };
         let result_data = json!({
             "status": "success",
             "mode": "new_nodes",
@@ -105,30 +138,31 @@ pub async fn run(
                 "num_edges": graph.num_edges,
             },
             "model": {
-                "checkpoint": checkpoint_path.to_string_lossy(),
-                "architecture": schema.meta.resolved_model_type(),
+                "schema_architecture": schema.meta.resolved_model_type(),
+                "checkpoint_validated": false,
+                "service_contacted": false,
             },
             "embeddings": { "num_nodes": 0 },
             "export": {
                 "count": 0,
                 "target_db": export_pool.database(),
+                "absent_from_target": absent_from_target,
             },
-            "message": "all graph nodes already have structural embeddings",
+            "message": message,
         });
         output::print_output("graph-embed.update", result_data, &OutputFormat::Json);
         return Ok(());
     }
 
     // ── Validate checkpoint and connect to training service ─────────
-    if !checkpoint_path.exists() {
-        anyhow::bail!(
-            "no trained model found at {}. Run `graph-embed train` first.",
-            checkpoint_path.display()
-        );
-    }
-    let training_client = TrainingClient::connect(TrainingClientConfig::default())
-        .await
-        .context("failed to connect to HADES training service")?;
+    let training_client = if let Some(client) = preflight_training_client {
+        client
+    } else {
+        validate_checkpoint(&checkpoint_path)?;
+        TrainingClient::connect(TrainingClientConfig::default())
+            .await
+            .context("failed to connect to HADES training service")?
+    };
 
     // ── Serialize graph for inference ───────────────────────────────
     let safetensors_dir = PathBuf::from(checkpoint_dir);
@@ -170,9 +204,9 @@ pub async fn run(
 
     // ── Generate embeddings (single forward pass) ───────────────────
     let embeddings_path = safetensors_dir.join("embeddings.bin");
-    let emb_result = if let Some(indices) = &selected_indices {
+    let emb_result = if let Some(selection) = &selection {
         training_client
-            .get_embeddings_subset(Some(&embeddings_path), indices)
+            .get_embeddings_subset(Some(&embeddings_path), &selection.indices)
             .await
             .context("failed to generate new-node embeddings")?
     } else {
@@ -182,7 +216,9 @@ pub async fn run(
             .context("failed to generate embeddings")?
     };
 
-    let expected_embeddings = selected_indices.as_ref().map_or(id_map.len(), Vec::len);
+    let expected_embeddings = selection
+        .as_ref()
+        .map_or(id_map.len(), |selection| selection.indices.len());
     if emb_result.num_nodes as usize != expected_embeddings {
         anyhow::bail!(
             "training service returned {} embedding rows; expected {}",
@@ -206,11 +242,11 @@ pub async fn run(
     // ── Export embeddings to ArangoDB ────────────────────────────────
     info!(db = %export_pool.database(), "exporting embeddings");
 
-    let export_result = if let Some(indices) = &selected_indices {
+    let export_result = if let Some(selection) = &selection {
         export_embeddings_subset(
             &export_pool,
             &id_map,
-            indices,
+            &selection.indices,
             &embeddings,
             emb_result.embed_dim as usize,
             &ExportConfig::default(),
@@ -262,6 +298,9 @@ pub async fn run(
         "export": {
             "count": export_count,
             "target_db": export_pool.database(),
+            "absent_from_target": selection
+                .as_ref()
+                .map_or(0, |selection| selection.absent_from_target),
         },
     });
 
@@ -270,6 +309,35 @@ pub async fn run(
 }
 
 const MISSING_EMBEDDING_BATCH_SIZE: usize = 5_000;
+const MISSING_EMBEDDING_QUERY_CONCURRENCY: usize = 8;
+
+#[derive(Debug)]
+struct MissingEmbeddingSelection {
+    indices: Vec<u32>,
+    absent_from_target: usize,
+}
+
+#[derive(Debug)]
+struct MissingEmbeddingBatch {
+    collection: String,
+    keys: Vec<String>,
+}
+
+#[derive(Debug)]
+struct MissingEmbeddingBatchResult {
+    missing_ids: Vec<String>,
+    absent_from_target: usize,
+}
+
+fn validate_checkpoint(checkpoint_path: &std::path::Path) -> Result<()> {
+    if !checkpoint_path.exists() {
+        anyhow::bail!(
+            "no trained model found at {}. Run `graph-embed train` first.",
+            checkpoint_path.display()
+        );
+    }
+    Ok(())
+}
 
 /// Return global graph indices whose destination documents exist but do not
 /// yet carry a structural embedding. Results are sorted so request and compact
@@ -277,41 +345,154 @@ const MISSING_EMBEDDING_BATCH_SIZE: usize = 5_000;
 async fn find_nodes_missing_structural_embeddings(
     pool: &ArangoPool,
     id_map: &IDMap,
-) -> Result<Vec<u32>> {
-    let mut missing = Vec::new();
+) -> Result<MissingEmbeddingSelection> {
+    let mut batches = VecDeque::new();
     for (collection, nodes) in id_map.nodes_by_collection() {
         for batch in nodes.chunks(MISSING_EMBEDDING_BATCH_SIZE) {
-            let keys: Vec<&str> = batch
+            let keys: Vec<String> = batch
                 .iter()
-                .filter_map(|(arango_id, _)| arango_id.split_once('/').map(|(_, key)| key))
+                .filter_map(|(arango_id, _)| {
+                    arango_id.split_once('/').map(|(_, key)| key.to_string())
+                })
                 .collect();
-            let bind_vars = json!({ "@collection": collection, "keys": keys });
-            let result = query::query(
-                pool,
-                "FOR key IN @keys \
-                 LET d = DOCUMENT(@@collection, key) \
-                 FILTER d != null AND d.structural_embedding == null \
-                 RETURN d._id",
-                Some(&bind_vars),
-                None,
-                false,
-                ExecutionTarget::Reader,
-            )
-            .await
-            .with_context(|| format!("failed to inspect collection {collection}"))?;
-
-            for value in result.results {
-                let arango_id = value.as_str().with_context(|| {
-                    format!("collection {collection} returned a non-string document ID")
-                })?;
-                let index = id_map.get_index(arango_id).with_context(|| {
-                    format!("destination returned unknown graph node {arango_id}")
-                })?;
-                missing.push(u32::try_from(index).context("graph node index exceeds u32::MAX")?);
-            }
+            batches.push_back(MissingEmbeddingBatch {
+                collection: collection.to_string(),
+                keys,
+            });
         }
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..MISSING_EMBEDDING_QUERY_CONCURRENCY {
+        if let Some(batch) = batches.pop_front() {
+            spawn_missing_embedding_query(&mut tasks, pool.clone(), batch);
+        }
+    }
+
+    let mut missing_ids = Vec::new();
+    let mut absent_from_target = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        let batch_result = result
+            .context("missing-embedding query task panicked")?
+            .context("missing-embedding query failed")?;
+        missing_ids.extend(batch_result.missing_ids);
+        absent_from_target += batch_result.absent_from_target;
+        if let Some(batch) = batches.pop_front() {
+            spawn_missing_embedding_query(&mut tasks, pool.clone(), batch);
+        }
+    }
+
+    let mut missing = Vec::with_capacity(missing_ids.len());
+    for arango_id in missing_ids {
+        let index = id_map
+            .get_index(&arango_id)
+            .with_context(|| format!("destination returned unknown graph node {arango_id}"))?;
+        missing.push(u32::try_from(index).context("graph node index exceeds u32::MAX")?);
     }
     missing.sort_unstable();
     missing.dedup();
-    Ok(missing)
+    Ok(MissingEmbeddingSelection {
+        indices: missing,
+        absent_from_target,
+    })
+}
+
+fn spawn_missing_embedding_query(
+    tasks: &mut tokio::task::JoinSet<Result<MissingEmbeddingBatchResult>>,
+    pool: ArangoPool,
+    batch: MissingEmbeddingBatch,
+) {
+    tasks.spawn(async move { query_missing_embedding_batch(&pool, batch).await });
+}
+
+async fn query_missing_embedding_batch(
+    pool: &ArangoPool,
+    batch: MissingEmbeddingBatch,
+) -> Result<MissingEmbeddingBatchResult> {
+    let bind_vars = json!({
+        "@collection": batch.collection,
+        "keys": batch.keys,
+    });
+    let result = query::query(
+        pool,
+        "FOR key IN @keys \
+         LET d = DOCUMENT(@@collection, key) \
+         RETURN { \
+           id: d == null ? null : d._id, \
+           missing: d != null AND d.structural_embedding == null, \
+           absent: d == null \
+         }",
+        Some(&bind_vars),
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await
+    .with_context(|| format!("failed to inspect collection {}", batch.collection))?;
+
+    parse_missing_embedding_results(&batch.collection, result.results)
+}
+
+fn parse_missing_embedding_results(
+    collection: &str,
+    results: Vec<serde_json::Value>,
+) -> Result<MissingEmbeddingBatchResult> {
+    let mut missing_ids = Vec::new();
+    let mut absent_from_target = 0usize;
+    for value in results {
+        if value.get("absent").and_then(serde_json::Value::as_bool) == Some(true) {
+            absent_from_target += 1;
+            continue;
+        }
+        if value.get("missing").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
+        }
+        let arango_id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| format!("collection {collection} returned an invalid document ID"))?;
+        missing_ids.push(arango_id.to_string());
+    }
+    Ok(MissingEmbeddingBatchResult {
+        missing_ids,
+        absent_from_target,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_missing_and_absent_destination_documents() {
+        let result = parse_missing_embedding_results(
+            "codebase_files",
+            vec![
+                json!({ "id": "codebase_files/a", "missing": true, "absent": false }),
+                json!({ "id": "codebase_files/b", "missing": false, "absent": false }),
+                json!({ "id": null, "missing": false, "absent": true }),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(result.missing_ids, vec!["codebase_files/a"]);
+        assert_eq!(result.absent_from_target, 1);
+    }
+
+    #[test]
+    fn missing_destination_document_requires_an_id() {
+        let err = parse_missing_embedding_results(
+            "codebase_files",
+            vec![json!({ "id": null, "missing": true, "absent": false })],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid document ID"));
+    }
+
+    #[test]
+    fn checkpoint_validation_rejects_a_missing_file() {
+        let path = tempfile::tempdir().unwrap().path().join("missing.pt");
+        let err = validate_checkpoint(&path).unwrap_err();
+        assert!(err.to_string().contains("graph-embed train"));
+    }
 }

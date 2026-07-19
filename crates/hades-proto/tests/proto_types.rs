@@ -152,8 +152,10 @@ fn test_training_types() {
 
     let emb_req = GetEmbeddingsRequest {
         output_path: "/tmp/embeddings.safetensors".to_string(),
+        node_indices: vec![3, 8, 13],
     };
     assert!(!emb_req.output_path.is_empty());
+    assert_eq!(emb_req.node_indices, vec![3, 8, 13]);
 
     let ckpt_req = CheckpointRequest {
         path: "/tmp/model.pt".to_string(),

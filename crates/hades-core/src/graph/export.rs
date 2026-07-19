@@ -15,7 +15,7 @@
 //! (`"collection/key"`), so they're portable across databases with the
 //! same schema.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -51,6 +51,14 @@ pub enum ExportError {
     /// Raw bytes length is not a multiple of 4 (not valid F32 data).
     #[error("embedding bytes length {len} is not a multiple of 4")]
     InvalidBytes { len: usize },
+
+    /// A requested graph node index is not present in the ID map.
+    #[error("node index {index} is out of range for ID map with {num_nodes} nodes")]
+    InvalidNodeIndex { index: u32, num_nodes: usize },
+
+    /// Duplicate indices would make output-row ownership ambiguous.
+    #[error("duplicate node index {index} in embedding subset")]
+    DuplicateNodeIndex { index: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +144,66 @@ pub async fn export_embeddings(
     embed_dim: usize,
     config: &ExportConfig,
 ) -> Result<ExportResult, ExportError> {
-    let num_nodes = id_map.len();
+    validate_embedding_dimensions(id_map.len(), embeddings, embed_dim)?;
+    let groups = id_map.nodes_by_collection();
+    export_grouped_embeddings(pool, &groups, embeddings, embed_dim, config).await
+}
+
+/// Write a compact embedding matrix for selected global node indices.
+///
+/// `embeddings` contains one row per `node_indices` entry, in the same order;
+/// it is not indexed by the global graph index. This is the export half of the
+/// inductive new-node update path.
+pub async fn export_embeddings_subset(
+    pool: &ArangoPool,
+    id_map: &IDMap,
+    node_indices: &[u32],
+    embeddings: &[f32],
+    embed_dim: usize,
+    config: &ExportConfig,
+) -> Result<ExportResult, ExportError> {
+    validate_subset_export(id_map, node_indices, embeddings, embed_dim)?;
+
+    let mut groups: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
+    for (row, &node_index) in node_indices.iter().enumerate() {
+        let arango_id = id_map
+            .get_arango_id(node_index as usize)
+            .expect("subset indices validated above");
+        let collection = arango_id.split('/').next().unwrap_or(arango_id);
+        groups.entry(collection).or_default().push((arango_id, row));
+    }
+
+    export_grouped_embeddings(pool, &groups, embeddings, embed_dim, config).await
+}
+
+fn validate_subset_export(
+    id_map: &IDMap,
+    node_indices: &[u32],
+    embeddings: &[f32],
+    embed_dim: usize,
+) -> Result<(), ExportError> {
+    validate_embedding_dimensions(node_indices.len(), embeddings, embed_dim)?;
+
+    let mut seen = HashSet::with_capacity(node_indices.len());
+    for &index in node_indices {
+        if index as usize >= id_map.len() {
+            return Err(ExportError::InvalidNodeIndex {
+                index,
+                num_nodes: id_map.len(),
+            });
+        }
+        if !seen.insert(index) {
+            return Err(ExportError::DuplicateNodeIndex { index });
+        }
+    }
+    Ok(())
+}
+
+fn validate_embedding_dimensions(
+    num_nodes: usize,
+    embeddings: &[f32],
+    embed_dim: usize,
+) -> Result<(), ExportError> {
     let expected = num_nodes * embed_dim;
     if embeddings.len() != expected {
         return Err(ExportError::DimensionMismatch {
@@ -146,9 +213,17 @@ pub async fn export_embeddings(
             embed_dim,
         });
     }
+    Ok(())
+}
 
-    // Group nodes by collection
-    let groups = id_map.nodes_by_collection();
+async fn export_grouped_embeddings(
+    pool: &ArangoPool,
+    groups: &HashMap<&str, Vec<(&str, usize)>>,
+    embeddings: &[f32],
+    embed_dim: usize,
+    config: &ExportConfig,
+) -> Result<ExportResult, ExportError> {
+    let num_nodes: usize = groups.values().map(Vec::len).sum();
 
     let mut total_exported: usize = 0;
     let mut by_collection: HashMap<String, usize> = HashMap::new();
@@ -161,17 +236,17 @@ pub async fn export_embeddings(
         "exporting structural embeddings"
     );
 
-    for (col_name, nodes) in &groups {
+    for (col_name, nodes) in groups {
         let mut col_count: usize = 0;
 
         for chunk in nodes.chunks(config.chunk_size) {
             let updates: Vec<Value> = chunk
                 .iter()
-                .map(|&(arango_id, idx)| {
+                .map(|&(arango_id, row)| {
                     // Extract document _key from "collection/key"
                     let key = arango_id.split('/').nth(1).unwrap_or(arango_id);
 
-                    let start = idx * embed_dim;
+                    let start = row * embed_dim;
                     let emb = &embeddings[start..start + embed_dim];
 
                     json!({
@@ -323,5 +398,31 @@ mod tests {
 
         let err2 = ExportError::InvalidBytes { len: 7 };
         assert!(err2.to_string().contains("7"));
+    }
+
+    #[test]
+    fn test_subset_validation_accepts_compact_rows() {
+        let mut id_map = IDMap::new();
+        id_map.get_or_create("files/a");
+        id_map.get_or_create("symbols/b");
+        id_map.get_or_create("files/c");
+
+        assert!(validate_subset_export(&id_map, &[2, 0], &[0.0; 8], 4).is_ok());
+    }
+
+    #[test]
+    fn test_subset_validation_rejects_bad_indices_and_duplicates() {
+        let mut id_map = IDMap::new();
+        id_map.get_or_create("files/a");
+        id_map.get_or_create("files/b");
+
+        assert!(matches!(
+            validate_subset_export(&id_map, &[2], &[0.0; 4], 4),
+            Err(ExportError::InvalidNodeIndex { index: 2, .. })
+        ));
+        assert!(matches!(
+            validate_subset_export(&id_map, &[1, 1], &[0.0; 8], 4),
+            Err(ExportError::DuplicateNodeIndex { index: 1 })
+        ));
     }
 }

@@ -266,6 +266,14 @@ model_type: hetero_sage         # rgcn | hetero_sage; default rgcn
   The choice is persisted into the trained checkpoint, so `graph-embed update`
   rebuilds the matching model automatically.
 
+For a growing `hetero_sage` graph, run
+`hades --gpu N graph-embed update --new-nodes`. HADES selects graph nodes whose
+destination documents lack `structural_embedding`, evaluates only the bounded
+incoming neighbourhood needed by the frozen SAGE layers, and writes compact
+result rows for those nodes. If every graph node is already embedded, the
+command exits successfully without contacting the training service. Omit
+`--new-nodes` to retain the full-graph update behavior.
+
 ## 6. Internal Pipeline (Generated, Not User-Authored)
 
 ```text

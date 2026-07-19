@@ -48,8 +48,9 @@ service TrainingService {
   // Returns loss, accuracy, and AUC.
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
 
-  // Run a full forward pass and return structural embeddings for all nodes.
-  // No gradients. Used after training completes to export embeddings.
+  // Run a forward pass and return structural embeddings. When node_indices is
+  // empty all nodes are returned; otherwise only the requested nodes and the
+  // neighbourhood needed to compute them are evaluated.
   rpc GetEmbeddings(GetEmbeddingsRequest) returns (GetEmbeddingsResponse);
 
   // Save the current model state (encoder + predictor) to a checkpoint file.
@@ -204,9 +205,13 @@ message EvaluateResponse {
 // ---------------------------------------------------------------------------
 
 message GetEmbeddingsRequest {
-  // Optional: path to write embeddings as a safetensors file.
+  // Optional: path to write embeddings as a raw little-endian F32 file.
   // If empty, embeddings are returned inline in the response.
   string output_path = 1;
+
+  // Optional node indices to embed, in output row order. Empty means all
+  // nodes. Subset inference is supported by the inductive hetero_sage model.
+  repeated uint32 node_indices = 2;
 }
 
 message GetEmbeddingsResponse {
@@ -216,7 +221,8 @@ message GetEmbeddingsResponse {
   // Embedding dimension.
   uint32 embed_dim = 2;
 
-  // Structural embeddings [N * embed_dim] flattened, F32.
+  // Structural embeddings [N * embed_dim] flattened, F32. For a subset
+  // request, N and row order match GetEmbeddingsRequest.node_indices.
   // Only populated if output_path was empty in the request.
   // For large graphs, prefer file output to avoid gRPC message size limits.
   bytes embeddings = 3;

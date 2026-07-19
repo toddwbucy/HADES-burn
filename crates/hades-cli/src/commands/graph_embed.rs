@@ -110,5 +110,11 @@ pub enum GraphEmbedCmd {
         /// since the service reads the graph IPC file written here.
         #[arg(long, default_value = "/tmp/hades-train")]
         checkpoint_dir: String,
+
+        /// Embed only graph nodes whose destination documents do not yet have
+        /// `structural_embedding`. Requires an inductive `hetero_sage` schema
+        /// and checkpoint; existing embeddings are left untouched.
+        #[arg(long)]
+        new_nodes: bool,
     },
 }

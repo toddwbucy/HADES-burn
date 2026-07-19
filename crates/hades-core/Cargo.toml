@@ -30,6 +30,7 @@ reqwest.workspace = true
 roxmltree.workspace = true
 chrono.workspace = true
 urlencoding.workspace = true
+url.workspace = true
 tokio-util.workspace = true
 rand.workspace = true
 

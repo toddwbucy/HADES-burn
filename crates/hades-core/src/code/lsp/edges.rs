@@ -1,4 +1,4 @@
-//! Edge resolution from rust-analyzer extraction data.
+//! Edge resolution from language-server extraction data.
 //!
 //! Materializes symbol nodes and edges from file-level extraction data
 //! for storage in ArangoDB graph collections:
@@ -6,6 +6,7 @@
 //! - `codebase_defines_edges`, `codebase_calls_edges`, `codebase_implements_edges`, `codebase_imports_edges`
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -70,7 +71,7 @@ pub struct CrateEdge {
     pub metadata: serde_json::Value,
 }
 
-/// Map an LSP/rust-analyzer kind string to a universal graph primitive.
+/// Map an LSP symbol kind string to a universal graph primitive.
 ///
 /// Returns `None` for kinds that are not graph primitives (e.g., `"unknown"`,
 /// `"string"`, `"number"`). Callers should skip non-primitive symbols.
@@ -126,22 +127,25 @@ pub struct SymbolDocument {
 /// Resolves file-level extraction data into symbol documents and edges.
 ///
 /// Takes a map of `rel_path → FileExtraction` (produced by
-/// `RustSymbolExtractor::extract_crate`) and produces:
+/// a language-specific semantic extractor) and produces:
 /// - Symbol documents for the `codebase_symbols` collection
 /// - Edge documents for the `codebase_edges` collection
-pub struct RustEdgeResolver {
+pub struct LspEdgeResolver {
     /// Input: rel_path → extraction data.
     file_data: HashMap<String, FileExtraction>,
     /// Index: qualified_name → vec of (rel_path, symbol_key).
     symbol_index: HashMap<String, Vec<(String, String)>>,
+    /// Analyzer provenance written to every semantic symbol document.
+    analyzer: &'static str,
 }
 
-impl RustEdgeResolver {
+impl LspEdgeResolver {
     /// Create a new resolver from extraction data.
-    pub fn new(file_data: HashMap<String, FileExtraction>) -> Self {
+    pub fn new(file_data: HashMap<String, FileExtraction>, analyzer: &'static str) -> Self {
         let mut resolver = Self {
             file_data,
             symbol_index: HashMap::new(),
+            analyzer,
         };
         resolver.build_index();
         resolver
@@ -171,8 +175,10 @@ impl RustEdgeResolver {
                     signature: sym.signature.clone(),
                     file_path: rel_path.clone(),
                     file_key: fk,
-                    start_line: sym.start_line,
-                    end_line: sym.end_line,
+                    // LSP positions are zero-based; graph line metadata and
+                    // symbol keys are consistently one-based.
+                    start_line: sym.start_line + 1,
+                    end_line: sym.end_line + 1,
                     parent_symbol: sym.parent_symbol.clone(),
                     impl_trait: sym.impl_trait.clone(),
                     is_pyo3: sym.is_pyo3,
@@ -182,7 +188,7 @@ impl RustEdgeResolver {
                     python_name: sym.python_name.clone(),
                     analyzed_at: extraction.analyzed_at.clone(),
                     analysis_tier: "semantic".to_string(),
-                    analyzer: "rust-analyzer".to_string(),
+                    analyzer: self.analyzer.to_string(),
                 });
             }
         }
@@ -262,6 +268,43 @@ impl RustEdgeResolver {
 
                 // PyO3/FFI are symbol attributes, not edges (see ontology spec D5)
             }
+
+            // Go interface satisfaction is implicit. gopls resolves the
+            // implementing type locations; convert those into explicit graph
+            // edges without pretending Tree-sitter inferred them.
+            for implementation in &extraction.implementations {
+                let Some(interface_key) = self
+                    .symbol_index
+                    .get(&implementation.interface_qualified_name)
+                    .and_then(|entries| pick_best_match(entries, rel_path))
+                    .or_else(|| {
+                        self.symbol_index
+                            .get(&implementation.interface_name)
+                            .and_then(|entries| pick_best_match(entries, rel_path))
+                    })
+                else {
+                    continue;
+                };
+                let Some(implementor_key) = self.resolve_location(
+                    &implementation.implementor_file,
+                    implementation.implementor_line,
+                ) else {
+                    continue;
+                };
+                let from = format!("codebase_symbols/{implementor_key}");
+                let to = format!("codebase_symbols/{interface_key}");
+                if seen.insert((from.clone(), to.clone(), "implements")) {
+                    edges.push(CrateEdge {
+                        from,
+                        to,
+                        kind: EdgeKind::Implements,
+                        metadata: serde_json::json!({
+                            "interface": implementation.interface_qualified_name,
+                            "resolution": "semantic",
+                        }),
+                    });
+                }
+            }
         }
 
         info!(
@@ -308,6 +351,13 @@ impl RustEdgeResolver {
         call: &super::symbols::CallTarget,
         caller_file: &str,
     ) -> Option<String> {
+        // Language servers provide the declaration file and line. Prefer that
+        // precise identity over a name lookup: Go permits the same method name
+        // on many receiver types, including within one file.
+        if !call.file.is_empty() {
+            return self.resolve_location_named(&call.file, call.line, Some(&call.name));
+        }
+
         let prefer_file = if call.file.is_empty() {
             caller_file
         } else {
@@ -356,6 +406,58 @@ impl RustEdgeResolver {
         }
         None
     }
+
+    fn resolve_location(&self, file: &str, line: u32) -> Option<String> {
+        self.resolve_location_named(file, line, None)
+    }
+
+    fn resolve_location_named(
+        &self,
+        file: &str,
+        line: u32,
+        expected_name: Option<&str>,
+    ) -> Option<String> {
+        let (actual_path, extraction) = self.find_file(file)?;
+        let name_matches = |symbol: &&super::symbols::ExtractedSymbol| {
+            expected_name.is_none_or(|name| symbol.name == name)
+        };
+        let symbol = extraction
+            .symbols
+            .iter()
+            .filter(name_matches)
+            .find(|symbol| symbol.start_line == line)
+            .or_else(|| {
+                extraction
+                    .symbols
+                    .iter()
+                    .filter(name_matches)
+                    .filter(|symbol| symbol.start_line <= line && line <= symbol.end_line)
+                    .min_by_key(|symbol| symbol.end_line - symbol.start_line)
+            })?;
+        let file_key = keys::file_key(actual_path);
+        Some(keys::symbol_key(
+            &file_key,
+            &symbol.qualified_name,
+            symbol.start_line as usize + 1,
+        ))
+    }
+
+    fn find_file(&self, file: &str) -> Option<(&String, &FileExtraction)> {
+        if let Some(exact) = self.file_data.get_key_value(file) {
+            return Some(exact);
+        }
+
+        // Compatibility for language servers that return a shorter relative
+        // path. Only accept a component-wise suffix when it is unique; shared
+        // suffixes such as `pkg/run.go` must never select an arbitrary module.
+        let suffix = Path::new(file);
+        let mut matches = self
+            .file_data
+            .iter()
+            .filter(|(path, _)| Path::new(path).ends_with(suffix));
+        let candidate = matches.next()?;
+        matches.next().is_none().then_some(candidate)
+    }
 }
 
 /// Pick the best symbol key from candidates, preferring same-file matches.
@@ -369,8 +471,9 @@ fn pick_best_match(entries: &[(String, String)], prefer_file: &str) -> Option<St
             return Some(sk.clone());
         }
     }
-    // Fallback: first entry.
-    Some(entries[0].1.clone())
+    // A unique cross-file candidate is safe; multiple candidates are
+    // ambiguous and should be dropped rather than turned into a wrong edge.
+    (entries.len() == 1).then(|| entries[0].1.clone())
 }
 
 #[cfg(test)]
@@ -402,6 +505,7 @@ mod tests {
         FileExtraction {
             symbols,
             impl_blocks: Vec::new(),
+            implementations: Vec::new(),
             pyo3_exports: Vec::new(),
             ffi_boundaries: Vec::new(),
             analyzed_at: "2026-01-01T00:00:00Z".to_string(),
@@ -416,7 +520,7 @@ mod tests {
             make_extraction(vec![make_symbol("Config", "struct")]),
         );
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let edges = resolver.build_edges();
 
         let defines: Vec<_> = edges
@@ -446,11 +550,121 @@ mod tests {
             make_extraction(vec![make_symbol("Config", "struct")]),
         );
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let edges = resolver.build_edges();
 
         let calls: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
         assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn call_location_disambiguates_same_named_go_methods() {
+        let mut first_run = make_symbol("Run", "method");
+        first_run.start_line = 10;
+        first_run.end_line = 12;
+        first_run.parent_symbol = Some("First".to_string());
+        let mut second_run = make_symbol("Run", "method");
+        second_run.start_line = 30;
+        second_run.end_line = 32;
+        second_run.parent_symbol = Some("Second".to_string());
+        let mut caller = make_symbol("Execute", "function");
+        caller.calls.push(CallTarget {
+            qualified_name: "Run".to_string(),
+            name: "Run".to_string(),
+            file: "module/pkg/worker.go".to_string(),
+            line: 30,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "module/pkg/worker.go".to_string(),
+            make_extraction(vec![first_run, second_run]),
+        );
+        file_data.insert(
+            "module/pkg/caller.go".to_string(),
+            make_extraction(vec![caller]),
+        );
+
+        let resolver = LspEdgeResolver::new(file_data, "gopls");
+        let calls: Vec<_> = resolver
+            .build_edges()
+            .into_iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .collect();
+        let file_key = keys::file_key("module/pkg/worker.go");
+        let expected = keys::symbol_key(&file_key, "Run", 31);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].to, format!("codebase_symbols/{expected}"));
+    }
+
+    #[test]
+    fn ambiguous_file_suffix_does_not_emit_call_edge() {
+        let mut target_a = make_symbol("Run", "method");
+        target_a.start_line = 5;
+        target_a.end_line = 7;
+        let target_b = target_a.clone();
+        let mut caller = make_symbol("Execute", "function");
+        caller.calls.push(CallTarget {
+            qualified_name: "Run".to_string(),
+            name: "Run".to_string(),
+            file: "pkg/run.go".to_string(),
+            line: 5,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "module_a/pkg/run.go".to_string(),
+            make_extraction(vec![target_a]),
+        );
+        file_data.insert(
+            "module_b/pkg/run.go".to_string(),
+            make_extraction(vec![target_b]),
+        );
+        file_data.insert("caller.go".to_string(), make_extraction(vec![caller]));
+
+        let resolver = LspEdgeResolver::new(file_data, "gopls");
+        assert!(
+            resolver
+                .build_edges()
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::Calls)
+        );
+    }
+
+    #[test]
+    fn exact_workspace_path_wins_when_crates_share_a_suffix() {
+        let mut target = make_symbol("target", "function");
+        target.start_line = 5;
+        target.end_line = 7;
+        let mut caller = make_symbol("caller", "function");
+        caller.start_line = 20;
+        caller.end_line = 22;
+        caller.calls.push(CallTarget {
+            qualified_name: "target".to_string(),
+            name: "target".to_string(),
+            file: "crates/core/src/lib.rs".to_string(),
+            line: 5,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "crates/core/src/lib.rs".to_string(),
+            make_extraction(vec![target, caller]),
+        );
+        file_data.insert(
+            "crates/proto/src/lib.rs".to_string(),
+            make_extraction(Vec::new()),
+        );
+
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
+        assert_eq!(
+            resolver
+                .build_edges()
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -462,7 +676,7 @@ mod tests {
         sym.python_name = Some("my_func".to_string());
         file_data.insert("src/lib.rs".to_string(), make_extraction(vec![sym]));
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let edges = resolver.build_edges();
 
         // Should only have a "defines" edge, no pyo3 self-edge.
@@ -486,7 +700,7 @@ mod tests {
             make_extraction(vec![trait_sym, method]),
         );
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let edges = resolver.build_edges();
 
         let implements: Vec<_> = edges
@@ -507,7 +721,7 @@ mod tests {
             ]),
         );
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let docs = resolver.build_symbol_documents();
         assert_eq!(docs.len(), 2);
         assert!(docs.iter().all(|d| !d.key.is_empty()));
@@ -531,7 +745,7 @@ mod tests {
             make_extraction(vec![make_symbol("Config", "struct")]),
         );
 
-        let resolver = RustEdgeResolver::new(file_data);
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
         let edges = resolver.build_edges();
 
         // Only one defines edge for Config.

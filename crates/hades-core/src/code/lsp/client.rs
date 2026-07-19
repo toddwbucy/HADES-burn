@@ -15,10 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify, oneshot};
 
-use super::RustAnalyzerError;
+use super::LspError;
 
 /// A pending request awaiting its response.
-type ResponseSender = oneshot::Sender<Result<Value, RustAnalyzerError>>;
+type ResponseSender = oneshot::Sender<Result<Value, LspError>>;
 
 /// JSON-RPC LSP transport client.
 ///
@@ -47,7 +47,7 @@ impl LspClient {
         command: &str,
         args: &[&str],
         cwd: &std::path::Path,
-    ) -> Result<Self, RustAnalyzerError> {
+    ) -> Result<Self, LspError> {
         let mut child = Command::new(command)
             .args(args)
             .current_dir(cwd)
@@ -58,20 +58,20 @@ impl LspClient {
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    RustAnalyzerError::NotFound(format!("{command}: {e}"))
+                    LspError::NotFound(format!("{command}: {e}"))
                 } else {
-                    RustAnalyzerError::Process(format!("failed to spawn {command}: {e}"))
+                    LspError::Process(format!("failed to spawn {command}: {e}"))
                 }
             })?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| RustAnalyzerError::Process("no stdin handle".into()))?;
+            .ok_or_else(|| LspError::Process("no stdin handle".into()))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| RustAnalyzerError::Process("no stdout handle".into()))?;
+            .ok_or_else(|| LspError::Process("no stdout handle".into()))?;
 
         let pending: Arc<Mutex<HashMap<i64, ResponseSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -115,7 +115,7 @@ impl LspClient {
         method: &str,
         params: Value,
         timeout: std::time::Duration,
-    ) -> Result<Value, RustAnalyzerError> {
+    ) -> Result<Value, LspError> {
         let id = {
             let mut next = self.next_id.lock().await;
             let id = *next;
@@ -139,14 +139,12 @@ impl LspClient {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 // Channel closed — reader task died.
-                Err(RustAnalyzerError::Process(
-                    "reader task closed channel".into(),
-                ))
+                Err(LspError::Process("reader task closed channel".into()))
             }
             Err(_) => {
                 // Timeout — clean up pending entry.
                 self.pending.lock().await.remove(&id);
-                Err(RustAnalyzerError::Timeout(format!(
+                Err(LspError::Timeout(format!(
                     "{method} (id={id}, timeout={timeout:?})"
                 )))
             }
@@ -154,7 +152,7 @@ impl LspClient {
     }
 
     /// Send a JSON-RPC notification (no response expected).
-    pub async fn notify(&self, method: &str, params: Value) -> Result<(), RustAnalyzerError> {
+    pub async fn notify(&self, method: &str, params: Value) -> Result<(), LspError> {
         let message = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -185,7 +183,7 @@ impl LspClient {
     }
 
     /// Graceful shutdown: send shutdown request, then exit notification.
-    pub async fn shutdown(mut self) -> Result<(), RustAnalyzerError> {
+    pub async fn shutdown(mut self) -> Result<(), LspError> {
         // Send shutdown request (best effort).
         let _ = self
             .request("shutdown", Value::Null, std::time::Duration::from_secs(5))
@@ -211,7 +209,7 @@ impl LspClient {
     }
 
     /// Write a JSON-RPC message with Content-Length framing.
-    async fn send_message(&self, message: &Value) -> Result<(), RustAnalyzerError> {
+    async fn send_message(&self, message: &Value) -> Result<(), LspError> {
         let body = serde_json::to_vec(message)?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
 
@@ -262,7 +260,7 @@ async fn reader_loop(
                 let sender = pending.lock().await.remove(&id);
                 if let Some(tx) = sender {
                     let result = if let Some(err) = message.get("error") {
-                        Err(RustAnalyzerError::JsonRpc {
+                        Err(LspError::JsonRpc {
                             code: err["code"].as_i64().unwrap_or(-1),
                             message: err["message"].as_str().unwrap_or("unknown").to_string(),
                         })
@@ -297,7 +295,7 @@ async fn reader_loop(
     // Wake all pending requests so they don't hang.
     let mut pending = pending.lock().await;
     for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(RustAnalyzerError::Process(
+        let _ = tx.send(Err(LspError::Process(
             "reader task ended (server exited)".into(),
         )));
     }

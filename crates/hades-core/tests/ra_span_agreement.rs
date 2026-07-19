@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use hades_core::code::rust_analyzer::RustAnalyzerSession;
+use hades_core::code::lsp::RustAnalyzerSession;
 use serde_json::Value;
 
 // Line numbers matter. The identifier of `Top` is on line 2 even though the

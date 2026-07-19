@@ -29,8 +29,10 @@ fn test_result_types() {
     let init = InitResult {
         num_parameters: 1_000_000,
         device: "cuda:2".to_string(),
+        architecture: "hetero_sage".to_string(),
     };
     assert_eq!(init.num_parameters, 1_000_000);
+    assert_eq!(init.architecture, "hetero_sage");
 
     let load = LoadGraphResult {
         num_nodes: 50_000,

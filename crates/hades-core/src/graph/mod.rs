@@ -10,6 +10,7 @@ pub mod types;
 
 pub use export::{
     ExportConfig, ExportError, ExportResult, decode_f32_embeddings, export_embeddings,
+    export_embeddings_subset,
 };
 pub use loader::{GraphLoaderError, load};
 pub use runtime_schema::{

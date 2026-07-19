@@ -375,6 +375,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GraphEmbed(GraphEmbedCmd::Update {
             export_to,
             checkpoint_dir,
+            new_nodes,
         }) => {
             // Same rule as train: the inductive update places the model on a
             // GPU too, so it declares its device per run, no fallback.
@@ -392,6 +393,7 @@ fn main() -> anyhow::Result<()> {
                 &config,
                 export_to.as_deref(),
                 &checkpoint_dir,
+                new_nodes,
             ))
         }
         Commands::Schema(SchemaCmd::Apply {

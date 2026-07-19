@@ -98,6 +98,8 @@ pub struct InitResult {
     pub num_parameters: u64,
     /// Device the model was placed on.
     pub device: String,
+    /// Resolved encoder architecture (for example, `hetero_sage`).
+    pub architecture: String,
 }
 
 /// Result of loading graph data.
@@ -226,6 +228,11 @@ impl TrainingClient {
         optimizer: OptimizerConfig,
         device: &str,
     ) -> Result<InitResult, TrainingError> {
+        let architecture = if model.architecture.trim().is_empty() {
+            "rgcn".to_string()
+        } else {
+            model.architecture.clone()
+        };
         let request = InitModelRequest {
             model: Some(model),
             optimizer: Some(optimizer),
@@ -246,6 +253,7 @@ impl TrainingClient {
         Ok(InitResult {
             num_parameters: response.num_parameters,
             device: response.device,
+            architecture,
         })
     }
 
@@ -343,10 +351,24 @@ impl TrainingClient {
         &self,
         output_path: Option<&Path>,
     ) -> Result<EmbeddingsResult, TrainingError> {
+        self.get_embeddings_subset(output_path, &[]).await
+    }
+
+    /// Generate structural embeddings for selected graph node indices.
+    ///
+    /// Rows are returned in `node_indices` order. An empty slice preserves the
+    /// protocol's backward-compatible meaning of "all nodes".
+    #[instrument(skip(self, node_indices))]
+    pub async fn get_embeddings_subset(
+        &self,
+        output_path: Option<&Path>,
+        node_indices: &[u32],
+    ) -> Result<EmbeddingsResult, TrainingError> {
         let request = GetEmbeddingsRequest {
             output_path: output_path
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            node_indices: node_indices.to_vec(),
         };
 
         let mut req = tonic::Request::new(request);
@@ -422,12 +444,20 @@ impl TrainingClient {
         let resolved_device = if response.device.is_empty() {
             device.unwrap_or("unknown").to_string()
         } else {
-            response.device
+            response.device.clone()
         };
+        let architecture = response
+            .model_config
+            .as_ref()
+            .map(|model| model.architecture.trim())
+            .filter(|architecture| !architecture.is_empty())
+            .unwrap_or("rgcn")
+            .to_string();
 
         Ok(InitResult {
             num_parameters: response.num_parameters,
             device: resolved_device,
+            architecture,
         })
     }
 

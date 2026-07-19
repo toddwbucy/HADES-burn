@@ -189,6 +189,50 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
             self.x, self.node_collections, self.edge_src, self.edge_dst, self.edge_type
         )
 
+    def _encode_subset(self, requested: list[int]) -> torch.Tensor:
+        """Embed targets on their bounded incoming-neighbourhood subgraph.
+
+        A two-layer SAGE target depends on its incoming neighbours and their
+        incoming neighbours. Expanding once per convolution layer and then
+        reindexing that induced subgraph avoids a full-graph forward while
+        producing the same target rows as full-batch inference.
+        """
+        if not isinstance(self.model, HadesHeteroSAGE):
+            raise ValueError("node subset inference requires architecture 'hetero_sage'")
+        num_nodes = self.x.size(0)
+        if len(set(requested)) != len(requested):
+            raise ValueError("node_indices must not contain duplicates")
+        if any(index < 0 or index >= num_nodes for index in requested):
+            raise ValueError(f"node index out of range for graph with {num_nodes} nodes")
+
+        targets = torch.tensor(requested, device=self.device, dtype=torch.long)
+        active = torch.zeros(num_nodes, device=self.device, dtype=torch.bool)
+        active[targets] = True
+        for _ in self.model.convs:
+            incoming_edges = active[self.edge_dst]
+            active[self.edge_src[incoming_edges]] = True
+
+        global_nodes = active.nonzero(as_tuple=False).flatten()
+        global_to_local = torch.full(
+            (num_nodes,), -1, device=self.device, dtype=torch.long
+        )
+        global_to_local[global_nodes] = torch.arange(
+            global_nodes.numel(), device=self.device
+        )
+        edge_mask = active[self.edge_src] & active[self.edge_dst]
+        local_src = global_to_local[self.edge_src[edge_mask]]
+        local_dst = global_to_local[self.edge_dst[edge_mask]]
+        local_type = self.edge_type[edge_mask]
+
+        local_embeddings = self.model.encode(
+            self.x[global_nodes],
+            self.node_collections[global_nodes],
+            local_src,
+            local_dst,
+            local_type,
+        )
+        return local_embeddings[global_to_local[targets]]
+
     async def TrainStep(self, request, context):
         self._require_loaded(context)
         self.model.train()
@@ -221,8 +265,15 @@ class TrainingServicer(training_pb2_grpc.TrainingServiceServicer):
     async def GetEmbeddings(self, request, context):
         self._require_loaded(context)
         self.model.eval()
-        with torch.no_grad():
-            emb = self._encode().cpu().contiguous().float()
+        try:
+            with torch.no_grad():
+                if request.node_indices:
+                    emb = self._encode_subset(list(request.node_indices))
+                else:
+                    emb = self._encode()
+                emb = emb.cpu().contiguous().float()
+        except ValueError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
         num_nodes, embed_dim = emb.size(0), emb.size(1)
         if request.output_path:
             # Write a RAW little-endian f32 blob (num_nodes × embed_dim) — the

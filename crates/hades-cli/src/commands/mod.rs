@@ -4,9 +4,11 @@
 //! corresponding Python Typer command group in HADES.
 
 pub mod codebase;
+pub mod codebase_drift;
 pub mod codebase_ingest;
 pub mod codebase_mgmt;
 pub mod codebase_prune;
+pub mod codebase_retire;
 pub mod codebase_validate;
 pub mod daemon;
 pub mod db;

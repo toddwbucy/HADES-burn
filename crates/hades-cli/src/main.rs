@@ -309,6 +309,34 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::codebase_prune::run_prune(&config, dry_run))
         }
+        Commands::Codebase(CodebaseCmd::Drift {
+            path,
+            language,
+            unparsed_ext,
+            full,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::codebase_drift::run_drift(
+                &config,
+                path,
+                language.as_deref(),
+                &unparsed_ext,
+                full,
+            ))
+        }
+        Commands::Codebase(CodebaseCmd::Retire {
+            files,
+            from,
+            dry_run,
+            yes,
+        }) => {
+            init_tracing();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(commands::codebase_retire::run_retire(
+                &config, files, from, dry_run, yes,
+            ))
+        }
         Commands::GraphEmbed(GraphEmbedCmd::Embed { node_id }) => {
             init_tracing();
             let rt = tokio::runtime::Runtime::new()?;

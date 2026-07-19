@@ -189,13 +189,7 @@ pub async fn run(
     info!(file_count = files.len(), "discovered source files");
 
     // Compute base path for relative paths.
-    let base = if path.is_dir() {
-        path.canonicalize().unwrap_or(path.clone())
-    } else {
-        path.parent()
-            .map(|p| p.canonicalize().unwrap_or(p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
+    let base = ingest_base_path(&path);
 
     // Process each file with per-file error isolation.
     let mut results: Vec<FileResult> = Vec::with_capacity(files.len());
@@ -654,7 +648,33 @@ async fn ensure_indices(db: &ArangoPool) -> Result<()> {
 /// If `path` is a file, returns just that file (if it matches the language
 /// filter). If a directory, walks recursively, skipping common non-source
 /// directories.
-fn discover_files(
+/// The base directory that ingest strips to form a file node's `rel_path`.
+///
+/// A file node's `_key` is `keys::file_key(rel_path)` where `rel_path` is the
+/// path relative to this base — so anything comparing graph keys against the
+/// working tree (e.g. `codebase drift`) MUST derive keys through this same
+/// function, or every key mismatches and the comparison is meaningless.
+pub(crate) fn ingest_base_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.parent()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+/// Compute the graph `_key` for a discovered file, relative to `base`.
+pub(crate) fn file_key_for(base: &Path, file_path: &Path) -> String {
+    let rel = file_path
+        .strip_prefix(base)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .to_string();
+    keys::file_key(&rel)
+}
+
+pub(crate) fn discover_files(
     path: &Path,
     lang_override: Option<Language>,
     unparsed_set: &std::collections::HashSet<String>,

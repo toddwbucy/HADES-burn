@@ -67,4 +67,60 @@ pub enum CodebaseCmd {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Compare the graph against the source tree it describes (read-only).
+    ///
+    /// Reports file nodes whose source file no longer exists ("stale") and
+    /// source files with no node ("uningested"). `codebase validate` checks
+    /// only internal consistency and cannot see either.
+    ///
+    /// Pass the same discovery flags used at ingest time, and the same root —
+    /// keys are relative to the ingest root, so a wrong root reports near-total
+    /// drift in both directions rather than a small honest number.
+    Drift {
+        /// Ingest root the graph was built from.
+        path: PathBuf,
+
+        /// Programming language override (must match the ingest invocation).
+        #[arg(short = 'l', long)]
+        language: Option<String>,
+
+        /// Extensions ingested without a parser (must match the ingest
+        /// invocation), e.g. `wgsl,vert`.
+        #[arg(long = "unparsed-ext", value_delimiter = ',')]
+        unparsed_ext: Vec<String>,
+
+        /// List every key instead of truncating. Use this to feed
+        /// `codebase retire --from -`.
+        #[arg(long)]
+        full: bool,
+    },
+
+    /// Retire graph nodes whose source files are gone (complement of --force).
+    ///
+    /// Removes each target's file node, chunks, embeddings, symbols, and every
+    /// codebase edge incident on the file or its symbols. Edges in other
+    /// collections (authored bridges such as conformance verdicts) are reported
+    /// separately and need `--yes`, since they are irreplaceable if the target
+    /// list is wrong.
+    ///
+    /// Targets are always explicit — use `codebase drift` to discover them.
+    Retire {
+        /// File node key to retire. Repeatable.
+        #[arg(long = "file")]
+        files: Vec<String>,
+
+        /// Read newline-separated keys from a file (`-` for stdin).
+        /// Blank lines and `#` comments are ignored.
+        #[arg(long = "from")]
+        from: Option<PathBuf>,
+
+        /// Report what would be removed without modifying the graph.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm removal of edges outside the codebase collections.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }

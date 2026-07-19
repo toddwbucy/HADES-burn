@@ -632,6 +632,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_workspace_path_wins_when_crates_share_a_suffix() {
+        let mut target = make_symbol("target", "function");
+        target.start_line = 5;
+        target.end_line = 7;
+        let mut caller = make_symbol("caller", "function");
+        caller.start_line = 20;
+        caller.end_line = 22;
+        caller.calls.push(CallTarget {
+            qualified_name: "target".to_string(),
+            name: "target".to_string(),
+            file: "crates/core/src/lib.rs".to_string(),
+            line: 5,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "crates/core/src/lib.rs".to_string(),
+            make_extraction(vec![target, caller]),
+        );
+        file_data.insert(
+            "crates/proto/src/lib.rs".to_string(),
+            make_extraction(Vec::new()),
+        );
+
+        let resolver = LspEdgeResolver::new(file_data, "rust-analyzer");
+        assert_eq!(
+            resolver
+                .build_edges()
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn test_pyo3_is_attribute_not_edge() {
         // PyO3 exposure is a symbol attribute, not an edge (ontology D5).
         let mut file_data = HashMap::new();

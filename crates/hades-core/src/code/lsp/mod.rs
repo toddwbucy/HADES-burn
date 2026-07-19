@@ -31,6 +31,8 @@ pub enum LspError {
     Io(#[from] std::io::Error),
     #[error("invalid language workspace: {0}")]
     InvalidWorkspace(String),
+    #[error("path cannot be represented as a file URI: {0}")]
+    InvalidFileUri(String),
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
 }

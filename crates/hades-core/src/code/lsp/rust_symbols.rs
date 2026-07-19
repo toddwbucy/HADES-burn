@@ -6,6 +6,7 @@
 
 use regex::Regex;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 
@@ -47,6 +48,7 @@ static DERIVE_PATTERN: LazyLock<Regex> =
 pub struct RustSymbolExtractor<'a> {
     session: &'a RustAnalyzerSession,
     include_calls: bool,
+    path_root: &'a Path,
 }
 
 impl<'a> RustSymbolExtractor<'a> {
@@ -55,7 +57,16 @@ impl<'a> RustSymbolExtractor<'a> {
         Self {
             session,
             include_calls,
+            path_root: session.workspace_root(),
         }
+    }
+
+    /// Express call target paths relative to the same ingest root used for
+    /// extraction map keys. Cargo workspaces commonly contain several crates
+    /// with repeated suffixes such as `src/lib.rs`.
+    pub fn with_path_root(mut self, path_root: &'a Path) -> Self {
+        self.path_root = path_root;
+        self
     }
 
     /// Extract all symbol data for a single Rust file.
@@ -341,7 +352,7 @@ impl<'a> RustSymbolExtractor<'a> {
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as u32;
 
-                let target_file = uri_to_rel_path(target_uri, self.session.workspace_root());
+                let target_file = uri_to_rel_path(target_uri, self.path_root);
 
                 Some(CallTarget {
                     qualified_name: target_detail.to_string(),
@@ -503,14 +514,29 @@ fn extract_impl_blocks(symbols: &[ExtractedSymbol]) -> Vec<ImplBlock> {
         .collect()
 }
 
-/// Convert a file:// URI to a path relative to the crate root.
-fn uri_to_rel_path(uri: &str, crate_root: &std::path::Path) -> String {
+/// Convert a file:// URI to a path relative to the configured path root.
+fn uri_to_rel_path(uri: &str, path_root: &Path) -> String {
     uri_to_path(uri)
         .map(|path| {
-            path.strip_prefix(crate_root)
+            path.strip_prefix(path_root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned()
         })
         .unwrap_or_else(|| uri.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_to_rel_path;
+    use std::path::Path;
+
+    #[test]
+    fn target_paths_can_be_rebased_above_the_crate_root() {
+        let uri = "file:///workspace/repository/crates/core/src/lib.rs";
+        assert_eq!(
+            uri_to_rel_path(uri, Path::new("/workspace/repository")),
+            "crates/core/src/lib.rs"
+        );
+    }
 }

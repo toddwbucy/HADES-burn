@@ -1579,7 +1579,7 @@ async fn run_rust_analyzer_phase(
             }
         };
 
-        let extractor = RustSymbolExtractor::new(&session, true);
+        let extractor = RustSymbolExtractor::new(&session, true).with_path_root(base);
         let file_refs: Vec<&Path> = crate_files.iter().map(|p| p.as_path()).collect();
         let extractions = extractor.extract_crate(&file_refs).await;
 

@@ -95,7 +95,7 @@ impl<S: LanguageServer> LspSession<S> {
             self.root.join(file_path)
         };
         let abs_path = abs_path.canonicalize()?;
-        let uri = path_to_uri(&abs_path);
+        let uri = path_to_uri(&abs_path)?;
         if !self.open_documents.lock().await.insert(uri.clone()) {
             return Ok(uri);
         }
@@ -291,7 +291,7 @@ impl<S: LanguageServer> LspSession<S> {
     }
 
     async fn initialize(&mut self) -> Result<(), LspError> {
-        let root_uri = path_to_uri(&self.root);
+        let root_uri = path_to_uri(&self.root)?;
         let result = self
             .client
             .request(
@@ -368,10 +368,10 @@ impl<S: LanguageServer> LspSession<S> {
     }
 }
 
-pub fn path_to_uri(path: &Path) -> String {
+pub fn path_to_uri(path: &Path) -> Result<String, LspError> {
     Url::from_file_path(path)
-        .expect("LSP file paths must be absolute")
-        .into()
+        .map(Into::into)
+        .map_err(|_| LspError::InvalidFileUri(path.display().to_string()))
 }
 
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
@@ -386,9 +386,15 @@ mod tests {
     #[test]
     fn file_uri_round_trips_spaces_and_unicode() {
         let path = Path::new("/tmp/hades source/λ.go");
-        let uri = path_to_uri(path);
+        let uri = path_to_uri(path).unwrap();
         assert_eq!(uri, "file:///tmp/hades%20source/%CE%BB.go");
         assert_eq!(uri_to_path(&uri).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn relative_path_returns_an_error() {
+        let error = path_to_uri(Path::new("src/lib.rs")).unwrap_err();
+        assert!(error.to_string().contains("src/lib.rs"));
     }
 
     #[test]

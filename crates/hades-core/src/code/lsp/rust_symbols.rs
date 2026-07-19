@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 
 use super::RustAnalyzerError;
 use super::rust_analyzer::RustAnalyzerSession;
+use super::session::uri_to_path;
 use super::symbols::symbol_kind_name;
 pub use super::symbols::{CallTarget, ExtractedSymbol, FileExtraction, ImplBlock};
 
@@ -504,12 +505,12 @@ fn extract_impl_blocks(symbols: &[ExtractedSymbol]) -> Vec<ImplBlock> {
 
 /// Convert a file:// URI to a path relative to the crate root.
 fn uri_to_rel_path(uri: &str, crate_root: &std::path::Path) -> String {
-    if let Some(abs_path) = uri.strip_prefix("file://") {
-        let abs = std::path::Path::new(abs_path);
-        abs.strip_prefix(crate_root)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| abs_path.to_string())
-    } else {
-        uri.to_string()
-    }
+    uri_to_path(uri)
+        .map(|path| {
+            path.strip_prefix(crate_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| uri.to_string())
 }

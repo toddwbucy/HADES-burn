@@ -42,7 +42,11 @@ async fn gopls_resolves_cross_package_calls_and_interface_satisfaction() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
+    // Keep the Go module below the ingest root to exercise path rebasing: gopls
+    // works from `module/`, while graph file keys are relative to the parent.
+    let ingest_root = temp.path();
+    let root = &ingest_root.join("module");
+    std::fs::create_dir_all(root).unwrap();
     std::fs::create_dir_all(root.join("api")).unwrap();
     std::fs::create_dir_all(root.join("worker")).unwrap();
     std::fs::write(
@@ -102,7 +106,7 @@ func Use() string {
     let session = GoplsSession::start_with_options(root, wrapper.to_str(), 30)
         .await
         .expect("gopls should initialize for the fixture module");
-    let extractor = GoSymbolExtractor::new(&session, true);
+    let extractor = GoSymbolExtractor::new(&session, true).with_path_root(ingest_root);
     let files = [root.join("api/api.go"), root.join("worker/worker.go")];
     let refs: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
     let raw = extractor.extract_module(&refs).await;
@@ -110,7 +114,7 @@ func Use() string {
     let mut relative = HashMap::new();
     for (path, extraction) in raw {
         let path = Path::new(&path)
-            .strip_prefix(root)
+            .strip_prefix(ingest_root)
             .unwrap()
             .to_string_lossy()
             .into_owned();

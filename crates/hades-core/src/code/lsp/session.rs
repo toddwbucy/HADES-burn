@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use url::Url;
 
 use super::LspError;
 use super::client::LspClient;
@@ -155,6 +156,36 @@ impl<S: LanguageServer> LspSession<S> {
             )
             .await?;
         Ok(result.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Wait until the server answers two consecutive workspace probes.
+    ///
+    /// Opening a batch of files can trigger another package load after the
+    /// initial handshake. Requiring consecutive successful probes avoids a
+    /// fixed delay while still allowing that work to settle.
+    pub async fn wait_for_workspace_ready(&self, timeout: Duration) -> bool {
+        let start = tokio::time::Instant::now();
+        let mut successful_probes = 0;
+        while start.elapsed() < timeout {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let probe_timeout = remaining.min(Duration::from_secs(3));
+            let ready = self
+                .client
+                .request(
+                    "workspace/symbol",
+                    serde_json::json!({ "query": "__hades_readiness_probe__" }),
+                    probe_timeout,
+                )
+                .await
+                .is_ok();
+            successful_probes = if ready { successful_probes + 1 } else { 0 };
+            if successful_probes >= 2 {
+                debug!(server = S::NAME, elapsed = ?start.elapsed(), "workspace is ready");
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
     }
 
     pub async fn hover(
@@ -338,9 +369,30 @@ impl<S: LanguageServer> LspSession<S> {
 }
 
 pub fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    Url::from_file_path(path)
+        .expect("LSP file paths must be absolute")
+        .into()
 }
 
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://").map(PathBuf::from)
+    Url::parse(uri).ok()?.to_file_path().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{path_to_uri, uri_to_path};
+    use std::path::Path;
+
+    #[test]
+    fn file_uri_round_trips_spaces_and_unicode() {
+        let path = Path::new("/tmp/hades source/λ.go");
+        let uri = path_to_uri(path);
+        assert_eq!(uri, "file:///tmp/hades%20source/%CE%BB.go");
+        assert_eq!(uri_to_path(&uri).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn rejects_non_file_uris() {
+        assert_eq!(uri_to_path("https://example.test/main.go"), None);
+    }
 }

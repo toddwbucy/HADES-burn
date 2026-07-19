@@ -6,6 +6,7 @@
 //! - `codebase_defines_edges`, `codebase_calls_edges`, `codebase_implements_edges`, `codebase_imports_edges`
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -350,6 +351,13 @@ impl LspEdgeResolver {
         call: &super::symbols::CallTarget,
         caller_file: &str,
     ) -> Option<String> {
+        // Language servers provide the declaration file and line. Prefer that
+        // precise identity over a name lookup: Go permits the same method name
+        // on many receiver types, including within one file.
+        if !call.file.is_empty() {
+            return self.resolve_location_named(&call.file, call.line, Some(&call.name));
+        }
+
         let prefer_file = if call.file.is_empty() {
             caller_file
         } else {
@@ -400,19 +408,31 @@ impl LspEdgeResolver {
     }
 
     fn resolve_location(&self, file: &str, line: u32) -> Option<String> {
-        let (actual_path, extraction) = self
-            .file_data
-            .get_key_value(file)
-            .or_else(|| self.file_data.iter().find(|(path, _)| path.ends_with(file)))?;
+        self.resolve_location_named(file, line, None)
+    }
+
+    fn resolve_location_named(
+        &self,
+        file: &str,
+        line: u32,
+        expected_name: Option<&str>,
+    ) -> Option<String> {
+        let (actual_path, extraction) = self.find_file(file)?;
+        let name_matches = |symbol: &&super::symbols::ExtractedSymbol| {
+            expected_name.is_none_or(|name| symbol.name == name)
+        };
         let symbol = extraction
             .symbols
             .iter()
+            .filter(name_matches)
             .find(|symbol| symbol.start_line == line)
             .or_else(|| {
                 extraction
                     .symbols
                     .iter()
-                    .find(|symbol| symbol.start_line <= line && line <= symbol.end_line)
+                    .filter(name_matches)
+                    .filter(|symbol| symbol.start_line <= line && line <= symbol.end_line)
+                    .min_by_key(|symbol| symbol.end_line - symbol.start_line)
             })?;
         let file_key = keys::file_key(actual_path);
         Some(keys::symbol_key(
@@ -420,6 +440,23 @@ impl LspEdgeResolver {
             &symbol.qualified_name,
             symbol.start_line as usize + 1,
         ))
+    }
+
+    fn find_file(&self, file: &str) -> Option<(&String, &FileExtraction)> {
+        if let Some(exact) = self.file_data.get_key_value(file) {
+            return Some(exact);
+        }
+
+        // Compatibility for language servers that return a shorter relative
+        // path. Only accept a component-wise suffix when it is unique; shared
+        // suffixes such as `pkg/run.go` must never select an arbitrary module.
+        let suffix = Path::new(file);
+        let mut matches = self
+            .file_data
+            .iter()
+            .filter(|(path, _)| Path::new(path).ends_with(suffix));
+        let candidate = matches.next()?;
+        matches.next().is_none().then_some(candidate)
     }
 }
 
@@ -434,8 +471,9 @@ fn pick_best_match(entries: &[(String, String)], prefer_file: &str) -> Option<St
             return Some(sk.clone());
         }
     }
-    // Fallback: first entry.
-    Some(entries[0].1.clone())
+    // A unique cross-file candidate is safe; multiple candidates are
+    // ambiguous and should be dropped rather than turned into a wrong edge.
+    (entries.len() == 1).then(|| entries[0].1.clone())
 }
 
 #[cfg(test)]
@@ -517,6 +555,80 @@ mod tests {
 
         let calls: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
         assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn call_location_disambiguates_same_named_go_methods() {
+        let mut first_run = make_symbol("Run", "method");
+        first_run.start_line = 10;
+        first_run.end_line = 12;
+        first_run.parent_symbol = Some("First".to_string());
+        let mut second_run = make_symbol("Run", "method");
+        second_run.start_line = 30;
+        second_run.end_line = 32;
+        second_run.parent_symbol = Some("Second".to_string());
+        let mut caller = make_symbol("Execute", "function");
+        caller.calls.push(CallTarget {
+            qualified_name: "Run".to_string(),
+            name: "Run".to_string(),
+            file: "module/pkg/worker.go".to_string(),
+            line: 30,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "module/pkg/worker.go".to_string(),
+            make_extraction(vec![first_run, second_run]),
+        );
+        file_data.insert(
+            "module/pkg/caller.go".to_string(),
+            make_extraction(vec![caller]),
+        );
+
+        let resolver = LspEdgeResolver::new(file_data, "gopls");
+        let calls: Vec<_> = resolver
+            .build_edges()
+            .into_iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .collect();
+        let file_key = keys::file_key("module/pkg/worker.go");
+        let expected = keys::symbol_key(&file_key, "Run", 31);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].to, format!("codebase_symbols/{expected}"));
+    }
+
+    #[test]
+    fn ambiguous_file_suffix_does_not_emit_call_edge() {
+        let mut target_a = make_symbol("Run", "method");
+        target_a.start_line = 5;
+        target_a.end_line = 7;
+        let target_b = target_a.clone();
+        let mut caller = make_symbol("Execute", "function");
+        caller.calls.push(CallTarget {
+            qualified_name: "Run".to_string(),
+            name: "Run".to_string(),
+            file: "pkg/run.go".to_string(),
+            line: 5,
+        });
+
+        let mut file_data = HashMap::new();
+        file_data.insert(
+            "module_a/pkg/run.go".to_string(),
+            make_extraction(vec![target_a]),
+        );
+        file_data.insert(
+            "module_b/pkg/run.go".to_string(),
+            make_extraction(vec![target_b]),
+        );
+        file_data.insert("caller.go".to_string(), make_extraction(vec![caller]));
+
+        let resolver = LspEdgeResolver::new(file_data, "gopls");
+        assert!(
+            resolver
+                .build_edges()
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::Calls)
+        );
     }
 
     #[test]

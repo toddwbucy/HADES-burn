@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
+use std::time::Duration;
 
+use regex::Regex;
 use serde_json::Value;
 use tracing::{debug, warn};
 
@@ -16,14 +19,28 @@ use super::symbols::{
 pub struct GoSymbolExtractor<'a> {
     session: &'a GoplsSession,
     include_calls: bool,
+    path_root: &'a Path,
 }
+
+static GO_CODE_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)```(?:go)?[ \t]*\n(.*?)```").expect("invalid Go code block regex")
+});
 
 impl<'a> GoSymbolExtractor<'a> {
     pub fn new(session: &'a GoplsSession, include_calls: bool) -> Self {
         Self {
             session,
             include_calls,
+            path_root: session.workspace_root(),
         }
+    }
+
+    /// Express semantic target paths relative to the same root used for
+    /// extraction map keys. This matters when the ingest root contains a Go
+    /// module instead of being the module root itself.
+    pub fn with_path_root(mut self, path_root: &'a Path) -> Self {
+        self.path_root = path_root;
+        self
     }
 
     pub async fn extract_file(&self, file_path: &Path) -> Result<FileExtraction, LspError> {
@@ -47,14 +64,13 @@ impl<'a> GoSymbolExtractor<'a> {
                 warn!(path = %file.display(), %error, "gopls failed to preload file");
             }
         }
-        if let Err(error) = self
+        if !self
             .session
-            .workspace_symbols("__hades_gopls_preload__")
+            .wait_for_workspace_ready(Duration::from_secs(10))
             .await
         {
-            warn!(%error, "gopls workspace preload did not complete cleanly");
+            warn!("gopls workspace preload did not confirm readiness");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         for file in go_files {
             let path = file.to_string_lossy().to_string();
             match self.extract_file(file).await {
@@ -117,11 +133,12 @@ impl<'a> GoSymbolExtractor<'a> {
                 .map_or("private", |_| "pub")
                 .to_string();
             let mut signature = symbol["detail"].as_str().unwrap_or("").to_string();
-            if let Ok(Some(hover)) = self
-                .session
-                .hover(uri, selection_line, selection_character)
-                .await
-                && let Some(value) = hover_text(&hover)
+            if should_request_hover(&visibility, kind)
+                && let Ok(Some(hover)) = self
+                    .session
+                    .hover(uri, selection_line, selection_character)
+                    .await
+                && let Some(value) = extract_signature_from_hover(&hover)
             {
                 signature = value;
             }
@@ -172,7 +189,7 @@ impl<'a> GoSymbolExtractor<'a> {
                         .or_else(|| target.pointer("/targetRange/start/line"))
                         .and_then(Value::as_u64)
                         .unwrap_or(0) as u32;
-                    let file = uri_relative_path(target_uri, self.session.workspace_root());
+                    let file = uri_relative_path(target_uri, self.path_root);
                     if !file.is_empty() {
                         extraction.implementations.push(ImplementationTarget {
                             interface_name: interface_name.to_string(),
@@ -215,7 +232,7 @@ impl<'a> GoSymbolExtractor<'a> {
                 Some(CallTarget {
                     qualified_name: name.to_string(),
                     name: name.to_string(),
-                    file: uri_relative_path(target_uri, self.session.workspace_root()),
+                    file: uri_relative_path(target_uri, self.path_root),
                     line: target
                         .pointer("/range/start/line")
                         .and_then(Value::as_u64)
@@ -244,7 +261,15 @@ fn uri_relative_path(uri: &str, root: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn hover_text(hover: &Value) -> Option<String> {
+fn should_request_hover(visibility: &str, kind: &str) -> bool {
+    visibility == "pub"
+        && matches!(
+            kind,
+            "function" | "method" | "struct" | "interface" | "constant" | "variable"
+        )
+}
+
+fn hover_value(hover: &Value) -> Option<String> {
     let contents = hover.get("contents")?;
     if let Some(value) = contents.get("value").and_then(Value::as_str) {
         return Some(value.to_string());
@@ -252,12 +277,72 @@ fn hover_text(hover: &Value) -> Option<String> {
     if let Some(value) = contents.as_str() {
         return Some(value.to_string());
     }
-    contents.as_array().and_then(|items| {
-        items.iter().find_map(|item| {
-            item.get("value")
-                .and_then(Value::as_str)
-                .or_else(|| item.as_str())
-                .map(str::to_string)
-        })
+    contents.as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(|item| {
+                item.get("value")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     })
+}
+
+fn extract_signature_from_hover(hover: &Value) -> Option<String> {
+    let value = hover_value(hover)?;
+    for captures in GO_CODE_BLOCK.captures_iter(&value) {
+        let block = captures.get(1)?.as_str().trim();
+        if block.lines().any(is_go_declaration) {
+            return Some(block.to_string());
+        }
+    }
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| is_go_declaration(line))
+        .map(str::to_string)
+}
+
+fn is_go_declaration(line: &str) -> bool {
+    ["func ", "type ", "var ", "const ", "package "]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_signature_without_hover_documentation() {
+        let hover = serde_json::json!({
+            "contents": {
+                "kind": "markdown",
+                "value": "```go\nfunc Execute(r Runner) string\n```\n\nExecute runs the worker."
+            }
+        });
+        assert_eq!(
+            extract_signature_from_hover(&hover).as_deref(),
+            Some("func Execute(r Runner) string")
+        );
+    }
+
+    #[test]
+    fn hover_is_limited_to_exported_graph_symbols() {
+        assert!(should_request_hover("pub", "function"));
+        assert!(should_request_hover("pub", "interface"));
+        assert!(!should_request_hover("private", "function"));
+        assert!(!should_request_hover("pub", "field"));
+    }
+
+    #[test]
+    fn target_paths_use_configured_ingest_root() {
+        let uri = "file:///workspace/repository/module/pkg/worker.go";
+        assert_eq!(
+            uri_relative_path(uri, Path::new("/workspace/repository")),
+            "module/pkg/worker.go"
+        );
+    }
 }

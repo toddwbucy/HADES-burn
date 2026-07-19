@@ -794,6 +794,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "url",
  "urlencoding",
 ]
 

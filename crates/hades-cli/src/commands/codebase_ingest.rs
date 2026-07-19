@@ -1636,7 +1636,7 @@ async fn run_gopls_phase(
                 continue;
             }
         };
-        let extractor = GoSymbolExtractor::new(&session, true);
+        let extractor = GoSymbolExtractor::new(&session, true).with_path_root(base);
         let file_refs: Vec<&Path> = module_files.iter().map(PathBuf::as_path).collect();
         for (absolute, extraction) in extractor.extract_module(&file_refs).await {
             let absolute = Path::new(&absolute);

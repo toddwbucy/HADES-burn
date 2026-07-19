@@ -966,15 +966,6 @@ async fn ingest_file(
         })
         .collect();
 
-    // Remove stale chunks for this file before re-chunking. Chunk inserts are
-    // overwrite-by-key, so a re-ingest that produces *fewer* chunks than the
-    // previous run would leave the old high-index docs behind — inflating
-    // `chunk_count` and stranding chunks that reference symbols the purge above
-    // just removed (#159). The unparsed path has always done this; the parsed
-    // path did not, so shrinking source files accumulated orphans that even
-    // `--force` could not clear.
-    delete_file_chunks(db, &fkey).await;
-
     // Remove stale embeddings for this file before (re-)embedding.
     // This ensures that if embedding is skipped or fails, old vectors
     // from a previous run (which embed outdated text) don't linger.
@@ -1053,6 +1044,24 @@ async fn ingest_file(
     // so that embedding_count is only recorded once the vectors are durable.
     // This prevents check_unchanged() from skipping future backfills if
     // embedding persistence fails partway through.
+
+    // Remove stale chunks immediately before re-writing them. Chunk inserts are
+    // overwrite-by-key, so a re-ingest producing *fewer* chunks than the previous
+    // run would otherwise leave the old high-index docs behind — inflating
+    // `chunk_count` and stranding chunks that reference symbols the purge above
+    // already removed (#159). The unparsed path always did this; the parsed path
+    // did not, so shrinking source files accumulated orphans `--force` could not
+    // clear.
+    //
+    // This sits here rather than before the embedder call so the delete→insert
+    // window contains no network round-trip: delete→write is not atomic, and a
+    // failure between them leaves `chunk_count > 0` with zero stored chunks (the
+    // mirror of #159). The window cannot be closed without a transaction, so it
+    // is kept as small as possible. The next successful ingest self-heals.
+    // Runs unconditionally — a file that drops to zero chunks must still have
+    // its old ones removed.
+    delete_file_chunks(db, &fkey).await;
+
     if !chunk_docs.is_empty() {
         crud::insert_documents(db, CODEBASE.chunks, &chunk_docs, true)
             .await
@@ -2060,6 +2069,82 @@ mod tests {
     }
 
     /// Remove every trace of a test fixture file from the codebase graph.
+    /// Shared prefix for every fixture this test writes, across all PIDs.
+    const FIXTURE_PREFIX: &str = "__hades_test159_";
+
+    /// Do the codebase collections this test writes to actually exist?
+    ///
+    /// `ingest_file` is the low-level path and does not bootstrap collections —
+    /// the real `codebase ingest` command does that before calling it. Against a
+    /// database that is not a code graph, the first insert would fail with
+    /// "collection not found" and turn a skippable environment into a hard test
+    /// failure. Check first so the skip-if-absent convention actually holds.
+    async fn codebase_collections_present(pool: &ArangoPool) -> bool {
+        for col in [
+            CODEBASE.files,
+            CODEBASE.chunks,
+            CODEBASE.embeddings,
+            CODEBASE.symbols,
+        ] {
+            let aql = "RETURN LENGTH(FOR d IN @@col LIMIT 1 RETURN 1)";
+            let bind = json!({ "@col": col });
+            if hades_core::db::query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Remove fixtures left behind by *any* previous run, not just this PID.
+    ///
+    /// Assertion failures unwind before the trailing cleanup, so a failed run
+    /// leaks its PID-keyed docs permanently — the next run uses a new PID and
+    /// would never reclaim them. Sweeping the shared prefix keeps the test
+    /// leak-free in the project-management DB even across failures.
+    async fn cleanup_fixture_prefix(pool: &ArangoPool) {
+        let stale = {
+            let aql = "FOR f IN @@files FILTER STARTS_WITH(f._key, @prefix) RETURN f._key";
+            let bind = json!({ "@files": CODEBASE.files, "prefix": FIXTURE_PREFIX });
+            hades_core::db::query::query(
+                pool,
+                aql,
+                Some(&bind),
+                None,
+                false,
+                ExecutionTarget::Reader,
+            )
+            .await
+            .map(|r| {
+                r.results
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        };
+        for fkey in stale {
+            cleanup_fixture(pool, &fkey).await;
+        }
+        // Chunks/embeddings whose file node was already gone are not reachable
+        // via the file-key sweep above, so clear them by their own prefix too.
+        for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
+            let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @prefix) REMOVE d IN @@col";
+            let bind = json!({ "@col": col, "prefix": FIXTURE_PREFIX });
+            let _ = hades_core::db::query::query(
+                pool,
+                aql,
+                Some(&bind),
+                None,
+                false,
+                ExecutionTarget::Writer,
+            )
+            .await;
+        }
+    }
+
     async fn cleanup_fixture(pool: &ArangoPool, fkey: &str) {
         purge_file_symbols_and_edges(pool, fkey).await;
         delete_file_chunks(pool, fkey).await;
@@ -2123,6 +2208,13 @@ mod tests {
     #[tokio::test]
     async fn test_reingest_shrinking_file_leaves_no_orphan_chunks() {
         let Some(pool) = test_pool() else { return };
+        if !codebase_collections_present(&pool).await {
+            eprintln!("skipping: target database has no codebase collections");
+            return;
+        }
+        // Reclaim anything a previously failed run leaked (any PID).
+        cleanup_fixture_prefix(&pool).await;
+
         let config = HadesConfig::default();
         let pid = std::process::id();
 
@@ -2170,7 +2262,7 @@ mod tests {
             let rel_path = format!("__hades_test159_{pid}/shrink.{ext}");
             let fkey = keys::file_key(&rel_path);
 
-            // Start clean in case a previous aborted run left residue.
+            // Start clean in case this PID's fixture somehow survived.
             cleanup_fixture(&pool, &fkey).await;
 
             fs::write(&path, &long_src).unwrap();

@@ -96,6 +96,7 @@ pub struct CodebaseIngestFailure {
 ///
 /// Collects per-file import data during the ingest loop so that
 /// import edges can be resolved in a batch pass after all files are processed.
+#[derive(Default)]
 struct ImportContext {
     /// Python: rel_path → list of import symbols (with metadata for resolution).
     python_imports: HashMap<String, Vec<Symbol>>,
@@ -1043,6 +1044,24 @@ async fn ingest_file(
     // so that embedding_count is only recorded once the vectors are durable.
     // This prevents check_unchanged() from skipping future backfills if
     // embedding persistence fails partway through.
+
+    // Remove stale chunks immediately before re-writing them. Chunk inserts are
+    // overwrite-by-key, so a re-ingest producing *fewer* chunks than the previous
+    // run would otherwise leave the old high-index docs behind — inflating
+    // `chunk_count` and stranding chunks that reference symbols the purge above
+    // already removed (#159). The unparsed path always did this; the parsed path
+    // did not, so shrinking source files accumulated orphans `--force` could not
+    // clear.
+    //
+    // This sits here rather than before the embedder call so the delete→insert
+    // window contains no network round-trip: delete→write is not atomic, and a
+    // failure between them leaves `chunk_count > 0` with zero stored chunks (the
+    // mirror of #159). The window cannot be closed without a transaction, so it
+    // is kept as small as possible. The next successful ingest self-heals.
+    // Runs unconditionally — a file that drops to zero chunks must still have
+    // its old ones removed.
+    delete_file_chunks(db, &fkey).await;
+
     if !chunk_docs.is_empty() {
         crud::insert_documents(db, CODEBASE.chunks, &chunk_docs, true)
             .await
@@ -1390,9 +1409,10 @@ async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
 
 /// Delete all chunk documents for a file.
 ///
-/// Called before re-chunking on the unparsed path so that a re-ingest which
-/// produces fewer chunks leaves no orphaned high-index chunk docs behind
-/// (overwrite-by-key only updates the chunks that still exist).
+/// Called before re-chunking on **both** the parsed and unparsed paths so that a
+/// re-ingest which produces fewer chunks leaves no orphaned high-index chunk docs
+/// behind (overwrite-by-key only updates the chunks that still exist). The parsed
+/// path was missing this call until #159.
 async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
     let aql = "FOR c IN @@col FILTER c.file_key == @fk REMOVE c IN @@col";
     let bind = json!({ "@col": CODEBASE.chunks, "fk": file_key });
@@ -2033,6 +2053,308 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── #159 regression: shrinking re-ingest must not leave orphan chunks ──
+
+    /// Count documents in `col` whose `file_key` matches.
+    async fn count_by_file_key(pool: &ArangoPool, col: &str, fkey: &str) -> u64 {
+        let aql = "FOR d IN @@col FILTER d.file_key == @fk COLLECT WITH COUNT INTO n RETURN n";
+        let bind = json!({ "@col": col, "fk": fkey });
+        hades_core::db::query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    }
+
+    /// Remove every trace of a test fixture file from the codebase graph.
+    /// Shared prefix for every fixture this test writes, across all PIDs.
+    const FIXTURE_PREFIX: &str = "__hades_test159_";
+
+    /// Do the codebase collections this test writes to actually exist?
+    ///
+    /// `ingest_file` is the low-level path and does not bootstrap collections —
+    /// the real `codebase ingest` command does that before calling it. Against a
+    /// database that is not a code graph, the first insert would fail with
+    /// "collection not found" and turn a skippable environment into a hard test
+    /// failure. Check first so the skip-if-absent convention actually holds.
+    async fn codebase_collections_present(pool: &ArangoPool) -> bool {
+        for col in [
+            CODEBASE.files,
+            CODEBASE.chunks,
+            CODEBASE.embeddings,
+            CODEBASE.symbols,
+        ] {
+            let aql = "RETURN LENGTH(FOR d IN @@col LIMIT 1 RETURN 1)";
+            let bind = json!({ "@col": col });
+            if hades_core::db::query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Remove fixtures left behind by *any* previous run, not just this PID.
+    ///
+    /// Assertion failures unwind before the trailing cleanup, so a failed run
+    /// leaks its PID-keyed docs permanently — the next run uses a new PID and
+    /// would never reclaim them. Sweeping the shared prefix keeps the test
+    /// leak-free in the project-management DB even across failures.
+    async fn cleanup_fixture_prefix(pool: &ArangoPool) {
+        let stale = {
+            let aql = "FOR f IN @@files FILTER STARTS_WITH(f._key, @prefix) RETURN f._key";
+            let bind = json!({ "@files": CODEBASE.files, "prefix": FIXTURE_PREFIX });
+            hades_core::db::query::query(
+                pool,
+                aql,
+                Some(&bind),
+                None,
+                false,
+                ExecutionTarget::Reader,
+            )
+            .await
+            .map(|r| {
+                r.results
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        };
+        for fkey in stale {
+            cleanup_fixture(pool, &fkey).await;
+        }
+        // Chunks/embeddings whose file node was already gone are not reachable
+        // via the file-key sweep above, so clear them by their own prefix too.
+        for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
+            let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @prefix) REMOVE d IN @@col";
+            let bind = json!({ "@col": col, "prefix": FIXTURE_PREFIX });
+            let _ = hades_core::db::query::query(
+                pool,
+                aql,
+                Some(&bind),
+                None,
+                false,
+                ExecutionTarget::Writer,
+            )
+            .await;
+        }
+    }
+
+    async fn cleanup_fixture(pool: &ArangoPool, fkey: &str) {
+        purge_file_symbols_and_edges(pool, fkey).await;
+        delete_file_chunks(pool, fkey).await;
+        delete_file_embeddings(pool, fkey).await;
+        let aql = "FOR d IN @@files FILTER d._key == @fk REMOVE d IN @@files";
+        let bind = json!({ "@files": CODEBASE.files, "fk": fkey });
+        let _ = hades_core::db::query::query(
+            pool,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await;
+    }
+
+    /// Connect to the integration-test database, or `None` to skip.
+    fn test_pool() -> Option<ArangoPool> {
+        let socket = std::path::PathBuf::from(
+            std::env::var("ARANGO_SOCKET")
+                .unwrap_or_else(|_| "/run/arangodb3/arangodb.sock".to_string()),
+        );
+        if !socket.exists() {
+            if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
+                panic!(
+                    "ARANGO_TESTS is set but socket not found at {}",
+                    socket.display()
+                );
+            }
+            eprintln!(
+                "skipping: ArangoDB socket not found at {}",
+                socket.display()
+            );
+            return None;
+        }
+        let Ok(password) = std::env::var("ARANGO_PASSWORD") else {
+            eprintln!("skipping: ARANGO_PASSWORD not set");
+            return None;
+        };
+        let client =
+            hades_core::db::ArangoClient::with_socket(socket, "bident_burn", "root", &password);
+        Some(ArangoPool::new(client.clone(), client))
+    }
+
+    /// A re-ingest that produces *fewer* chunks than the previous run must not
+    /// leave the old high-index chunk docs behind (#159).
+    ///
+    /// Chunk inserts are overwrite-by-key, so without an explicit delete the
+    /// parsed path kept chunks `N+1..M` from the longer previous version
+    /// forever — inflating `chunk_count` and stranding chunks that reference
+    /// symbols the pre-write purge had already removed. `--force` could not
+    /// clear them, so the graph never converged.
+    ///
+    /// Runs for every parsed language that owns the parsed path, so a future
+    /// language added to `Language` inherits the coverage.
+    ///
+    /// Requires ArangoDB (skips if the socket is absent, per the integration
+    /// test convention). Uses a PID-suffixed fixture path so its keys never
+    /// collide with real data, and removes every document it wrote.
+    #[tokio::test]
+    async fn test_reingest_shrinking_file_leaves_no_orphan_chunks() {
+        let Some(pool) = test_pool() else { return };
+        if !codebase_collections_present(&pool).await {
+            eprintln!("skipping: target database has no codebase collections");
+            return;
+        }
+        // Reclaim anything a previously failed run leaked (any PID).
+        cleanup_fixture_prefix(&pool).await;
+
+        let config = HadesConfig::default();
+        let pid = std::process::id();
+
+        // (extension, long source generator, short source) per parsed language.
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "rs",
+                (0..40)
+                    .map(|i| {
+                        format!(
+                            "/// Padded documentation for generated function {i}, long enough \
+                             that the chunker emits several chunks for this file.\n\
+                             pub fn generated_{i}(input: u64) -> u64 {{\n\
+                             \x20   let mut acc = input;\n\
+                             \x20   for step in 0..{i}u64 {{ acc = acc.wrapping_add(step); }}\n\
+                             \x20   acc\n\
+                             }}\n\n"
+                        )
+                    })
+                    .collect(),
+                "pub fn only() -> u64 { 1 }\n",
+            ),
+            (
+                "go",
+                std::iter::once("package fixture\n\n".to_string())
+                    .chain((0..40).map(|i| {
+                        format!(
+                            "// Padded documentation for generated function {i}, long enough \
+                             that the chunker emits several chunks for this file.\n\
+                             func Generated{i}(input uint64) uint64 {{\n\
+                             \x20   acc := input\n\
+                             \x20   for step := 0; step < {i}; step++ {{ acc += uint64(step) }}\n\
+                             \x20   return acc\n\
+                             }}\n\n"
+                        )
+                    }))
+                    .collect(),
+                "package fixture\n\nfunc Only() uint64 { return 1 }\n",
+            ),
+        ];
+
+        for (ext, long_src, short_src) in cases {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join(format!("shrink.{ext}"));
+            let rel_path = format!("__hades_test159_{pid}/shrink.{ext}");
+            let fkey = keys::file_key(&rel_path);
+
+            // Start clean in case this PID's fixture somehow survived.
+            cleanup_fixture(&pool, &fkey).await;
+
+            fs::write(&path, &long_src).unwrap();
+            let mut imports = ImportContext::default();
+            let first = ingest_file(
+                &pool,
+                None,
+                &config,
+                &path,
+                &rel_path,
+                None,
+                &mut imports,
+                None,
+                false,
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("first ingest failed for .{ext}: {e}"));
+            let after_first = count_by_file_key(&pool, CODEBASE.chunks, &fkey).await;
+            assert!(
+                after_first > 1,
+                ".{ext} fixture must produce multiple chunks to exercise the shrink case, \
+                 got {after_first}"
+            );
+            assert_eq!(
+                first.num_chunks.unwrap_or(0) as u64,
+                after_first,
+                ".{ext} first ingest: reported chunk count must match stored docs"
+            );
+
+            fs::write(&path, short_src).unwrap();
+            let mut imports = ImportContext::default();
+            let second = ingest_file(
+                &pool,
+                None,
+                &config,
+                &path,
+                &rel_path,
+                None,
+                &mut imports,
+                None,
+                true,
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("second ingest failed for .{ext}: {e}"));
+            let after_second = count_by_file_key(&pool, CODEBASE.chunks, &fkey).await;
+
+            // The regression: without the delete, after_second would still equal
+            // after_first, because overwrite-by-key only rewrote 0..N.
+            assert!(
+                after_second < after_first,
+                ".{ext} shrinking re-ingest left orphan chunks: {after_first} before, \
+                 {after_second} after (#159)"
+            );
+            assert_eq!(
+                second.num_chunks.unwrap_or(0) as u64,
+                after_second,
+                ".{ext} second ingest: reported chunk count must match stored docs (#159)"
+            );
+
+            // No chunk may reference a symbol the purge removed (validate #7).
+            let dangling = {
+                let aql = "FOR c IN @@chunks FILTER c.file_key == @fk \
+                           FOR s IN (c.symbols || []) \
+                           FILTER DOCUMENT(CONCAT(@syms_name, '/', s)) == null \
+                           COLLECT WITH COUNT INTO n RETURN n";
+                let bind = json!({
+                    "@chunks": CODEBASE.chunks,
+                    "syms_name": CODEBASE.symbols,
+                    "fk": fkey,
+                });
+                hades_core::db::query::query_single(
+                    &pool,
+                    aql,
+                    Some(&bind),
+                    ExecutionTarget::Reader,
+                )
+                .await
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+            };
+            assert_eq!(
+                dangling, 0,
+                ".{ext} chunks reference removed symbols (#159)"
+            );
+
+            cleanup_fixture(&pool, &fkey).await;
+        }
+    }
 
     #[test]
     fn test_unparsed_language_label() {

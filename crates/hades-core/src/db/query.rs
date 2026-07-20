@@ -195,13 +195,21 @@ fn extract_results(resp: &Value) -> Result<Vec<Value>, ArangoError> {
 /// - **Field drift between writer and reader.** Field names arrive as data
 ///   (attribute-name binds, `d.@f`), so callers pass the same constants the
 ///   write path uses instead of re-typing them into query strings.
+///   Attribute-name binds are resolved at parse time, before planning:
+///   verified via `_api/explain` that `FILTER d.@f0 == @value` selects the
+///   same persistent index (`IndexNode`, `fields=file_key`) as the literal
+///   `FILTER d.file_key == @value`.
 pub async fn remove_docs_by_fields(
     pool: &ArangoPool,
     collection: &str,
     fields: &[&str],
     value: &str,
 ) -> Result<u64, ArangoError> {
-    assert!(!fields.is_empty(), "remove_docs_by_fields: no fields given");
+    if fields.is_empty() {
+        return Err(ArangoError::Request(
+            "remove_docs_by_fields: no fields given".to_string(),
+        ));
+    }
     // FILTER d.@f0 == @value OR d.@f1 == @value ...
     let filter = fields
         .iter()

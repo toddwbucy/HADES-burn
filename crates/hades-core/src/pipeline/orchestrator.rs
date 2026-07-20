@@ -392,17 +392,7 @@ impl Pipeline {
         let chunk_docs: Vec<Value> = chunks
             .iter()
             .enumerate()
-            .map(|(i, chunk)| {
-                json!({
-                    "_key": keys::chunk_key(doc_key, i),
-                    "doc_key": doc_key,
-                    "text": chunk.text,
-                    "chunk_index": chunk.chunk_index,
-                    "total_chunks": chunk.total_chunks,
-                    "start_char": chunk.start_char,
-                    "end_char": chunk.end_char,
-                })
-            })
+            .map(|(i, chunk)| chunk_doc(profile, doc_key, i, chunk))
             .collect();
 
         let chunk_res =
@@ -420,15 +410,7 @@ impl Pipeline {
             .embeddings
             .iter()
             .enumerate()
-            .map(|(i, emb)| {
-                let ck = keys::chunk_key(doc_key, i);
-                json!({
-                    "_key": keys::embedding_key(&ck),
-                    "chunk_key": ck,
-                    "doc_key": doc_key,
-                    "embedding": emb,
-                })
-            })
+            .map(|(i, emb)| embedding_doc(profile, doc_key, i, emb))
             .collect();
 
         let emb_res = crud::insert_documents(
@@ -466,6 +448,29 @@ impl Pipeline {
         // declared-but-unused defect (every `--force` refresh aborting, #169)
         // unrepresentable rather than merely fixed.
         //
+        // The filter matches `doc_key` (what this pipeline has always written)
+        // OR the profile's declared foreign key: rows written by the legacy
+        // Python pipeline carry only the foreign key (`parent_key`), so a
+        // doc_key-only filter would leave them behind on refresh —
+        // accumulating stale chunks exactly like #159 did on the parsed code
+        // path (#165).
+        //
+        // The two removes are NOT transactional: chunks commit before
+        // embeddings run, so a transient failure of the second call leaves
+        // orphaned embeddings until the next successful overwrite of the same
+        // document, which clears them (each run deletes before writing).
+        // Deletes go through `query::remove_docs_by_fields`, which builds one
+        // bind object per query — the shape that makes the ArangoDB-1552
+        // declared-but-unused defect (every `--force` refresh aborting, #169)
+        // unrepresentable rather than merely fixed.
+        //
+        // The filter matches `doc_key` (what this pipeline has always written)
+        // OR the profile's declared foreign key: rows written by the legacy
+        // Python pipeline carry only the foreign key (`parent_key`), so a
+        // doc_key-only filter would leave them behind on refresh —
+        // accumulating stale chunks exactly like #159 did on the parsed code
+        // path (#165).
+        //
         // The two removes are NOT transactional: chunks commit before
         // embeddings run, so a transient failure of the second call leaves
         // orphaned embeddings until the next successful overwrite of the same
@@ -478,8 +483,9 @@ impl Pipeline {
         // orphan state is accepted because it self-heals and is
         // read-invisible (search joins embeddings to chunks that no longer
         // exist and drops them).
-        query::remove_docs_by_fields(&self.db, profile.chunks, &["doc_key"], doc_key).await?;
-        query::remove_docs_by_fields(&self.db, profile.embeddings, &["doc_key"], doc_key).await?;
+        let match_fields = ["doc_key", profile.foreign_key];
+        query::remove_docs_by_fields(&self.db, profile.chunks, &match_fields, doc_key).await?;
+        query::remove_docs_by_fields(&self.db, profile.embeddings, &match_fields, doc_key).await?;
 
         debug!(doc_key, "deleted stale chunks and embeddings");
         Ok(())
@@ -492,5 +498,111 @@ impl std::fmt::Debug for Pipeline {
             .field("profile", &self.config.profile)
             .field("embed_task", &self.config.embed_task)
             .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Document construction
+// ---------------------------------------------------------------------------
+
+/// Build a chunk document carrying BOTH `doc_key` and the profile's declared
+/// foreign key (#165).
+///
+/// The search path filters on `profile.foreign_key` (`parent_key` for the
+/// default profile), while the delete/refresh path has historically filtered
+/// on `doc_key`. Writing only `doc_key` made every natively-ingested document
+/// invisible to `db query` — silently, since zero results is a valid answer.
+/// Writing both, with the field name taken from the SAME `CollectionProfile`
+/// the reader uses, makes writer/reader agreement structural rather than
+/// conventional.
+fn chunk_doc(
+    profile: &CollectionProfile,
+    doc_key: &str,
+    index: usize,
+    chunk: &crate::chunking::TextChunk,
+) -> Value {
+    let mut doc = json!({
+        "_key": keys::chunk_key(doc_key, index),
+        "doc_key": doc_key,
+        "text": chunk.text,
+        "chunk_index": chunk.chunk_index,
+        "total_chunks": chunk.total_chunks,
+        "start_char": chunk.start_char,
+        "end_char": chunk.end_char,
+    });
+    doc[profile.foreign_key] = json!(doc_key);
+    doc
+}
+
+/// Build an embedding document. Same dual-key contract as [`chunk_doc`].
+fn embedding_doc(
+    profile: &CollectionProfile,
+    doc_key: &str,
+    index: usize,
+    embedding: &[f32],
+) -> Value {
+    let ck = keys::chunk_key(doc_key, index);
+    let mut doc = json!({
+        "_key": keys::embedding_key(&ck),
+        "chunk_key": ck,
+        "doc_key": doc_key,
+        "embedding": embedding,
+    });
+    doc[profile.foreign_key] = json!(doc_key);
+    doc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunking::TextChunk;
+    use crate::db::collections::CollectionProfile;
+
+    fn chunk() -> TextChunk {
+        TextChunk {
+            text: "hello".into(),
+            start_char: 0,
+            end_char: 5,
+            chunk_index: 0,
+            total_chunks: 1,
+        }
+    }
+
+    /// The writer must emit the field the reader filters on, for every profile
+    /// (#165). The reader (db_search phase 1) filters
+    /// `emb.<profile.foreign_key> != null`, so a chunk/embedding row missing
+    /// that field is invisible to search.
+    #[test]
+    fn docs_carry_the_profile_foreign_key() {
+        for name in ["default", "codebase"] {
+            let profile = CollectionProfile::get(name).unwrap();
+            let c = chunk_doc(profile, "docA", 0, &chunk());
+            let e = embedding_doc(profile, "docA", 0, &[0.1, 0.2]);
+            for (kind, d) in [("chunk", &c), ("embedding", &e)] {
+                assert_eq!(
+                    d[profile.foreign_key].as_str(),
+                    Some("docA"),
+                    "{kind} doc for profile '{name}' missing its declared                      foreign key '{}' — search cannot find it",
+                    profile.foreign_key
+                );
+                assert_eq!(
+                    d["doc_key"].as_str(),
+                    Some("docA"),
+                    "{kind} doc lost the legacy doc_key contract the                      delete/refresh path relies on"
+                );
+            }
+        }
+    }
+
+    /// Keys and linkage stay stable under the refactor.
+    #[test]
+    fn doc_construction_shape_unchanged() {
+        let profile = CollectionProfile::get("default").unwrap();
+        let c = chunk_doc(profile, "docA", 3, &chunk());
+        assert_eq!(c["_key"], "docA_chunk_3");
+        assert_eq!(c["text"], "hello");
+        let e = embedding_doc(profile, "docA", 3, &[1.0]);
+        assert_eq!(e["chunk_key"], "docA_chunk_3");
+        assert_eq!(e["_key"], "docA_chunk_3_emb");
     }
 }

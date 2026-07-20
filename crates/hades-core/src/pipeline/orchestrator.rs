@@ -11,7 +11,7 @@ use crate::db::ArangoPool;
 use crate::db::collections::CollectionProfile;
 use crate::db::crud;
 use crate::db::keys;
-use crate::db::query::{self, ExecutionTarget};
+use crate::db::query;
 use crate::persephone::embedding::{EmbedResult, EmbeddingClient, EmbeddingError};
 use crate::persephone::extraction::{
     ExtractOptions, ExtractResult, ExtractionClient, ExtractionError,
@@ -461,38 +461,20 @@ impl Pipeline {
         profile: &CollectionProfile,
         doc_key: &str,
     ) -> Result<(), PipelineError> {
-        // One bind object per query: ArangoDB rejects DECLARED-but-unused bind
-        // parameters (error 1552), so sharing a single bind map that names both
-        // collections across two single-collection queries fails. This made
-        // every `--force` document re-ingest error out (fresh ingests skip this
-        // path, which is why it went unnoticed).
-        let chunk_binds = json!({
-            "doc_key": doc_key,
-            "@chunks": profile.chunks,
-        });
-        query::query(
-            &self.db,
-            "FOR c IN @@chunks FILTER c.doc_key == @doc_key REMOVE c IN @@chunks",
-            Some(&chunk_binds),
-            None,
-            false,
-            ExecutionTarget::Writer,
-        )
-        .await?;
-
-        let embedding_binds = json!({
-            "doc_key": doc_key,
-            "@embeddings": profile.embeddings,
-        });
-        query::query(
-            &self.db,
-            "FOR e IN @@embeddings FILTER e.doc_key == @doc_key REMOVE e IN @@embeddings",
-            Some(&embedding_binds),
-            None,
-            false,
-            ExecutionTarget::Writer,
-        )
-        .await?;
+        // Deletes go through `query::remove_docs_by_fields`, which builds one
+        // bind object per query — the shape that makes the ArangoDB-1552
+        // declared-but-unused defect (every `--force` refresh aborting, #169)
+        // unrepresentable rather than merely fixed.
+        //
+        // The two removes are NOT transactional: chunks commit before
+        // embeddings run, so a transient failure of the second call leaves
+        // orphaned embeddings until the next successful overwrite of the same
+        // document, which clears them (each run deletes before writing).
+        // Closing the window needs a stream transaction; accepted as-is
+        // because the state self-heals and is read-invisible (search joins
+        // embeddings to chunks that no longer exist and drops them).
+        query::remove_docs_by_fields(&self.db, profile.chunks, &["doc_key"], doc_key).await?;
+        query::remove_docs_by_fields(&self.db, profile.embeddings, &["doc_key"], doc_key).await?;
 
         debug!(doc_key, "deleted stale chunks and embeddings");
         Ok(())

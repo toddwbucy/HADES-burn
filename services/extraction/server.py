@@ -325,6 +325,20 @@ async def serve() -> None:
     logger.info("Starting extraction service on %s", socket_path)
     await server.start()
 
+    # Make the socket group-connectable (the `hades` group) so CLI clients can
+    # reach it, matching the trainer and daemon sockets. Under systemd the
+    # default umask (022) would otherwise create it 0755 — no group write —
+    # blocking same-group clients (e.g. the `hades` CLI run by a user in the
+    # group). Connecting to a Unix socket requires the write bit.
+    try:
+        os.chmod(socket_path, 0o770)
+    except OSError as exc:
+        # The socket is unusable by group clients without this, so don't
+        # advertise "ready" — fail loudly and let systemd restart.
+        logger.error("failed to chmod %s to 0770; aborting startup: %s", socket_path, exc)
+        await server.stop(grace=0)
+        raise
+
     # Start idle monitor
     monitor = asyncio.create_task(idle_monitor(servicer, config))
 

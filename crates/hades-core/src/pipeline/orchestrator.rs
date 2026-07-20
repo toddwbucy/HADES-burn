@@ -459,22 +459,6 @@ impl Pipeline {
         // embeddings run, so a transient failure of the second call leaves
         // orphaned embeddings until the next successful overwrite of the same
         // document, which clears them (each run deletes before writing).
-        // Deletes go through `query::remove_docs_by_fields`, which builds one
-        // bind object per query — the shape that makes the ArangoDB-1552
-        // declared-but-unused defect (every `--force` refresh aborting, #169)
-        // unrepresentable rather than merely fixed.
-        //
-        // The filter matches `doc_key` (what this pipeline has always written)
-        // OR the profile's declared foreign key: rows written by the legacy
-        // Python pipeline carry only the foreign key (`parent_key`), so a
-        // doc_key-only filter would leave them behind on refresh —
-        // accumulating stale chunks exactly like #159 did on the parsed code
-        // path (#165).
-        //
-        // The two removes are NOT transactional: chunks commit before
-        // embeddings run, so a transient failure of the second call leaves
-        // orphaned embeddings until the next successful overwrite of the same
-        // document, which clears them (each run deletes before writing).
         // The window could be closed without a stream transaction by folding
         // both removes into one multi-collection AQL query, as
         // `db_purge_document` in dispatch.rs already does — a deliberate
@@ -530,8 +514,31 @@ fn chunk_doc(
         "start_char": chunk.start_char,
         "end_char": chunk.end_char,
     });
-    doc[profile.foreign_key] = json!(doc_key);
+    set_foreign_key(&mut doc, profile, doc_key);
     doc
+}
+
+/// Write the profile's foreign key into `doc`, guarding against a profile
+/// whose `foreign_key` collides with a structural field.
+///
+/// Safe for both registered profiles today (`parent_key`, `file_key`), and
+/// `foreign_key == "doc_key"` is a harmless same-value overwrite. But a future
+/// profile naming a structural field (`text`, `embedding`, `chunk_key`, ...)
+/// would silently clobber real data, so that case is a debug-time panic and a
+/// release-time refusal-to-clobber. The
+/// `profile_foreign_keys_do_not_collide_with_structural_fields` test pins this
+/// for every registered profile.
+fn set_foreign_key(doc: &mut Value, profile: &CollectionProfile, doc_key: &str) {
+    let fk = profile.foreign_key;
+    let existing = doc.get(fk);
+    let collides = existing.is_some_and(|v| v.as_str() != Some(doc_key));
+    debug_assert!(
+        !collides,
+        "profile foreign_key '{fk}' collides with a structural document field"
+    );
+    if !collides {
+        doc[fk] = json!(doc_key);
+    }
 }
 
 /// Build an embedding document. Same dual-key contract as [`chunk_doc`].
@@ -548,7 +555,7 @@ fn embedding_doc(
         "doc_key": doc_key,
         "embedding": embedding,
     });
-    doc[profile.foreign_key] = json!(doc_key);
+    set_foreign_key(&mut doc, profile, doc_key);
     doc
 }
 
@@ -582,15 +589,38 @@ mod tests {
                 assert_eq!(
                     d[profile.foreign_key].as_str(),
                     Some("docA"),
-                    "{kind} doc for profile '{name}' missing its declared                      foreign key '{}' — search cannot find it",
+                    "{kind} doc for profile '{name}' missing its declared foreign key '{}' — search cannot find it",
                     profile.foreign_key
                 );
                 assert_eq!(
                     d["doc_key"].as_str(),
                     Some("docA"),
-                    "{kind} doc lost the legacy doc_key contract the                      delete/refresh path relies on"
+                    "{kind} doc lost the legacy doc_key contract the delete/refresh path relies on"
                 );
             }
+        }
+    }
+
+    /// No registered profile may name a structural chunk/embedding field as
+    /// its foreign key — that would make `set_foreign_key` clobber real data.
+    #[test]
+    fn profile_foreign_keys_do_not_collide_with_structural_fields() {
+        let structural = [
+            "_key",
+            "text",
+            "chunk_index",
+            "total_chunks",
+            "start_char",
+            "end_char",
+            "chunk_key",
+            "embedding",
+        ];
+        for name in ["default", "codebase"] {
+            let fk = CollectionProfile::get(name).unwrap().foreign_key;
+            assert!(
+                !structural.contains(&fk),
+                "profile '{name}' foreign_key '{fk}' names a structural field"
+            );
         }
     }
 

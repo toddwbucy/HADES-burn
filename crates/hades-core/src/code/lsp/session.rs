@@ -13,7 +13,7 @@ use url::Url;
 use super::LspError;
 use super::client::LspClient;
 
-const DEFAULT_INDEX_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_INDEX_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Server-specific configuration layered over the shared LSP transport.
@@ -400,5 +400,53 @@ mod tests {
     #[test]
     fn rejects_non_file_uris() {
         assert_eq!(uri_to_path("https://example.test/main.go"), None);
+    }
+}
+
+/// Probe an analyzer binary FROM the workspace directory and return its
+/// version line.
+///
+/// The probe must run with `current_dir = workspace` because the rustup shim
+/// resolves per-directory: a `rust-analyzer` that works in an arbitrary shell
+/// dies inside a repo whose rust-toolchain.toml pins a toolchain missing the
+/// component ("Unknown binary ... in official toolchain"). Probing from
+/// anywhere else validates the wrong toolchain (#164, observed three ways in
+/// two days). Failures carry the binary's own stderr so the operator sees the
+/// shim's actual message.
+pub fn preflight_binary(command: &str, workspace: &std::path::Path) -> Result<String, LspError> {
+    let out = std::process::Command::new(command)
+        .arg("--version")
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| LspError::Process(format!("failed to spawn {command}: {e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(LspError::Process(format!(
+            "{command} --version failed (run from {}): {}",
+            workspace.display(),
+            err.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::preflight_binary;
+
+    #[test]
+    fn preflight_reports_missing_binary() {
+        let err = preflight_binary(
+            "definitely-not-a-real-analyzer",
+            std::path::Path::new("/tmp"),
+        );
+        assert!(err.is_err(), "a nonexistent binary must fail the preflight");
+    }
+
+    #[test]
+    fn preflight_accepts_a_working_binary() {
+        let v =
+            preflight_binary("rustc", std::path::Path::new("/tmp")).expect("rustc must preflight");
+        assert!(v.contains("rustc"), "version line captured: {v}");
     }
 }

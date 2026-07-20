@@ -28,6 +28,9 @@ pub struct HadesConfig {
     pub sync: SyncConfig,
     pub logging: LoggingConfig,
     pub batch_processing: BatchProcessingConfig,
+    /// External semantic-analyzer binaries (rust-analyzer, gopls).
+    #[serde(default)]
+    pub analyzers: AnalyzersConfig,
 }
 
 impl HadesConfig {
@@ -36,6 +39,12 @@ impl HadesConfig {
     /// Called after YAML loading, before CLI overrides.
     /// Returns `Err` if an env var contains an invalid value.
     pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(v) = std::env::var("HADES_RUST_ANALYZER_PATH") {
+            self.analyzers.rust_analyzer = Some(v);
+        }
+        if let Ok(v) = std::env::var("HADES_GOPLS_PATH") {
+            self.analyzers.gopls = Some(v);
+        }
         // Database
         if let Ok(v) = env::var("ARANGO_USERNAME") {
             self.database.username = v;
@@ -487,4 +496,22 @@ impl Default for LoggingConfig {
             format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s".into(),
         }
     }
+}
+
+/// Paths to external analyzer binaries used by `codebase ingest` enrichment.
+///
+/// Resolution order per analyzer: this config -> the environment override ->
+/// the PATH lookup. A configured path is used verbatim (no PATH search), which
+/// is what makes enrichment deterministic across machines — the rustup shim on
+/// PATH resolves per-directory via rust-toolchain.toml, so "is rust-analyzer
+/// installed" has no directory-independent answer without a pin (#167).
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyzersConfig {
+    /// Absolute path to a rust-analyzer binary. Env: HADES_RUST_ANALYZER_PATH.
+    #[serde(default)]
+    pub rust_analyzer: Option<String>,
+    /// Absolute path to a gopls binary. Env: HADES_GOPLS_PATH.
+    #[serde(default)]
+    pub gopls: Option<String>,
 }

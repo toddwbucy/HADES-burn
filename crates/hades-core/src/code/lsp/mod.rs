@@ -39,3 +39,5 @@ pub enum LspError {
 
 // Compatibility name while downstream callers migrate to the generic module.
 pub type RustAnalyzerError = LspError;
+
+pub use session::{DEFAULT_INDEX_TIMEOUT_SECS, preflight_binary};

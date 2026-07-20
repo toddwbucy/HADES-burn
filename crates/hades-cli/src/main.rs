@@ -20,6 +20,7 @@ use commands::{
     schema::SchemaCmd,
     smell::SmellCmd,
     task::TaskCmd,
+    tools::ToolsCmd,
 };
 
 /// HADES-Burn — AI model interface for semantic search over academic papers,
@@ -167,6 +168,10 @@ enum Commands {
     /// the live `hades_schema` collection. See `docs/declarative-schema.md`.
     #[command(subcommand)]
     Schema(SchemaCmd),
+
+    /// External analyzer inventory and health (rust-analyzer, gopls).
+    #[command(subcommand)]
+    Tools(ToolsCmd),
 
     /// Start the HADES daemon (Unix socket query server).
     Daemon {
@@ -324,6 +329,10 @@ fn main() -> anyhow::Result<()> {
                 &unparsed_ext,
                 full,
             ))
+        }
+        Commands::Tools(ToolsCmd::Status { workspace }) => {
+            init_tracing();
+            commands::tools::run_status(&config, workspace)
         }
         Commands::Codebase(CodebaseCmd::Retire {
             files,

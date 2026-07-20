@@ -11,7 +11,7 @@ use crate::db::ArangoPool;
 use crate::db::collections::CollectionProfile;
 use crate::db::crud;
 use crate::db::keys;
-use crate::db::query::{self, ExecutionTarget};
+use crate::db::query;
 use crate::persephone::embedding::{EmbedResult, EmbeddingClient, EmbeddingError};
 use crate::persephone::extraction::{
     ExtractOptions, ExtractResult, ExtractionClient, ExtractionError,
@@ -461,33 +461,25 @@ impl Pipeline {
         profile: &CollectionProfile,
         doc_key: &str,
     ) -> Result<(), PipelineError> {
-        let bind_vars = json!({
-            "doc_key": doc_key,
-            "@chunks": profile.chunks,
-            "@embeddings": profile.embeddings,
-        });
-
-        // Delete chunks by doc_key
-        query::query(
-            &self.db,
-            "FOR c IN @@chunks FILTER c.doc_key == @doc_key REMOVE c IN @@chunks",
-            Some(&bind_vars),
-            None,
-            false,
-            ExecutionTarget::Writer,
-        )
-        .await?;
-
-        // Delete embeddings by doc_key
-        query::query(
-            &self.db,
-            "FOR e IN @@embeddings FILTER e.doc_key == @doc_key REMOVE e IN @@embeddings",
-            Some(&bind_vars),
-            None,
-            false,
-            ExecutionTarget::Writer,
-        )
-        .await?;
+        // Deletes go through `query::remove_docs_by_fields`, which builds one
+        // bind object per query — the shape that makes the ArangoDB-1552
+        // declared-but-unused defect (every `--force` refresh aborting, #169)
+        // unrepresentable rather than merely fixed.
+        //
+        // The two removes are NOT transactional: chunks commit before
+        // embeddings run, so a transient failure of the second call leaves
+        // orphaned embeddings until the next successful overwrite of the same
+        // document, which clears them (each run deletes before writing).
+        // The window could be closed without a stream transaction by folding
+        // both removes into one multi-collection AQL query, as
+        // `db_purge_document` in dispatch.rs already does — a deliberate
+        // reuse-vs-atomicity tradeoff: the shared helper keeps the delete
+        // shape uniform across the doc and codebase pipelines, and the
+        // orphan state is accepted because it self-heals and is
+        // read-invisible (search joins embeddings to chunks that no longer
+        // exist and drops them).
+        query::remove_docs_by_fields(&self.db, profile.chunks, &["doc_key"], doc_key).await?;
+        query::remove_docs_by_fields(&self.db, profile.embeddings, &["doc_key"], doc_key).await?;
 
         debug!(doc_key, "deleted stale chunks and embeddings");
         Ok(())

@@ -180,3 +180,51 @@ fn extract_results(resp: &Value) -> Result<Vec<Value>, ArangoError> {
         )),
     }
 }
+
+/// Remove every document in `collection` where ANY of `fields` equals `value`.
+/// Returns the number of documents removed.
+///
+/// This is the single supported shape for field-match deletes. It exists
+/// because the inlined versions kept reproducing the same two defects:
+///
+/// - **ArangoDB error 1552.** One bind map shared across two single-collection
+///   queries declares a parameter the first query never uses, and ArangoDB
+///   rejects declared-but-unused binds. That aborted every `--force` document
+///   refresh (#169). Here each call builds exactly its own binds, so the
+///   defect class is unrepresentable.
+/// - **Field drift between writer and reader.** Field names arrive as data
+///   (attribute-name binds, `d.@f`), so callers pass the same constants the
+///   write path uses instead of re-typing them into query strings.
+///   Attribute-name binds are resolved at parse time, before planning:
+///   verified via `_api/explain` that `FILTER d.@f0 == @value` selects the
+///   same persistent index (`IndexNode`, `fields=file_key`) as the literal
+///   `FILTER d.file_key == @value`.
+pub async fn remove_docs_by_fields(
+    pool: &ArangoPool,
+    collection: &str,
+    fields: &[&str],
+    value: &str,
+) -> Result<u64, ArangoError> {
+    if fields.is_empty() {
+        return Err(ArangoError::Request(
+            "remove_docs_by_fields: no fields given".to_string(),
+        ));
+    }
+    // FILTER d.@f0 == @value OR d.@f1 == @value ...
+    let filter = fields
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("d.@f{i} == @value"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let aql = format!(
+        "LET removed = (FOR d IN @@col FILTER {filter} REMOVE d IN @@col RETURN 1) \
+         RETURN LENGTH(removed)"
+    );
+    let mut bind = serde_json::json!({ "@col": collection, "value": value });
+    for (i, f) in fields.iter().enumerate() {
+        bind[format!("f{i}")] = serde_json::json!(f);
+    }
+    let result = query_single(pool, &aql, Some(&bind), ExecutionTarget::Writer).await?;
+    Ok(result.and_then(|v| v.as_u64()).unwrap_or(0))
+}

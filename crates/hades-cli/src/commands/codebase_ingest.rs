@@ -1437,11 +1437,13 @@ fn build_line_offsets(source: &str) -> Vec<usize> {
 /// Called before (re-)embedding to ensure stale vectors from a previous
 /// run don't linger when the embedder is unavailable or fails.
 async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
-    let aql = "FOR e IN @@col FILTER e.file_key == @fk REMOVE e IN @@col";
-    let bind = json!({ "@col": CODEBASE.embeddings, "fk": file_key });
-    if let Err(e) =
-        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
-            .await
+    if let Err(e) = hades_core::db::query::remove_docs_by_fields(
+        db,
+        CODEBASE.embeddings,
+        &["file_key"],
+        file_key,
+    )
+    .await
     {
         debug!(file_key, error = %e, "failed to clean up old embeddings (non-fatal)");
     }
@@ -1454,10 +1456,8 @@ async fn delete_file_embeddings(db: &ArangoPool, file_key: &str) {
 /// behind (overwrite-by-key only updates the chunks that still exist). The parsed
 /// path was missing this call until #159.
 async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
-    let aql = "FOR c IN @@col FILTER c.file_key == @fk REMOVE c IN @@col";
-    let bind = json!({ "@col": CODEBASE.chunks, "fk": file_key });
     if let Err(e) =
-        hades_core::db::query::query(db, aql, Some(&bind), None, false, ExecutionTarget::Writer)
+        hades_core::db::query::remove_docs_by_fields(db, CODEBASE.chunks, &["file_key"], file_key)
             .await
     {
         debug!(file_key, error = %e, "failed to clean up old chunks (non-fatal)");

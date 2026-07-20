@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use hades_core::db::{ArangoClient, ArangoPool, crud};
+use hades_core::db::{ArangoClient, ArangoPool, crud, query};
 
 fn arango_socket() -> PathBuf {
     PathBuf::from(
@@ -282,4 +282,56 @@ async fn test_bulk_insert_zero_chunk_size() {
     assert!(err.error.to_string().contains("chunk_size must be > 0"));
 
     teardown(&pool, col).await;
+}
+
+// ---------------------------------------------------------------------------
+// remove_docs_by_fields — the delete shape behind --force document refresh
+// ---------------------------------------------------------------------------
+
+/// Regression guard for #169: every `--force` document refresh aborted with
+/// ArangoDB error 1552 because the inlined delete shared one bind map across
+/// two single-collection queries. The refresh path now runs on
+/// `remove_docs_by_fields`, so this asserts the thing the bug prevented:
+/// the delete actually deletes, returns an accurate count, and leaves
+/// non-matching documents alone. The multi-field case covers the OR-filter
+/// the #165 fix layers on top (legacy rows keyed only by `parent_key`).
+#[tokio::test]
+async fn test_remove_docs_by_fields() {
+    let Some(pool) = test_pool() else { return };
+    let name = format!("test_rm_fields_{}", std::process::id());
+    setup(&pool, &name).await;
+
+    let docs = vec![
+        serde_json::json!({ "_key": "a", "doc_key": "target", "text": "native row" }),
+        serde_json::json!({ "_key": "b", "doc_key": "target", "text": "native row 2" }),
+        serde_json::json!({ "_key": "c", "parent_key": "target", "text": "python-era row" }),
+        serde_json::json!({ "_key": "d", "doc_key": "other", "text": "must survive" }),
+    ];
+    crud::insert_documents(&pool, &name, &docs, false)
+        .await
+        .expect("insert fixtures");
+
+    // Single-field: the #169 refresh shape. Removes the two native rows only.
+    let removed = query::remove_docs_by_fields(&pool, &name, &["doc_key"], "target")
+        .await
+        .expect("single-field remove");
+    assert_eq!(removed, 2, "both doc_key rows removed, count accurate");
+
+    // Multi-field OR: the #165 shape. Catches the python-era row too.
+    let removed = query::remove_docs_by_fields(&pool, &name, &["doc_key", "parent_key"], "target")
+        .await
+        .expect("multi-field remove");
+    assert_eq!(removed, 1, "parent_key-only row removed by the OR arm");
+
+    // The unrelated document survives both passes.
+    let survivor = crud::get_document(&pool, &name, "d").await;
+    assert!(survivor.is_ok(), "non-matching document must survive");
+
+    // Idempotent on empty.
+    let removed = query::remove_docs_by_fields(&pool, &name, &["doc_key"], "target")
+        .await
+        .expect("re-run");
+    assert_eq!(removed, 0);
+
+    teardown(&pool, &name).await;
 }

@@ -48,26 +48,37 @@ use hades_core::db::{ArangoError, ArangoPool};
 
 use super::output::{self, OutputFormat};
 
-/// `hades codebase prune-orphans [--dry-run]`
-pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
-    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
+/// Counts from one full sweep, in the order they were performed.
+#[derive(Debug, Default)]
+pub(crate) struct PruneCounts {
+    pub orphan_symbols: u64,
+    pub orphan_chunks: u64,
+    pub orphan_embeddings: u64,
+    pub dangling: serde_json::Map<String, Value>,
+}
 
+/// Run every sweep, in the order the cascades require.
+///
+/// Separated from [`run_prune`] so the **ordering itself** is testable. Calling
+/// the individual sweeps directly in a test would pass even if this sequence
+/// were reordered, which is precisely the failure that would break the cascade.
+pub(crate) async fn sweep_orphans(pool: &ArangoPool, dry_run: bool) -> Result<PruneCounts> {
     // 1. Orphan symbols: file_key no longer present in codebase_files.
-    let orphan_symbols = prune_orphan_symbols(&pool, dry_run).await?;
+    let orphan_symbols = prune_orphan_symbols(pool, dry_run).await?;
 
     // 2. Orphan chunks: file_key no longer present in codebase_files.
-    //    Swept before embeddings so embeddings left orphaned by this removal are
-    //    caught in the same run (see the embedding step's chunk_key clause).
-    let orphan_chunks = prune_orphan_chunks(&pool, dry_run).await?;
+    //    MUST precede the embedding sweep: an embedding whose own file_key is
+    //    fine but whose chunk_key points at one of these chunks only becomes an
+    //    orphan once the chunk is gone.
+    let orphan_chunks = prune_orphan_chunks(pool, dry_run).await?;
 
     // 3. Orphan embeddings: file_key gone, or chunk_key no longer resolves.
-    let orphan_embeddings = prune_orphan_embeddings(&pool, dry_run).await?;
+    let orphan_embeddings = prune_orphan_embeddings(pool, dry_run).await?;
 
     // 4. Dangling edges: either endpoint no longer resolves. In a real run this
     //    follows the symbol prune, so edges to just-removed orphan symbols are
     //    counted as dangling too. In a dry-run nothing is removed, so those
-    //    edges still resolve and the count is a *lower bound* — see the
-    //    `dry_run_note` below.
+    //    edges still resolve and the count is a *lower bound*.
     let mut dangling = serde_json::Map::new();
     for (label, col) in [
         ("defines_edges", CODEBASE.defines_edges),
@@ -75,9 +86,28 @@ pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
         ("implements_edges", CODEBASE.implements_edges),
         ("imports_edges", CODEBASE.imports_edges),
     ] {
-        let n = prune_dangling_edges(&pool, col, dry_run).await?;
+        let n = prune_dangling_edges(pool, col, dry_run).await?;
         dangling.insert(label.to_string(), json!(n));
     }
+
+    Ok(PruneCounts {
+        orphan_symbols,
+        orphan_chunks,
+        orphan_embeddings,
+        dangling,
+    })
+}
+
+/// `hades codebase prune-orphans [--dry-run]`
+pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
+    let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
+
+    let PruneCounts {
+        orphan_symbols,
+        orphan_chunks,
+        orphan_embeddings,
+        dangling,
+    } = sweep_orphans(&pool, dry_run).await?;
     let total_edges: u64 = dangling.values().filter_map(Value::as_u64).sum();
 
     let mut report = json!({
@@ -136,24 +166,33 @@ pub async fn run_prune(config: &HadesConfig, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// Remove (or, in dry-run, count) documents in `col` whose `file_key` no longer
+/// resolves to a document in `codebase_files`.
+///
+/// Shared by the symbol and chunk sweeps, which differ only by collection. The
+/// embedding sweep is deliberately *not* folded in here: since #157 it builds
+/// its filter dynamically (the `chunk_key` clause, and its suppression when
+/// `codebase_chunks` is absent), so collapsing all three would mean a helper
+/// whose body is mostly branching on which caller it has.
+async fn prune_orphans_by_file_key(pool: &ArangoPool, col: &str, dry_run: bool) -> Result<u64> {
+    let aql = if dry_run {
+        "FOR d IN @@col \
+         FILTER DOCUMENT(CONCAT(@files_name, '/', d.file_key)) == null \
+         COLLECT WITH COUNT INTO n RETURN n"
+    } else {
+        "LET removed = (FOR d IN @@col \
+            FILTER DOCUMENT(CONCAT(@files_name, '/', d.file_key)) == null \
+            REMOVE d IN @@col RETURN 1) \
+         RETURN LENGTH(removed)"
+    };
+    let bind = json!({ "@col": col, "files_name": CODEBASE.files });
+    run_count(pool, aql, &bind, target(dry_run)).await
+}
+
 /// Remove (or, in dry-run, count) symbols whose `file_key` is absent from
 /// `codebase_files`.
 async fn prune_orphan_symbols(pool: &ArangoPool, dry_run: bool) -> Result<u64> {
-    let aql = if dry_run {
-        "FOR s IN @@symbols \
-         FILTER DOCUMENT(CONCAT(@files_name, '/', s.file_key)) == null \
-         COLLECT WITH COUNT INTO n RETURN n"
-    } else {
-        "LET removed = (FOR s IN @@symbols \
-            FILTER DOCUMENT(CONCAT(@files_name, '/', s.file_key)) == null \
-            REMOVE s IN @@symbols RETURN 1) \
-         RETURN LENGTH(removed)"
-    };
-    let bind = json!({
-        "@symbols": CODEBASE.symbols,
-        "files_name": CODEBASE.files,
-    });
-    let n = run_count(pool, aql, &bind, target(dry_run)).await?;
+    let n = prune_orphans_by_file_key(pool, CODEBASE.symbols, dry_run).await?;
     info!(orphan_symbols = n, dry_run, "pruned orphan symbols");
     Ok(n)
 }
@@ -164,21 +203,7 @@ async fn prune_orphan_symbols(pool: &ArangoPool, dry_run: bool) -> Result<u64> {
 /// These are the leftovers of a file node deleted without its children —
 /// `codebase validate` invariant #1 (`chunk_file_ref`).
 async fn prune_orphan_chunks(pool: &ArangoPool, dry_run: bool) -> Result<u64> {
-    let aql = if dry_run {
-        "FOR c IN @@chunks \
-         FILTER DOCUMENT(CONCAT(@files_name, '/', c.file_key)) == null \
-         COLLECT WITH COUNT INTO n RETURN n"
-    } else {
-        "LET removed = (FOR c IN @@chunks \
-            FILTER DOCUMENT(CONCAT(@files_name, '/', c.file_key)) == null \
-            REMOVE c IN @@chunks RETURN 1) \
-         RETURN LENGTH(removed)"
-    };
-    let bind = json!({
-        "@chunks": CODEBASE.chunks,
-        "files_name": CODEBASE.files,
-    });
-    let n = run_count(pool, aql, &bind, target(dry_run)).await?;
+    let n = prune_orphans_by_file_key(pool, CODEBASE.chunks, dry_run).await?;
     info!(orphan_chunks = n, dry_run, "pruned orphan chunks");
     Ok(n)
 }
@@ -192,26 +217,63 @@ async fn prune_orphan_chunks(pool: &ArangoPool, dry_run: bool) -> Result<u64> {
 /// orphaned by that removal are cleaned in the same run rather than surviving
 /// as a fresh #2 violation.
 async fn prune_orphan_embeddings(pool: &ArangoPool, dry_run: bool) -> Result<u64> {
-    let aql = if dry_run {
-        "FOR e IN @@embeddings \
-         FILTER DOCUMENT(CONCAT(@files_name, '/', e.file_key)) == null \
-             OR DOCUMENT(CONCAT(@chunks_name, '/', e.chunk_key)) == null \
-         COLLECT WITH COUNT INTO n RETURN n"
+    // Whether the chunk_key clause is safe to apply at all.
+    //
+    // `DOCUMENT()` returns null for a *missing collection* just as it does for a
+    // missing document, so if `codebase_chunks` does not exist the clause would
+    // classify every embedding as an orphan and delete the lot — contradicting
+    // this module's "missing collections are a no-op" guarantee, in the most
+    // destructive possible direction. Check first, and fall back to the
+    // file_key-only filter.
+    let chunks_exist = collection_exists(pool, CODEBASE.chunks).await;
+
+    // The `e.chunk_key != null` guard matters for the same reason: with a null
+    // or absent field, `CONCAT('codebase_chunks/', null)` yields the bare
+    // collection prefix, `DOCUMENT()` returns null, and a record that simply
+    // never carried a chunk reference would be deleted as an orphan.
+    let filter = if chunks_exist {
+        "FILTER DOCUMENT(CONCAT(@files_name, '/', e.file_key)) == null \
+             OR (e.chunk_key != null \
+                 AND DOCUMENT(CONCAT(@chunks_name, '/', e.chunk_key)) == null)"
     } else {
-        "LET removed = (FOR e IN @@embeddings \
-            FILTER DOCUMENT(CONCAT(@files_name, '/', e.file_key)) == null \
-                OR DOCUMENT(CONCAT(@chunks_name, '/', e.chunk_key)) == null \
-            REMOVE e IN @@embeddings RETURN 1) \
-         RETURN LENGTH(removed)"
+        "FILTER DOCUMENT(CONCAT(@files_name, '/', e.file_key)) == null"
     };
-    let bind = json!({
+    let aql = if dry_run {
+        format!("FOR e IN @@embeddings {filter} COLLECT WITH COUNT INTO n RETURN n")
+    } else {
+        format!(
+            "LET removed = (FOR e IN @@embeddings {filter} \
+                REMOVE e IN @@embeddings RETURN 1) \
+             RETURN LENGTH(removed)"
+        )
+    };
+    let mut bind = json!({
         "@embeddings": CODEBASE.embeddings,
         "files_name": CODEBASE.files,
-        "chunks_name": CODEBASE.chunks,
     });
-    let n = run_count(pool, aql, &bind, target(dry_run)).await?;
-    info!(orphan_embeddings = n, dry_run, "pruned orphan embeddings");
+    if chunks_exist {
+        bind["chunks_name"] = json!(CODEBASE.chunks);
+    }
+    let n = run_count(pool, &aql, &bind, target(dry_run)).await?;
+    info!(
+        orphan_embeddings = n,
+        dry_run, chunks_exist, "pruned orphan embeddings"
+    );
     Ok(n)
+}
+
+/// Whether `col` exists. A missing collection (1203) is `false`; any other error
+/// is treated as "exists" so a transient failure cannot widen the delete filter.
+async fn collection_exists(pool: &ArangoPool, col: &str) -> bool {
+    let aql = "RETURN LENGTH(FOR d IN @@col LIMIT 1 RETURN 1)";
+    let bind = json!({ "@col": col });
+    !matches!(
+        query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader).await,
+        Err(ArangoError::Api {
+            error_num: 1203,
+            ..
+        })
+    )
 }
 
 /// Remove (or, in dry-run, count) edges in `col` whose `_from` or `_to`
@@ -269,13 +331,21 @@ async fn run_count(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hades_core::db::crud;
-    use serde_json::Value;
+    use hades_core::db::{ArangoClient, crud};
 
-    /// Shared prefix for every fixture these tests write.
-    const FIXTURE_PREFIX: &str = "__hades_test157_";
-
-    fn test_pool() -> Option<ArangoPool> {
+    /// Create a throwaway database, run `f` against it, then drop it.
+    ///
+    /// These sweeps are **collection-global** — they delete every orphan in the
+    /// database, not just fixture rows. Running them against a shared database
+    /// would make exact-count assertions depend on whatever else happens to be
+    /// there, *and* would delete unrelated records as a side effect. An isolated
+    /// database makes the counts exact and the blast radius nil, and lets
+    /// concurrent runs coexist.
+    async fn with_temp_db<F, Fut>(f: F)
+    where
+        F: FnOnce(ArangoPool) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
         let socket = std::path::PathBuf::from(
             std::env::var("ARANGO_SOCKET")
                 .unwrap_or_else(|_| "/run/arangodb3/arangodb.sock".to_string()),
@@ -291,48 +361,54 @@ mod tests {
                 "skipping: ArangoDB socket not found at {}",
                 socket.display()
             );
-            return None;
+            return;
         }
         let Ok(password) = std::env::var("ARANGO_PASSWORD") else {
             eprintln!("skipping: ARANGO_PASSWORD not set");
-            return None;
+            return;
         };
-        let client =
-            hades_core::db::ArangoClient::with_socket(socket, "bident_burn", "root", &password);
-        Some(ArangoPool::new(client.clone(), client))
-    }
 
-    async fn collections_present(pool: &ArangoPool) -> bool {
-        for col in [CODEBASE.files, CODEBASE.chunks, CODEBASE.embeddings] {
-            let aql = "RETURN LENGTH(FOR d IN @@col LIMIT 1 RETURN 1)";
-            let bind = json!({ "@col": col });
-            if query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
+        // Unique per process so parallel runs never collide.
+        let db_name = format!("hades_test157_{}", std::process::id());
+        let sys = ArangoClient::with_socket(socket.clone(), "_system", "root", &password);
+        let _ = sys.delete(&format!("database/{db_name}")).await;
+        if let Err(e) = sys.post("database", &json!({ "name": db_name })).await {
+            eprintln!("skipping: cannot create test database ({e})");
+            return;
+        }
+
+        let client = ArangoClient::with_socket(socket, &db_name, "root", &password);
+        let pool = ArangoPool::new(client.clone(), client);
+        for col in [
+            CODEBASE.files,
+            CODEBASE.chunks,
+            CODEBASE.embeddings,
+            CODEBASE.symbols,
+        ] {
+            crud::create_collection(&pool, col, None)
                 .await
-                .is_err()
-            {
-                return false;
-            }
+                .expect("create fixture collection");
         }
-        true
+
+        // Catch a panicking assertion so the database is always dropped, then
+        // resume it. Without this, a failing test leaks its database — teardown
+        // sits after the await and never runs. (Observed while verifying that
+        // the cascade test catches a reordered sweep: the deliberate failure
+        // left `hades_test157_<pid>` behind.)
+        // `JoinHandle` captures a panic instead of unwinding through us, so the
+        // database is dropped either way and the failure is re-raised after.
+        let outcome = tokio::task::spawn(async move { f(pool).await }).await;
+
+        let _ = sys.delete(&format!("database/{db_name}")).await;
+
+        if let Err(join_err) = outcome {
+            std::panic::resume_unwind(join_err.into_panic());
+        }
     }
 
-    /// Remove every fixture this test family may have left behind, any run.
-    async fn cleanup(pool: &ArangoPool) {
-        for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
-            let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @p) REMOVE d IN @@col";
-            let bind = json!({ "@col": col, "p": FIXTURE_PREFIX });
-            let _ =
-                query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Writer).await;
-        }
-        let aql = "FOR d IN @@files FILTER STARTS_WITH(d._key, @p) REMOVE d IN @@files";
-        let bind = json!({ "@files": CODEBASE.files, "p": FIXTURE_PREFIX });
-        let _ = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Writer).await;
-    }
-
-    async fn count_with_prefix(pool: &ArangoPool, col: &str) -> u64 {
-        let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @p) COLLECT WITH COUNT INTO n \
-                   RETURN n";
-        let bind = json!({ "@col": col, "p": FIXTURE_PREFIX });
+    async fn count(pool: &ArangoPool, col: &str) -> u64 {
+        let aql = "RETURN LENGTH(FOR d IN @@col RETURN 1)";
+        let bind = json!({ "@col": col });
         query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
             .await
             .ok()
@@ -341,103 +417,128 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// Orphan chunks and embeddings must be swept, and the embedding sweep must
-    /// cascade off the chunk removal within a single run (#157).
+    async fn exists(pool: &ArangoPool, col: &str, key: &str) -> bool {
+        crud::get_document(pool, col, key).await.is_ok()
+    }
+
+    /// The sweep must remove orphan chunks and embeddings, and the embedding
+    /// sweep must **cascade off the chunk removal within the same run** (#157).
     ///
-    /// Fixture shape, all with **no** owning `codebase_files` document:
-    /// - `orphan-file`  — 2 chunks + 2 embeddings, file node absent
-    /// - `live-file`    — a real file node, 1 chunk, and 1 embedding pointing at
-    ///   a `chunk_key` that does not exist (invariant #2 only)
+    /// Fixture (one live file node, `live`):
     ///
-    /// The live file proves the sweep is targeted: its node and its valid chunk
-    /// must survive, and only the dangling embedding is removed.
+    /// | doc | file_key | chunk_key | orphaned by |
+    /// |---|---|---|---|
+    /// | `c_orphan` | gone | – | its own file_key (#1) |
+    /// | `c_live` | live | – | nothing — must survive |
+    /// | `e_file_orphan` | gone | c_orphan | its own file_key (#3) |
+    /// | `e_cascade` | **live** | c_orphan | **only** the in-run chunk sweep |
+    /// | `e_never` | live | never-existed | dangling chunk_key (#2) |
+    /// | `e_valid` | live | c_live | nothing — must survive |
+    ///
+    /// `e_cascade` is the load-bearing row: its own `file_key` is fine and its
+    /// `chunk_key` resolves *at the start of the run*. It only becomes an orphan
+    /// because chunks are swept first. Reorder the sweep and it survives, so the
+    /// ordering — not merely the presence of the `chunk_key` clause — is what
+    /// this asserts. That is why the test drives [`sweep_orphans`] rather than
+    /// calling the individual sweeps in a hardcoded order.
     #[tokio::test]
-    async fn prune_removes_orphan_chunks_and_cascades_to_embeddings() {
-        let Some(pool) = test_pool() else { return };
-        if !collections_present(&pool).await {
-            eprintln!("skipping: target database has no codebase collections");
-            return;
-        }
-        cleanup(&pool).await;
-
-        let pid = std::process::id();
-        let orphan_fk = format!("{FIXTURE_PREFIX}{pid}_orphan");
-        let live_fk = format!("{FIXTURE_PREFIX}{pid}_live");
-
-        // A live file node — this one must survive untouched.
-        let files: Vec<Value> = vec![json!({ "_key": live_fk, "kind": "file" })];
-        crud::insert_documents(&pool, CODEBASE.files, &files, true)
-            .await
-            .expect("insert file node");
-
-        // Chunks: two orphaned (no file node), one live.
-        let chunks: Vec<Value> = vec![
-            json!({ "_key": format!("{orphan_fk}_chunk_0"), "file_key": orphan_fk }),
-            json!({ "_key": format!("{orphan_fk}_chunk_1"), "file_key": orphan_fk }),
-            json!({ "_key": format!("{live_fk}_chunk_0"),   "file_key": live_fk }),
-        ];
-        crud::insert_documents(&pool, CODEBASE.chunks, &chunks, true)
+    async fn sweep_cascades_chunk_removal_into_embeddings() {
+        with_temp_db(|pool| async move {
+            crud::insert_documents(&pool, CODEBASE.files, &[json!({ "_key": "live" })], true)
+                .await
+                .expect("insert file");
+            crud::insert_documents(
+                &pool,
+                CODEBASE.chunks,
+                &[
+                    json!({ "_key": "c_orphan", "file_key": "gone" }),
+                    json!({ "_key": "c_live", "file_key": "live" }),
+                ],
+                true,
+            )
             .await
             .expect("insert chunks");
-
-        // Embeddings: two on the orphaned chunks (file_key AND chunk_key gone
-        // once chunks are swept), one on the live chunk (valid, must survive),
-        // one on the live file but pointing at a chunk that never existed.
-        let embeddings: Vec<Value> = vec![
-            json!({ "_key": format!("{orphan_fk}_chunk_0_emb"), "file_key": orphan_fk,
-                    "chunk_key": format!("{orphan_fk}_chunk_0") }),
-            json!({ "_key": format!("{orphan_fk}_chunk_1_emb"), "file_key": orphan_fk,
-                    "chunk_key": format!("{orphan_fk}_chunk_1") }),
-            json!({ "_key": format!("{live_fk}_chunk_0_emb"),   "file_key": live_fk,
-                    "chunk_key": format!("{live_fk}_chunk_0") }),
-            json!({ "_key": format!("{live_fk}_chunk_9_emb"),   "file_key": live_fk,
-                    "chunk_key": format!("{live_fk}_chunk_9") }),
-        ];
-        crud::insert_documents(&pool, CODEBASE.embeddings, &embeddings, true)
+            crud::insert_documents(
+                &pool,
+                CODEBASE.embeddings,
+                &[
+                    json!({ "_key": "e_file_orphan", "file_key": "gone",  "chunk_key": "c_orphan" }),
+                    json!({ "_key": "e_cascade",     "file_key": "live",  "chunk_key": "c_orphan" }),
+                    json!({ "_key": "e_never",       "file_key": "live",  "chunk_key": "c_never" }),
+                    json!({ "_key": "e_valid",       "file_key": "live",  "chunk_key": "c_live" }),
+                ],
+                true,
+            )
             .await
             .expect("insert embeddings");
 
-        assert_eq!(count_with_prefix(&pool, CODEBASE.chunks).await, 3);
-        assert_eq!(count_with_prefix(&pool, CODEBASE.embeddings).await, 4);
+            // Dry-run changes nothing, and under-counts embeddings because the
+            // orphan chunk is still present (the documented lower bound).
+            let dry = sweep_orphans(&pool, true).await.expect("dry sweep");
+            assert_eq!(dry.orphan_chunks, 1);
+            assert_eq!(count(&pool, CODEBASE.chunks).await, 2, "dry-run deleted chunks");
+            assert_eq!(
+                count(&pool, CODEBASE.embeddings).await,
+                4,
+                "dry-run deleted embeddings"
+            );
+            assert_eq!(
+                dry.orphan_embeddings, 2,
+                "dry-run sees only e_file_orphan and e_never; e_cascade still resolves"
+            );
 
-        // Dry-run must not modify anything.
-        prune_orphan_chunks(&pool, true).await.unwrap();
-        prune_orphan_embeddings(&pool, true).await.unwrap();
-        assert_eq!(
-            count_with_prefix(&pool, CODEBASE.chunks).await,
-            3,
-            "dry-run must not delete chunks"
-        );
-        assert_eq!(
-            count_with_prefix(&pool, CODEBASE.embeddings).await,
-            4,
-            "dry-run must not delete embeddings"
-        );
+            let real = sweep_orphans(&pool, false).await.expect("real sweep");
+            assert_eq!(real.orphan_chunks, 1);
+            assert_eq!(
+                real.orphan_embeddings, 3,
+                "e_file_orphan + e_never + e_cascade (the cascade)"
+            );
 
-        // Real run, in the same order run_prune uses.
-        let removed_chunks = prune_orphan_chunks(&pool, false).await.unwrap();
-        let removed_embs = prune_orphan_embeddings(&pool, false).await.unwrap();
+            assert!(exists(&pool, CODEBASE.chunks, "c_live").await, "live chunk removed");
+            assert!(
+                exists(&pool, CODEBASE.embeddings, "e_valid").await,
+                "valid embedding removed"
+            );
+            assert!(
+                !exists(&pool, CODEBASE.embeddings, "e_cascade").await,
+                "cascade embedding survived — chunks must be swept before embeddings"
+            );
+            assert_eq!(count(&pool, CODEBASE.chunks).await, 1);
+            assert_eq!(count(&pool, CODEBASE.embeddings).await, 1);
+        })
+        .await;
+    }
 
-        assert_eq!(removed_chunks, 2, "both orphan chunks must be removed");
-        // 2 orphaned by file_key + 1 dangling chunk_key on the live file. The
-        // two orphan-file embeddings would also be caught by the chunk_key
-        // clause now that their chunks are gone — that cascade is the point.
-        assert_eq!(
-            removed_embs, 3,
-            "orphan-file embeddings plus the dangling-chunk_key embedding"
-        );
+    /// An embedding with no `chunk_key` at all is not an orphan (#157 review).
+    ///
+    /// `CONCAT('codebase_chunks/', null)` yields the bare collection prefix and
+    /// `DOCUMENT()` returns null for it, so an unguarded filter would delete
+    /// every record that simply never carried a chunk reference.
+    #[tokio::test]
+    async fn null_chunk_key_is_not_an_orphan() {
+        with_temp_db(|pool| async move {
+            crud::insert_documents(&pool, CODEBASE.files, &[json!({ "_key": "live" })], true)
+                .await
+                .expect("insert file");
+            crud::insert_documents(
+                &pool,
+                CODEBASE.embeddings,
+                &[
+                    json!({ "_key": "e_no_chunk_field", "file_key": "live" }),
+                    json!({ "_key": "e_null_chunk", "file_key": "live", "chunk_key": null }),
+                ],
+                true,
+            )
+            .await
+            .expect("insert embeddings");
 
-        assert_eq!(
-            count_with_prefix(&pool, CODEBASE.chunks).await,
-            1,
-            "the live file's chunk must survive"
-        );
-        assert_eq!(
-            count_with_prefix(&pool, CODEBASE.embeddings).await,
-            1,
-            "the live file's valid embedding must survive"
-        );
-
-        cleanup(&pool).await;
+            let counts = sweep_orphans(&pool, false).await.expect("sweep");
+            assert_eq!(
+                counts.orphan_embeddings, 0,
+                "embeddings without a chunk reference must not be treated as orphans"
+            );
+            assert_eq!(count(&pool, CODEBASE.embeddings).await, 2);
+        })
+        .await;
     }
 }

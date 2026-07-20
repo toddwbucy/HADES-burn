@@ -132,30 +132,8 @@ pub async fn run(
         bail!("path not found: {}", path.display());
     }
 
-    // Normalize the unparsed-extension allowlist: strip leading dots, lowercase.
-    // Files matching these extensions are embedded without a parser (#121).
-    let unparsed_set: std::collections::HashSet<String> = unparsed_ext
-        .iter()
-        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
-
-    // Parse language override if provided.
-    let lang_override = match language {
-        Some(l) => {
-            let lang = match l.to_lowercase().as_str() {
-                "python" | "py" => Language::Python,
-                "rust" | "rs" => Language::Rust,
-                "c" | "cpp" | "c++" | "cuda" | "cu" => Language::Cpp,
-                "go" | "golang" => Language::Go,
-                other => {
-                    bail!("unsupported language: {other}. Supported: python, rust, go, c/c++/cuda")
-                }
-            };
-            Some(lang)
-        }
-        None => None,
-    };
+    let unparsed_set = normalize_unparsed_ext(unparsed_ext);
+    let lang_override = parse_language_arg(language)?;
 
     // Connect to services.
     let db = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
@@ -189,13 +167,7 @@ pub async fn run(
     info!(file_count = files.len(), "discovered source files");
 
     // Compute base path for relative paths.
-    let base = if path.is_dir() {
-        path.canonicalize().unwrap_or(path.clone())
-    } else {
-        path.parent()
-            .map(|p| p.canonicalize().unwrap_or(p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
+    let base = ingest_base_path(&path);
 
     // Process each file with per-file error isolation.
     let mut results: Vec<FileResult> = Vec::with_capacity(files.len());
@@ -230,11 +202,7 @@ pub async fn run(
         }
 
         let item_start = Instant::now();
-        let rel_path = file_path
-            .strip_prefix(&base)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
+        let rel_path = rel_path_for(&base, file_path);
 
         // Route unparsed-allowlisted files (e.g. CUDA `.cu`) through the
         // parser-free fallback: line/size chunk + embed, no AST (#121).
@@ -654,7 +622,79 @@ async fn ensure_indices(db: &ArangoPool) -> Result<()> {
 /// If `path` is a file, returns just that file (if it matches the language
 /// filter). If a directory, walks recursively, skipping common non-source
 /// directories.
-fn discover_files(
+/// Normalize an `--unparsed-ext` allowlist: trim, strip a leading dot, lowercase.
+///
+/// Shared with `codebase drift` so the same flag value always produces the same
+/// discovery set. This is not cosmetic: `discover_files` matches a file's
+/// lowercased, dot-less extension against this set, so an entry of `.md` or
+/// ` md ` silently matches nothing. If drift normalized differently from ingest,
+/// files ingest *did* pick up would be absent from drift's disk set, get reported
+/// as `stale`, and — piped into `codebase retire` — have their live nodes
+/// deleted. Parity here has to be structural, not conventional.
+pub(crate) fn normalize_unparsed_ext(unparsed_ext: &[String]) -> std::collections::HashSet<String> {
+    unparsed_ext
+        .iter()
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+/// Parse a `--language` override, accepting the word forms as well as extensions.
+///
+/// Shared with `codebase drift` for the same reason as
+/// [`normalize_unparsed_ext`]: drift documents that its flags must match the
+/// ingest invocation, so it has to accept exactly what ingest accepts. Parsing
+/// via `Language::from_extension` alone would reject `rust`, `python`, `golang`,
+/// and `cuda` — all of which ingest takes.
+pub(crate) fn parse_language_arg(language: Option<&str>) -> Result<Option<Language>> {
+    let Some(l) = language else { return Ok(None) };
+    let lang = match l.to_lowercase().as_str() {
+        "python" | "py" => Language::Python,
+        "rust" | "rs" => Language::Rust,
+        "c" | "cpp" | "c++" | "cuda" | "cu" => Language::Cpp,
+        "go" | "golang" => Language::Go,
+        other => {
+            bail!("unsupported language: {other}. Supported: python, rust, go, c/c++/cuda")
+        }
+    };
+    Ok(Some(lang))
+}
+
+/// The base directory that ingest strips to form a file node's `rel_path`.
+///
+/// A file node's `_key` is `keys::file_key(rel_path)` where `rel_path` is the
+/// path relative to this base — so anything comparing graph keys against the
+/// working tree (e.g. `codebase drift`) MUST derive keys through this same
+/// function, or every key mismatches and the comparison is meaningless.
+pub(crate) fn ingest_base_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.parent()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+/// The `rel_path` a file node records: the path relative to the ingest base.
+///
+/// Single home for this derivation. The ingest loop and `codebase drift` both
+/// call it, so drift cannot silently disagree with ingest about which file a key
+/// refers to.
+pub(crate) fn rel_path_for(base: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(base)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Compute the graph `_key` for a discovered file, relative to `base`.
+pub(crate) fn file_key_for(base: &Path, file_path: &Path) -> String {
+    keys::file_key(&rel_path_for(base, file_path))
+}
+
+pub(crate) fn discover_files(
     path: &Path,
     lang_override: Option<Language>,
     unparsed_set: &std::collections::HashSet<String>,

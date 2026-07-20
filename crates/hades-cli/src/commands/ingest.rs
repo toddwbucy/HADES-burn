@@ -99,7 +99,19 @@ pub async fn run(
         None => CollectionProfile::default_profile(),
     };
 
-    let file_paths: Vec<PathBuf> = inputs.to_vec();
+    // Canonicalize every input before anything crosses a process boundary.
+    // The extraction service runs as its own user with its own working
+    // directory, so a relative path that resolves here fails there with a
+    // misleading service-side "File not found" (#166). Canonicalizing also
+    // surfaces a nonexistent input immediately, with the caller's path in the
+    // error, instead of after connecting to three services.
+    let file_paths: Vec<PathBuf> = inputs
+        .iter()
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .with_context(|| format!("input path not found or unreadable: {}", p.display()))
+        })
+        .collect::<Result<_, _>>()?;
 
     // -- Connect to services ---------------------------------------------------
     let db = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
@@ -254,7 +266,14 @@ pub async fn run(
         "duration_ms": duration_ms,
     });
 
-    output::print_output("ingest", result_data, &OutputFormat::Json);
+    // The envelope's success reflects item outcomes, not merely "the batch
+    // ran" — an all-items-failed run must not print success: true (#166).
+    output::print_output_with_success(
+        "ingest",
+        result_data,
+        &OutputFormat::Json,
+        summary.failed == 0,
+    );
 
     if summary.failed > 0 {
         return Err(IngestFailure {

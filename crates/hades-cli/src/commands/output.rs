@@ -58,6 +58,30 @@ pub fn error_envelope(command: &str, message: &str) -> Value {
 }
 
 /// Print data in the requested format with the standard envelope.
+/// Like [`print_output`], but with an explicit envelope `success` value.
+///
+/// `print_output` hardcodes `success: true`, which is right for commands whose
+/// failure path is an early `Err` — by the time they print, they succeeded.
+/// Batch commands are different: the batch RUNNING is not the batch
+/// SUCCEEDING, and an envelope that says `success: true` above a result list
+/// where every item failed misleads exactly the callers the JSON interface
+/// exists for (#166). Batch commands pass their real outcome here.
+pub fn print_output_with_success(command: &str, data: Value, format: &OutputFormat, success: bool) {
+    match format {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            let mut wrapped = envelope(command, data);
+            wrapped["success"] = Value::Bool(success);
+            let s = if matches!(format, OutputFormat::Json) {
+                serde_json::to_string_pretty(&wrapped)
+            } else {
+                serde_json::to_string(&wrapped)
+            };
+            println!("{}", s.unwrap_or_default());
+        }
+        OutputFormat::Table => print_table(&data),
+    }
+}
+
 pub fn print_output(command: &str, data: Value, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {

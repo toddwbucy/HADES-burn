@@ -50,8 +50,13 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --verbose
 
-      # Unit tests only. Integration tests that require a running ArangoDB
-      # or embedder service (e.g. tests/graph_loader.rs) are out of scope
-      # until issue #93 (workstation-specific test isolation spec) lands.
-      - name: cargo test --lib
-        run: cargo test --workspace --lib --verbose
+      # Unit tests only: lib targets AND bin targets. `--lib` alone silently
+      # excluded hades-cli entirely (a binary crate has no lib target), so none
+      # of the CLI's ~54 tests had ever run in CI — including the regression
+      # guards for the destructive codebase commands (#163). DB-backed tests
+      # inside those targets self-skip when the ArangoDB socket is absent,
+      # which is CI's case; that gap is #93's scope. Integration-test files
+      # under tests/ that require a running ArangoDB or embedder service
+      # (e.g. tests/graph_loader.rs) remain out of scope until #93 lands.
+      - name: cargo test --lib --bins
+        run: cargo test --workspace --lib --bins --verbose

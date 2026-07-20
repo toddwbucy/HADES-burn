@@ -26,7 +26,7 @@
 //!
 //! Output: JSON summary to stdout; human-readable summary + logs to stderr.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -34,13 +34,14 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use tracing::info;
 
-use hades_core::code::Language;
 use hades_core::config::HadesConfig;
 use hades_core::db::collections::CODEBASE;
 use hades_core::db::query::{self, ExecutionTarget};
 use hades_core::db::{ArangoError, ArangoPool};
 
-use super::codebase_ingest::{discover_files, file_key_for, ingest_base_path};
+use super::codebase_ingest::{
+    discover_files, file_key_for, ingest_base_path, normalize_unparsed_ext, parse_language_arg,
+};
 use super::output::{self, OutputFormat};
 
 /// How many sample keys to include per category before truncating.
@@ -60,15 +61,12 @@ pub async fn run_drift(
 ) -> Result<()> {
     let pool = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
 
-    let lang_override = match language {
-        Some(name) => Some(
-            Language::from_extension(name)
-                .or_else(|| Language::from_path(&format!("x.{name}")))
-                .ok_or_else(|| anyhow::anyhow!("unknown language: {name}"))?,
-        ),
-        None => None,
-    };
-    let unparsed_set: HashSet<String> = unparsed_ext.iter().map(|e| e.to_lowercase()).collect();
+    // Parsed and normalized by the *same* helpers ingest uses. Drift documents
+    // that its flags must match the ingest invocation, so it has to accept and
+    // normalize exactly what ingest does — a divergence here reports live files
+    // as stale, and those feed `codebase retire`.
+    let lang_override = parse_language_arg(language)?;
+    let unparsed_set = normalize_unparsed_ext(unparsed_ext);
 
     // Disk side: exactly what ingest would discover, keyed exactly as ingest keys it.
     let base = ingest_base_path(&path);

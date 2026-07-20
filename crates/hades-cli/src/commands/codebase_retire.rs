@@ -209,19 +209,32 @@ async fn partition_existing(
         .iter()
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
+    // Set lookup, not `Vec::contains` — the intended input is a whole drift
+    // report piped in, so a linear scan per target is quadratic on exactly the
+    // case this command is built for.
+    let present_set: std::collections::HashSet<&str> = present.iter().map(String::as_str).collect();
     let unknown: Vec<String> = targets
         .iter()
-        .filter(|k| !present.contains(k))
+        .filter(|k| !present_set.contains(k.as_str()))
         .cloned()
         .collect();
     Ok((present, unknown))
 }
 
-/// Find edges outside the codebase collections that touch these file nodes.
+/// Find edges outside the codebase collections that touch these file nodes **or
+/// any symbol they own**.
 ///
 /// Scans every edge collection in the database rather than a hardcoded list, so
 /// domain-specific bridge collections (whatever a given graph happens to call
 /// them) are surfaced without HADES knowing their names.
+///
+/// The endpoint list spans symbols for the same reason `sweep_codebase`'s does:
+/// an authored edge may anchor to a *symbol* rather than the file. Scanning file
+/// ids alone would leave such an edge unreported, un-gated by `--yes`, and
+/// un-removed — dangling the moment the sweep deletes its symbol endpoint. That
+/// is the symbol-anchored trap in the module header, and it applies with more
+/// force here than to the codebase collections, because these edges are the
+/// irreplaceable ones.
 async fn scan_other_edges(
     pool: &ArangoPool,
     keys: &[String],
@@ -244,11 +257,14 @@ async fn scan_other_edges(
         {
             continue;
         }
-        let aql = "LET ids = (FOR k IN @keys RETURN CONCAT(@files_name, '/', k)) \
+        let aql = "LET ids = APPEND( \
+                       (FOR s IN @@symbols FILTER s.file_key IN @keys RETURN s._id), \
+                       (FOR k IN @keys RETURN CONCAT(@files_name, '/', k))) \
                    FOR e IN @@edges FILTER e._from IN ids OR e._to IN ids \
                    SORT e._key RETURN e._key";
         let bind = json!({
             "@edges": info.name,
+            "@symbols": CODEBASE.symbols,
             "keys": keys,
             "files_name": CODEBASE.files,
         });
@@ -256,12 +272,25 @@ async fn scan_other_edges(
             .await
         {
             Ok(rows) => rows.results,
+            // A collection that vanished between listing and scanning has
+            // nothing to report.
             Err(ArangoError::Api {
                 error_num: 1203, ..
             }) => continue,
+            // Anything else is fatal. This scan is the pre-flight for a
+            // destructive operation: if it fails and we continue, the collection
+            // reports zero authored edges, the `--yes` gate is never triggered
+            // for it, and the sweep proceeds to delete the endpoints those edges
+            // point at — silently dangling records the operator was never shown.
+            // Refusing to act on an incomplete picture is the only safe answer.
             Err(e) => {
-                warn!(collection = %info.name, error = %e, "edge scan failed, skipping");
-                continue;
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to scan edge collection '{}' for edges incident on the target \
+                         file nodes; refusing to retire on an incomplete picture",
+                        info.name
+                    )
+                });
             }
         };
         if rows.is_empty() {
@@ -339,8 +368,16 @@ async fn sweep_codebase(pool: &ArangoPool, keys: &[String], dry_run: bool) -> Re
 /// Remove the previously-scanned non-codebase edges, by explicit key.
 ///
 /// Deleting by the keys captured during the scan (rather than re-running the
-/// endpoint filter) guarantees the operator's dry-run listing and what actually
-/// gets deleted are the same set.
+/// endpoint filter) guarantees the reported listing and what actually gets
+/// deleted are the same set — the operator cannot be shown one set and have a
+/// different one removed.
+///
+/// The scan and this removal are separate statements, so the set is *not*
+/// transactionally snapshotted: an edge added between them is not removed (it
+/// will surface on the next run), and one deleted between them is tolerated via
+/// `ignoreErrors`. Closing that window would need a real transaction; the
+/// property that matters here — never delete something that was not reported —
+/// holds regardless.
 async fn remove_other_edges(
     pool: &ArangoPool,
     _keys: &[String],
@@ -348,8 +385,11 @@ async fn remove_other_edges(
 ) -> Result<BTreeMap<String, u64>> {
     let mut removed = BTreeMap::new();
     for (col, (_, edge_keys)) in scanned {
+        // Direct key removal — no nested scan per key. `ignoreErrors` tolerates
+        // an edge that vanished between the scan and now (see the TOCTOU note on
+        // this function).
         let aql = "LET gone = (FOR k IN @keys \
-                       FOR e IN @@edges FILTER e._key == k REMOVE e IN @@edges RETURN 1) \
+                       REMOVE k IN @@edges OPTIONS { ignoreErrors: true } RETURN 1) \
                    RETURN LENGTH(gone)";
         let bind = json!({ "@edges": col, "keys": edge_keys });
         match query::query_single(pool, aql, Some(&bind), ExecutionTarget::Writer).await {
@@ -368,6 +408,186 @@ async fn remove_other_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use hades_core::db::crud;
+
+    const FIXTURE_PREFIX: &str = "__hades_test158_";
+    /// Edge collection created for the test to stand in for an authored bridge.
+    const AUTHORED_EDGES: &str = "hades_test158_authored_edges";
+
+    fn test_pool() -> Option<ArangoPool> {
+        let socket = std::path::PathBuf::from(
+            std::env::var("ARANGO_SOCKET")
+                .unwrap_or_else(|_| "/run/arangodb3/arangodb.sock".to_string()),
+        );
+        if !socket.exists() {
+            if std::env::var("ARANGO_TESTS").is_ok_and(|v| v == "1" || v == "true") {
+                panic!(
+                    "ARANGO_TESTS is set but socket not found at {}",
+                    socket.display()
+                );
+            }
+            eprintln!(
+                "skipping: ArangoDB socket not found at {}",
+                socket.display()
+            );
+            return None;
+        }
+        let Ok(password) = std::env::var("ARANGO_PASSWORD") else {
+            eprintln!("skipping: ARANGO_PASSWORD not set");
+            return None;
+        };
+        let client =
+            hades_core::db::ArangoClient::with_socket(socket, "bident_burn", "root", &password);
+        Some(ArangoPool::new(client.clone(), client))
+    }
+
+    async fn collections_present(pool: &ArangoPool) -> bool {
+        for col in [CODEBASE.files, CODEBASE.symbols, CODEBASE.chunks] {
+            let aql = "RETURN LENGTH(FOR d IN @@col LIMIT 1 RETURN 1)";
+            let bind = json!({ "@col": col });
+            if query::query_single(pool, aql, Some(&bind), ExecutionTarget::Reader)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn count(pool: &ArangoPool, col: &str, field: &str) -> u64 {
+        let aql = format!(
+            "FOR d IN @@col FILTER STARTS_WITH(d.{field}, @p) COLLECT WITH COUNT INTO n RETURN n"
+        );
+        let bind = json!({ "@col": col, "p": FIXTURE_PREFIX });
+        query::query_single(pool, &aql, Some(&bind), ExecutionTarget::Reader)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    }
+
+    async fn cleanup(pool: &ArangoPool) {
+        for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
+            let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @p) REMOVE d IN @@col";
+            let bind = json!({ "@col": col, "p": FIXTURE_PREFIX });
+            let _ =
+                query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Writer).await;
+        }
+        let aql = "FOR d IN @@files FILTER STARTS_WITH(d._key, @p) REMOVE d IN @@files";
+        let bind = json!({ "@files": CODEBASE.files, "p": FIXTURE_PREFIX });
+        let _ = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Writer).await;
+        let _ = crud::drop_collection(pool, AUTHORED_EDGES, true).await;
+    }
+
+    /// The destructive sweep must actually delete, and must surface authored
+    /// edges anchored to a **symbol** rather than the file node.
+    ///
+    /// The symbol-anchored authored edge is the regression guard: scanning file
+    /// ids alone leaves it unreported and unremoved, dangling once the sweep
+    /// deletes its symbol endpoint.
+    #[tokio::test]
+    async fn retire_sweeps_subtree_and_finds_symbol_anchored_authored_edges() {
+        let Some(pool) = test_pool() else { return };
+        if !collections_present(&pool).await {
+            eprintln!("skipping: target database has no codebase collections");
+            return;
+        }
+        cleanup(&pool).await;
+
+        let pid = std::process::id();
+        let fkey = format!("{FIXTURE_PREFIX}{pid}_doomed");
+        let skey = format!("{fkey}__sym__abcd");
+        let live_fkey = format!("{FIXTURE_PREFIX}{pid}_live");
+
+        for (col, docs) in [
+            (
+                CODEBASE.files,
+                vec![
+                    json!({ "_key": fkey, "kind": "file" }),
+                    json!({ "_key": live_fkey, "kind": "file" }),
+                ],
+            ),
+            (
+                CODEBASE.symbols,
+                vec![json!({ "_key": skey, "file_key": fkey, "kind": "function" })],
+            ),
+            (
+                CODEBASE.chunks,
+                vec![json!({ "_key": format!("{fkey}_chunk_0"), "file_key": fkey })],
+            ),
+        ] {
+            crud::insert_documents(&pool, col, &docs, true)
+                .await
+                .expect("insert fixture");
+        }
+
+        // A stand-in authored bridge collection with two edges: one anchored to
+        // the file node, one anchored to the file's SYMBOL.
+        crud::create_collection(&pool, AUTHORED_EDGES, Some(EDGE_COLLECTION_TYPE))
+            .await
+            .expect("create authored edge collection");
+        let authored = vec![
+            json!({ "_key": "on_file", "_from": format!("{}/{}", CODEBASE.files, fkey),
+                    "_to": format!("{}/{}", CODEBASE.files, live_fkey) }),
+            json!({ "_key": "on_symbol", "_from": format!("{}/{}", CODEBASE.symbols, skey),
+                    "_to": format!("{}/{}", CODEBASE.files, live_fkey) }),
+        ];
+        crud::insert_documents(&pool, AUTHORED_EDGES, &authored, true)
+            .await
+            .expect("insert authored edges");
+
+        // The scan must find BOTH — the symbol-anchored one is the regression.
+        let targets = vec![fkey.clone()];
+        let scanned = scan_other_edges(&pool, &targets).await.unwrap();
+        let found = scanned
+            .get(AUTHORED_EDGES)
+            .map(|(_, keys)| keys.clone())
+            .unwrap_or_default();
+        assert!(
+            found.contains(&"on_file".to_string()),
+            "file-anchored authored edge must be surfaced, got {found:?}"
+        );
+        assert!(
+            found.contains(&"on_symbol".to_string()),
+            "SYMBOL-anchored authored edge must be surfaced — scanning file ids \
+             alone leaves it dangling after the sweep. got {found:?}"
+        );
+
+        // Dry-run must not delete.
+        sweep_codebase(&pool, &targets, true).await.unwrap();
+        assert_eq!(
+            count(&pool, CODEBASE.symbols, "file_key").await,
+            1,
+            "dry-run deleted symbols"
+        );
+
+        // Real sweep.
+        let counts = sweep_codebase(&pool, &targets, false).await.unwrap();
+        assert_eq!(counts["files"].as_u64().unwrap(), 1);
+        assert_eq!(counts["symbols"].as_u64().unwrap(), 1);
+        assert_eq!(counts["chunks"].as_u64().unwrap(), 1);
+        assert_eq!(
+            count(&pool, CODEBASE.symbols, "file_key").await,
+            0,
+            "symbols must be gone after the real sweep"
+        );
+
+        let removed = remove_other_edges(&pool, &targets, &scanned).await.unwrap();
+        assert_eq!(
+            removed.get(AUTHORED_EDGES).copied().unwrap_or(0),
+            2,
+            "both authored edges must be removed, not just the file-anchored one"
+        );
+
+        // The live file node is untouched.
+        let live = crud::get_document(&pool, CODEBASE.files, &live_fkey).await;
+        assert!(live.is_ok(), "unrelated file node must survive");
+
+        cleanup(&pool).await;
+    }
 
     #[test]
     fn collect_targets_dedupes_and_sorts_flag_input() {

@@ -6,14 +6,21 @@ StartLimitIntervalSec=300
 StartLimitBurst=3
 
 [Service]
+# UMask=0007 ensures the Unix domain socket is created group-connectable
+# (0660/0770 family) at bind time — no post-bind chmod race. Matches the
+# daemon unit. The in-server chmod remains as a fallback for non-systemd
+# invocations and as an abort-if-unusable check.
+UMask=0007
 Type=simple
 User=hades
 Group=hades
 SupplementaryGroups=weaver-admin arangodb
 
-# Runtime directory for the socket (/run/hades/training.sock)
-RuntimeDirectory=hades
-RuntimeDirectoryMode=0755
+# /run/hades is created solely by tmpfiles.d/hades.conf. Deliberately NO
+# RuntimeDirectory= here: the three hades units shared RuntimeDirectory=hades,
+# and systemd removes a unit's RuntimeDirectory on stop — so any one service
+# stopping unlinked the OTHER services' live sockets (observed 2026-07-20:
+# starting the extractor clobbered hades.sock and training.sock).
 CacheDirectory=hades
 CacheDirectoryMode=0755
 

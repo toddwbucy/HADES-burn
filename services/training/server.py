@@ -372,10 +372,11 @@ async def serve() -> None:
     logger.info("Starting training service on %s (no fallback device: clients declare per run)", socket_path)
     await server.start()
 
-    # Make the socket group-connectable (the `hades` group) so CLI clients can
-    # reach it, matching the daemon socket. Under systemd the default umask
-    # (022) would otherwise create it 0755 — no group write — blocking
-    # same-group clients (e.g. the `hades` CLI run by a user in the group).
+    # Ensure the socket is group-connectable (the `hades` group). Under systemd
+    # the unit's UMask=0007 already births it 0770, making this a no-op
+    # verification; outside systemd the ambient umask (typically 022) would
+    # leave it 0755 — no group write — blocking same-group clients, so this
+    # does the work there.
     try:
         os.chmod(socket_path, 0o770)
     except OSError as exc:

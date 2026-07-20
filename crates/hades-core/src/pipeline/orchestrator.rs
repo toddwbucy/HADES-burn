@@ -461,28 +461,33 @@ impl Pipeline {
         profile: &CollectionProfile,
         doc_key: &str,
     ) -> Result<(), PipelineError> {
-        let bind_vars = json!({
+        // One bind object per query: ArangoDB rejects DECLARED-but-unused bind
+        // parameters (error 1552), so sharing a single bind map that names both
+        // collections across two single-collection queries fails. This made
+        // every `--force` document re-ingest error out (fresh ingests skip this
+        // path, which is why it went unnoticed).
+        let chunk_binds = json!({
             "doc_key": doc_key,
             "@chunks": profile.chunks,
-            "@embeddings": profile.embeddings,
         });
-
-        // Delete chunks by doc_key
         query::query(
             &self.db,
             "FOR c IN @@chunks FILTER c.doc_key == @doc_key REMOVE c IN @@chunks",
-            Some(&bind_vars),
+            Some(&chunk_binds),
             None,
             false,
             ExecutionTarget::Writer,
         )
         .await?;
 
-        // Delete embeddings by doc_key
+        let embedding_binds = json!({
+            "doc_key": doc_key,
+            "@embeddings": profile.embeddings,
+        });
         query::query(
             &self.db,
             "FOR e IN @@embeddings FILTER e.doc_key == @doc_key REMOVE e IN @@embeddings",
-            Some(&bind_vars),
+            Some(&embedding_binds),
             None,
             false,
             ExecutionTarget::Writer,

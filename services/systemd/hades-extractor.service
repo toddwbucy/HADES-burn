@@ -6,6 +6,11 @@ StartLimitIntervalSec=300
 StartLimitBurst=3
 
 [Service]
+# UMask=0007 ensures the Unix domain socket is created group-connectable
+# (0660/0770 family) at bind time — no post-bind chmod race. Matches the
+# daemon unit. The in-server chmod remains as a fallback for non-systemd
+# invocations and as an abort-if-unusable check.
+UMask=0007
 Type=simple
 User=hades
 Group=hades

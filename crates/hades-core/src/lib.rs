@@ -10,6 +10,7 @@ pub mod graph;
 pub mod persephone;
 pub mod pipeline;
 pub mod schema_apply;
+pub mod service;
 pub mod training;
 
 pub use config::HadesConfig;

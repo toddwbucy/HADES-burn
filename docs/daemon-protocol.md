@@ -88,14 +88,26 @@ JSON payload that follows.
 ## Sessions and Access Tiers
 
 The daemon implements a three-tier access model. Each command is classified
-into exactly one tier. Session type determines the ceiling.
+into exactly one tier.
 
 | Session    | Can Execute         | Use Case                    |
 |------------|---------------------|-----------------------------|
 | `"admin"`  | Agent + Internal + Admin | Human operator, CLI, harness |
 | `"agent"`  | Agent only          | AI model agents              |
 
-If omitted, session defaults to `"admin"`.
+The session ceiling is a property of the **transport**, not the request.
+Each transport grants its connections a connection policy — the highest
+tier any request on that connection may run at:
+
+| Transport                 | Policy ceiling | Default when `session` omitted |
+|---------------------------|----------------|--------------------------------|
+| Unix socket (local)       | `admin`        | `admin`                        |
+| Network endpoints (future)| `agent`        | `agent`                        |
+
+The request's `session` field is advisory self-restriction only: a client
+may declare `"agent"` to run below its ceiling, but requesting a tier above
+the ceiling returns `ACCESS_DENIED` — it is never silently clamped, and no
+request content can elevate a connection above what its transport grants.
 
 ### Access Tiers
 
@@ -115,7 +127,7 @@ error code `ACCESS_DENIED`.
 | `UNKNOWN_COMMAND`   | `command` field not recognized                       |
 | `INVALID_PARAMS`    | Missing, malformed, or out-of-range params           |
 | `INVALID_SESSION`   | `session` field is not `"admin"` or `"agent"`        |
-| `ACCESS_DENIED`     | Agent session attempted Admin/Internal command        |
+| `ACCESS_DENIED`     | Agent session attempted Admin/Internal command, or a request claimed a session above its transport's policy ceiling |
 | `MALFORMED_JSON`    | Payload is not valid JSON                            |
 | `PAYLOAD_TOO_LARGE` | Payload exceeds 16 MiB limit                         |
 | `NOT_FOUND`         | Requested document/collection/node does not exist    |

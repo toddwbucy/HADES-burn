@@ -120,3 +120,16 @@ sync:
   default_lookback_days: 7
   batch_size: 8
   max_results: 1000
+
+# -----------------------------------------------------------------------------
+# External analyzers (codebase ingest enrichment)
+# -----------------------------------------------------------------------------
+# Optional pinned binaries. When set, used verbatim (no PATH search). When
+# unset, the PATH lookup applies and `codebase ingest` probes the binary FROM
+# the ingest root before touching any file (the rustup shim resolves
+# per-directory, so probing anywhere else validates the wrong toolchain).
+# Env overrides: HADES_RUST_ANALYZER_PATH, HADES_GOPLS_PATH.
+# Inspect with: hades tools status --workspace <ingest-root>
+#analyzers:
+#  rust_analyzer: /usr/local/lib/hades/tools/rust-analyzer
+#  gopls: /usr/local/lib/hades/tools/gopls

@@ -169,6 +169,41 @@ pub async fn run(
     // Compute base path for relative paths.
     let base = ingest_base_path(&path);
 
+    // ── Analyzer preflight (#164/#167) ─────────────────────────────────
+    // Resolve each needed analyzer (config/env override wins over PATH) and
+    // probe it FROM the ingest base, because the rustup shim resolves
+    // per-directory. This runs BEFORE any file is touched: `--force` purges a
+    // file's semantic edges on the assumption enrichment will rebuild them,
+    // so an analyzer that cannot run must stop the ingest up front — after
+    // the purge is too late (#164). `--allow-analysis-downgrade` is the
+    // explicit override, matching its existing fidelity semantics.
+    let needs_rust = files
+        .iter()
+        .any(|f| is_semantic_target(f, lang_override, &unparsed_set, Language::Rust, "rs"));
+    let needs_go = files
+        .iter()
+        .any(|f| is_semantic_target(f, lang_override, &unparsed_set, Language::Go, "go"));
+    let rust_analyzer_cmd = if needs_rust {
+        preflight_or_bail(
+            "rust-analyzer",
+            config.analyzers.rust_analyzer.as_deref(),
+            &base,
+            allow_analysis_downgrade,
+        )?
+    } else {
+        None
+    };
+    let gopls_cmd = if needs_go {
+        preflight_or_bail(
+            "gopls",
+            config.analyzers.gopls.as_deref(),
+            &base,
+            allow_analysis_downgrade,
+        )?
+    } else {
+        None
+    };
+
     // Process each file with per-file error isolation.
     let mut results: Vec<FileResult> = Vec::with_capacity(files.len());
     // Accumulators for cross-file import resolution.
@@ -219,15 +254,21 @@ pub async fn run(
                 .as_deref()
                 .is_some_and(|e| unparsed_set.contains(e));
 
-        // Track Rust files for rust-analyzer post-loop enrichment (parsed only).
-        let is_rust = !is_unparsed
-            && (lang_override == Some(Language::Rust) || file_ext.as_deref() == Some("rs"));
-        if is_rust {
+        // Track Rust/Go files for post-loop semantic enrichment (parsed only).
+        // Uses the SAME predicate as the preflight gate above, so the set the
+        // gate protects and the set the phases process cannot diverge — a
+        // divergence here is exactly how `--language rust` on non-.rs files
+        // would skip the preflight and silently lose enrichment (#164).
+        if is_semantic_target(
+            file_path,
+            lang_override,
+            &unparsed_set,
+            Language::Rust,
+            "rs",
+        ) {
             rust_abs_paths.push(file_path.clone());
         }
-        let is_go = !is_unparsed
-            && (lang_override == Some(Language::Go) || file_ext.as_deref() == Some("go"));
-        if is_go {
+        if is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go") {
             go_abs_paths.push(file_path.clone());
         }
 
@@ -375,8 +416,10 @@ pub async fn run(
     // When Rust files were ingested, optionally use rust-analyzer for richer
     // symbol extraction: qualified names, call hierarchy, impl-trait edges,
     // PyO3/FFI detection. This enrichment phase runs after the syn-based loop.
-    let ra_stats = if !rust_abs_paths.is_empty() {
-        match run_rust_analyzer_phase(&db, &base, &rust_abs_paths).await {
+    let ra_stats = if !rust_abs_paths.is_empty() && rust_analyzer_cmd.is_some() {
+        match run_rust_analyzer_phase(&db, &base, &rust_abs_paths, rust_analyzer_cmd.as_deref())
+            .await
+        {
             Ok(stats) => {
                 info!(
                     symbols = stats.symbols,
@@ -395,8 +438,28 @@ pub async fn run(
         SemanticLspStats::default()
     };
 
-    let gopls_stats = if !go_abs_paths.is_empty() {
-        match run_gopls_phase(&db, &base, &go_abs_paths).await {
+    // Total enrichment failure is loud, not an info line (#164). The preflight
+    // passed, Rust files were ingested, and the phase produced nothing — that
+    // is the exact state that previously reported success while the graph
+    // silently lost its calls/implements layer. Only the downgrade flag makes
+    // proceeding an explicit choice.
+    if !rust_abs_paths.is_empty()
+        && rust_analyzer_cmd.is_some()
+        && ra_stats.workspaces == 0
+        && !allow_analysis_downgrade
+    {
+        anyhow::bail!(
+            "rust-analyzer enrichment produced nothing across {} Rust file(s) \
+             (crates_analyzed = 0) despite a passing preflight. The graph would \
+             keep syn symbols but lose calls/implements edges. Investigate the \
+             analyzer session logs above, or pass --allow-analysis-downgrade to \
+             accept the loss explicitly.",
+            rust_abs_paths.len()
+        );
+    }
+
+    let gopls_stats = if !go_abs_paths.is_empty() && gopls_cmd.is_some() {
+        match run_gopls_phase(&db, &base, &go_abs_paths, gopls_cmd.as_deref()).await {
             Ok(stats) => {
                 info!(
                     symbols = stats.symbols,
@@ -414,6 +477,22 @@ pub async fn run(
     } else {
         SemanticLspStats::default()
     };
+
+    // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
+    // files ingested and zero modules analyzed is silent semantic loss, not
+    // success.
+    if !go_abs_paths.is_empty()
+        && gopls_cmd.is_some()
+        && gopls_stats.workspaces == 0
+        && !allow_analysis_downgrade
+    {
+        anyhow::bail!(
+            "gopls enrichment produced nothing across {} Go file(s) despite a \
+             passing preflight. Investigate the session logs above, or pass \
+             --allow-analysis-downgrade to accept the loss explicitly.",
+            go_abs_paths.len()
+        );
+    }
 
     // Output summary.
     let total = results.len();
@@ -1603,6 +1682,7 @@ async fn run_rust_analyzer_phase(
     db: &ArangoPool,
     base: &Path,
     rust_files: &[PathBuf],
+    command: Option<&str>,
 ) -> Result<SemanticLspStats> {
     let groups = group_files_by_crate(rust_files);
     if groups.is_empty() {
@@ -1625,7 +1705,13 @@ async fn run_rust_analyzer_phase(
             "analyzing crate with rust-analyzer"
         );
 
-        let session = match RustAnalyzerSession::start(crate_root).await {
+        let session = match RustAnalyzerSession::start_with_options(
+            crate_root,
+            command,
+            hades_core::code::lsp::DEFAULT_INDEX_TIMEOUT_SECS,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 // If rust-analyzer isn't installed or fails to start,
@@ -1672,6 +1758,7 @@ async fn run_gopls_phase(
     db: &ArangoPool,
     base: &Path,
     go_files: &[PathBuf],
+    command: Option<&str>,
 ) -> Result<SemanticLspStats> {
     let groups = group_files_by_go_module(go_files);
     if groups.is_empty() {
@@ -1685,7 +1772,13 @@ async fn run_gopls_phase(
     let mut all_extractions = HashMap::new();
     let mut modules_analyzed = 0;
     for (module_root, module_files) in &groups {
-        let session = match GoplsSession::start(module_root).await {
+        let session = match GoplsSession::start_with_options(
+            module_root,
+            command,
+            hades_core::code::lsp::DEFAULT_INDEX_TIMEOUT_SECS,
+        )
+        .await
+        {
             Ok(session) => session,
             Err(error) => {
                 warn!(
@@ -2083,6 +2176,71 @@ fn resolve_python_imports(
     }
 
     edges
+}
+
+/// Resolve an analyzer command (config/env override wins over PATH) and probe
+/// it from the workspace. Returns the command to use, or None when the
+/// operator explicitly accepted the downgrade.
+///
+/// The probe runs from `workspace` because the rustup shim resolves
+/// per-directory (#164): the same `rust-analyzer` can work in a shell and die
+/// inside a repo whose rust-toolchain.toml pins a toolchain missing the
+/// component. Probing anywhere else validates the wrong toolchain.
+fn preflight_or_bail(
+    name: &str,
+    configured: Option<&str>,
+    workspace: &Path,
+    allow_analysis_downgrade: bool,
+) -> Result<Option<String>> {
+    let probe = hades_core::code::lsp::resolve_and_probe(name, configured, workspace);
+    match probe.outcome {
+        Ok(version) => {
+            info!(analyzer = name, %version, source = probe.source, "analyzer preflight passed");
+            Ok(Some(probe.command))
+        }
+        Err(e) if allow_analysis_downgrade => {
+            warn!(
+                analyzer = name,
+                error = %e,
+                "analyzer preflight FAILED; proceeding without semantic \
+                 enrichment because --allow-analysis-downgrade was passed"
+            );
+            Ok(None)
+        }
+        Err(e) => anyhow::bail!(
+            "{name} preflight failed ({source}): {e}\n\
+             Source files needing it were discovered, and `--force` would purge \
+             semantic edges this analyzer rebuilds. Fix the analyzer (for the \
+             rustup shim: `rustup component add rust-analyzer --toolchain \
+             <the workspace's pinned toolchain>`), pin a binary in hades.yaml \
+             under `analyzers.{}`, or pass --allow-analysis-downgrade to \
+             proceed without semantic enrichment.",
+            name.replace('-', "_"),
+            source = probe.source,
+        ),
+    }
+}
+
+/// Is `path` a target for semantic enrichment in `want` language?
+///
+/// The ONE predicate shared by the preflight gate and the per-file tracking
+/// loop, so the set the gate protects and the set the phases process cannot
+/// diverge. The language override counts (matching the loop's historical
+/// behavior), and unparsed-allowlisted files never count.
+fn is_semantic_target(
+    path: &Path,
+    lang_override: Option<Language>,
+    unparsed_set: &std::collections::HashSet<String>,
+    want: Language,
+    want_ext: &str,
+) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    let is_unparsed = Language::from_path(&path.to_string_lossy()).is_none()
+        && ext.as_deref().is_some_and(|e| unparsed_set.contains(e));
+    !is_unparsed && (lang_override == Some(want) || ext.as_deref() == Some(want_ext))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

@@ -57,7 +57,6 @@ pub fn error_envelope(command: &str, message: &str) -> Value {
     })
 }
 
-/// Print data in the requested format with the standard envelope.
 /// Like [`print_output`], but with an explicit envelope `success` value.
 ///
 /// `print_output` hardcodes `success: true`, which is right for commands whose
@@ -82,23 +81,12 @@ pub fn print_output_with_success(command: &str, data: Value, format: &OutputForm
     }
 }
 
+/// Print data in the requested format with the standard envelope and
+/// `success: true` — correct for commands whose failure path is an early
+/// `Err`; by the time they print, they succeeded. Batch commands with
+/// per-item outcomes use [`print_output_with_success`].
 pub fn print_output(command: &str, data: Value, format: &OutputFormat) {
-    match format {
-        OutputFormat::Json => {
-            let wrapped = envelope(command, data);
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&wrapped).unwrap_or_default()
-            );
-        }
-        OutputFormat::Jsonl => {
-            let wrapped = envelope(command, data);
-            println!("{}", serde_json::to_string(&wrapped).unwrap_or_default());
-        }
-        OutputFormat::Table => {
-            print_table(&data);
-        }
-    }
+    print_output_with_success(command, data, format, true)
 }
 
 /// Render a JSON value as a human-readable table.

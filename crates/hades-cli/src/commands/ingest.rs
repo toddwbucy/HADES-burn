@@ -99,19 +99,11 @@ pub async fn run(
         None => CollectionProfile::default_profile(),
     };
 
-    // Canonicalize every input before anything crosses a process boundary.
-    // The extraction service runs as its own user with its own working
-    // directory, so a relative path that resolves here fails there with a
-    // misleading service-side "File not found" (#166). Canonicalizing also
-    // surfaces a nonexistent input immediately, with the caller's path in the
-    // error, instead of after connecting to three services.
-    let file_paths: Vec<PathBuf> = inputs
-        .iter()
-        .map(|p| {
-            std::fs::canonicalize(p)
-                .with_context(|| format!("input path not found or unreadable: {}", p.display()))
-        })
-        .collect::<Result<_, _>>()?;
+    // Inputs stay as the caller wrote them at this level: item ids and batch
+    // resume keys derive from these strings, and per-document error isolation
+    // means a bad path must become a per-item failure, not a batch abort.
+    // Canonicalization happens inside ingest_file, per item (#166).
+    let file_paths: Vec<PathBuf> = inputs.to_vec();
 
     // -- Connect to services ---------------------------------------------------
     let db = ArangoPool::from_config(config).context("failed to connect to ArangoDB")?;
@@ -298,10 +290,9 @@ async fn ingest_file(
     extra_metadata: Option<&Value>,
     custom_id: Option<&str>,
 ) -> Result<Value> {
-    if !path.exists() {
-        bail!("file not found: {}", path.display());
-    }
-
+    // Identity FIRST, from the path as the caller wrote it: doc_key comes from
+    // the caller's file stem, so a symlinked input keeps the name the caller
+    // used rather than silently adopting the target's stem.
     let doc_key = custom_id
         .map(keys::normalize_document_key)
         .unwrap_or_else(|| {
@@ -311,6 +302,16 @@ async fn ingest_file(
                 .unwrap_or("unknown");
             keys::normalize_document_key(stem)
         });
+
+    // THEN canonicalize for everything that crosses a process boundary. The
+    // extraction service runs as its own user in its own working directory, so
+    // a relative path that resolves here fails there with a misleading
+    // service-side "File not found" (#166). A missing input fails HERE, per
+    // item — the batch continues and the failure reaches the summary and the
+    // envelope like any other item error.
+    let path: PathBuf = std::fs::canonicalize(path)
+        .with_context(|| format!("input path not found or unreadable: {}", path.display()))?;
+    let path = path.as_path();
 
     // Check if already exists (unless --force).
     if !force && document_exists(db, profile.metadata, &doc_key).await? {

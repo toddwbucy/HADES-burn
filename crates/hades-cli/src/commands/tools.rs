@@ -44,6 +44,11 @@ pub enum ToolsCmd {
         /// (gopls, e.g. v0.21.0). Defaults to latest.
         #[arg(long)]
         version: Option<String>,
+
+        /// Install a rust-analyzer asset even when the release carries no
+        /// sha256 digest (default: refuse — no integrity check at all).
+        #[arg(long)]
+        allow_unverified: bool,
     },
 }
 
@@ -149,15 +154,30 @@ fn install_executable(dest: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Read-modify-write the manifest recording what is installed and from where.
+///
+/// A present-but-unparseable manifest is an error, not an empty map —
+/// silently defaulting would drop the OTHER tool's record on the next
+/// install. The write goes through tmp+rename like the binary itself,
+/// so a crash mid-write cannot produce the corrupt file that path
+/// would then destroy.
 fn record_manifest(dir: &Path, tool: &str, entry: serde_json::Value) -> Result<()> {
     let path = dir.join("manifest.json");
     let mut manifest: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => Default::default(),
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "{} exists but is not valid JSON — refusing to overwrite it \
+                 (move it aside and re-run to rebuild)",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     manifest.insert(tool.to_string(), entry);
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)
-        .with_context(|| format!("writing {}", path.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&manifest)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("installing {}", path.display()))?;
     Ok(())
 }
 
@@ -168,7 +188,11 @@ fn record_manifest(dir: &Path, tool: &str, entry: serde_json::Value) -> Result<(
 /// a compromised GitHub. The installed tag is recorded in the manifest —
 /// determinism comes from `--version <tag>` plus the manifest, not from
 /// a hardcoded default that would go stale weekly.
-async fn install_rust_analyzer(dir: &Path, version: Option<&str>) -> Result<serde_json::Value> {
+async fn install_rust_analyzer(
+    dir: &Path,
+    version: Option<&str>,
+    allow_unverified: bool,
+) -> Result<serde_json::Value> {
     let triple = target_triple()?;
     let release_url = match version {
         Some(tag) => {
@@ -204,15 +228,27 @@ async fn install_rust_analyzer(dir: &Path, version: Option<&str>) -> Result<serd
         .context("asset has no download url")?;
 
     tracing::info!(%tag, %url, "downloading rust-analyzer");
-    let bytes = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let resp = client.get(url).send().await?.error_for_status()?;
+    // Sanity-cap the download: release assets are tens of MiB, and
+    // `bytes()` buffers the whole body in memory.
+    const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+    if let Some(len) = resp.content_length() {
+        anyhow::ensure!(
+            len <= MAX_ASSET_BYTES,
+            "release asset {asset_name} reports {len} bytes, over the {MAX_ASSET_BYTES} byte cap"
+        );
+    }
+    let bytes = resp.bytes().await?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_ASSET_BYTES,
+        "release asset {asset_name} is {} bytes, over the {MAX_ASSET_BYTES} byte cap",
+        bytes.len()
+    );
 
-    // Verify against the API-reported digest when present.
+    // Verify against the API-reported digest. Absent digest fails
+    // closed: an executable with no corruption check at all is exactly
+    // the case that must not install silently. --allow-unverified opts
+    // in explicitly, and the manifest records the downgrade.
     let actual = sha256_hex(&bytes);
     let verified = match asset["digest"].as_str().and_then(parse_sha256_digest) {
         Some(expected) => {
@@ -222,10 +258,17 @@ async fn install_rust_analyzer(dir: &Path, version: Option<&str>) -> Result<serd
             );
             true
         }
-        None => {
-            tracing::warn!("release asset carries no digest; recording our own hash unverified");
+        None if allow_unverified => {
+            tracing::warn!(
+                "release asset carries no digest; installing UNVERIFIED per --allow-unverified"
+            );
             false
         }
+        None => anyhow::bail!(
+            "release {tag} asset {asset_name} carries no sha256 digest — refusing to \
+             install an executable with no integrity check. Re-run with \
+             --allow-unverified to accept it, or pin a release tag that has one"
+        ),
     };
 
     let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
@@ -287,7 +330,7 @@ fn install_gopls(dir: &Path, version: Option<&str>) -> Result<serde_json::Value>
     }))
 }
 
-pub fn run_install(tool: &str, version: Option<&str>) -> Result<()> {
+pub fn run_install(tool: &str, version: Option<&str>, allow_unverified: bool) -> Result<()> {
     // Validate before touching the filesystem, so an unknown tool name
     // has no side effects.
     anyhow::ensure!(
@@ -301,7 +344,7 @@ pub fn run_install(tool: &str, version: Option<&str>) -> Result<()> {
     let entry = match tool {
         "rust-analyzer" => {
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(install_rust_analyzer(&dir, version))?
+            rt.block_on(install_rust_analyzer(&dir, version, allow_unverified))?
         }
         "gopls" => install_gopls(&dir, version)?,
         _ => unreachable!("validated above"),
@@ -409,8 +452,27 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_manifest_is_refused_not_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        record_manifest(dir.path(), "gopls", json!({"version": "v0.21.0"})).unwrap();
+        std::fs::write(dir.path().join("manifest.json"), b"{not json").unwrap();
+        let err =
+            record_manifest(dir.path(), "rust-analyzer", json!({"version": "x"})).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"));
+        // The corrupt file is left in place for the operator, not clobbered.
+        assert_eq!(
+            std::fs::read(dir.path().join("manifest.json")).unwrap(),
+            b"{not json"
+        );
+        assert!(
+            !dir.path().join("manifest.json.tmp").exists(),
+            "no tmp residue"
+        );
+    }
+
+    #[test]
     fn unknown_tool_is_refused() {
-        let err = run_install("clangd", None).unwrap_err();
+        let err = run_install("clangd", None, false).unwrap_err();
         assert!(err.to_string().contains("supported tools"));
     }
 }

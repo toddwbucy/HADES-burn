@@ -104,6 +104,18 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// Env vars are process-global, so tests that set/remove them race
+    /// each other under the parallel test runner — the #93 flake class
+    /// (HADES_USE_GPU="maybe" leaking into a concurrent test). Every
+    /// env-mutating test holds this lock for its whole set→assert→remove
+    /// span. `unwrap_or_else` recovers a poisoned lock: a prior test's
+    /// panic doesn't invalidate serialization.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_defaults_without_yaml() {
         let config = HadesConfig::default();
@@ -155,6 +167,7 @@ search:
 
     #[test]
     fn test_env_overrides() {
+        let _env = env_guard();
         let mut config = HadesConfig::default();
 
         // SAFETY: test runs single-threaded via cargo test -- --test-threads=1
@@ -224,6 +237,7 @@ search:
 
     #[test]
     fn test_gpu_disabled_via_env() {
+        let _env = env_guard();
         let mut config = HadesConfig::default();
         assert!(config.gpu.enabled);
 
@@ -237,6 +251,7 @@ search:
 
     #[test]
     fn test_gpu_env_invalid_value_errors() {
+        let _env = env_guard();
         let mut config = HadesConfig::default();
 
         unsafe { env::set_var("HADES_USE_GPU", "maybe") };
@@ -253,6 +268,7 @@ search:
 
     #[test]
     fn test_hades_config_env_missing_file_errors() {
+        let _env = env_guard();
         unsafe { env::set_var("HADES_CONFIG", "/nonexistent/hades.yaml") };
         let result = super::load_config();
         assert!(result.is_err());

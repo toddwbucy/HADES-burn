@@ -521,6 +521,24 @@ fn resolve_and_probe_in(
 mod preflight_tests {
     use super::{preflight_binary, resolve_and_probe, resolve_and_probe_in, version_args_for};
 
+    /// Spawning a just-written script can transiently fail with ETXTBSY:
+    /// a concurrent test's fork inherits the script's write fd between
+    /// our write and our exec, and Linux refuses to exec a file open for
+    /// writing. The fd closes as soon as that child execs, so retry.
+    fn retry_txtbsy<T: std::fmt::Debug>(
+        mut probe: impl FnMut() -> Result<T, String>,
+    ) -> Result<T, String> {
+        for _ in 0..100 {
+            match probe() {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+        probe()
+    }
+
     /// A managed-dir binary wins over PATH but loses to an explicit pin.
     #[test]
     #[cfg(unix)]
@@ -532,14 +550,17 @@ mod preflight_tests {
         std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         // No pin → managed wins over PATH.
-        let s = resolve_and_probe_in(
-            "rust-analyzer",
-            None,
-            dir.path(),
-            std::path::Path::new("/tmp"),
-        );
-        assert_eq!(s.source, "managed");
-        assert_eq!(s.outcome.as_deref(), Ok("managed-ra 1.0"));
+        let outcome = retry_txtbsy(|| {
+            let s = resolve_and_probe_in(
+                "rust-analyzer",
+                None,
+                dir.path(),
+                std::path::Path::new("/tmp"),
+            );
+            assert_eq!(s.source, "managed");
+            s.outcome
+        });
+        assert_eq!(outcome.as_deref(), Ok("managed-ra 1.0"));
 
         // Pin present → pin wins even with a managed binary installed.
         let s = resolve_and_probe_in(
@@ -602,9 +623,15 @@ mod preflight_tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cmd = script.to_string_lossy();
 
-        let ok = preflight_binary(&cmd, &["version"], dir.path());
+        let ok = retry_txtbsy(|| {
+            preflight_binary(&cmd, &["version"], dir.path()).map_err(|e| e.to_string())
+        });
         assert!(ok.is_ok(), "subcommand form must pass: {ok:?}");
-        let bad = preflight_binary(&cmd, &["--version"], dir.path());
+        let bad = retry_txtbsy(|| {
+            preflight_binary(&cmd, &["--version"], dir.path()).map_err(|e| e.to_string())
+        });
+        // Retried past ETXTBSY, so this error is the genuine wrong-form
+        // failure, not the transient race.
         assert!(bad.is_err(), "flag form must fail on a gopls-shaped binary");
     }
 

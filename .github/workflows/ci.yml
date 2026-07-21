@@ -60,3 +60,20 @@ jobs:
       # (e.g. tests/graph_loader.rs) remain out of scope until #93 lands.
       - name: cargo test --lib --bins
         run: cargo test --workspace --lib --bins --verbose
+
+      # Service-free tests/ targets, named explicitly. A blanket --workspace
+      # is unsafe here: the tests/ directory mixes three classes and only the
+      # arango_* + graph_loader targets self-skip when their service is
+      # absent. The other two classes would fail on a bare runner:
+      #   needs-a-service:  embedding_client, extraction_client,
+      #                     training_client (no self-skip guards)
+      #   needs-an-analyzer-binary: clang_cuda_probe (libclang),
+      #                     gopls_semantic (gopls), ra_span_agreement
+      #                     (rust-analyzer)
+      # Those remain #93's scope (uniform self-skip or a serviced runner).
+      # The three below are pure logic and run anywhere.
+      - name: cargo test (service-free tests/ targets)
+        run: |
+          cargo test -p hades-proto --test proto_types --verbose
+          cargo test -p hades-core --test pipeline --verbose
+          cargo test -p hades-core --test config_integration --verbose

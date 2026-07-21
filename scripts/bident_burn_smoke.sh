@@ -28,6 +28,14 @@ set -u
 shopt -s lastpipe
 
 HADES_BIN=${HADES_BIN:-hades}
+# Absolutize: several steps cd into fixture dirs, and a relative
+# HADES_BIN (e.g. target/release/hades) would stop resolving there.
+# (command -v returns slash-containing paths unchanged, so realpath them.)
+if [[ "$HADES_BIN" == */* ]]; then
+    HADES_BIN=$(realpath "$HADES_BIN")
+else
+    HADES_BIN=$(command -v "$HADES_BIN") || { echo "hades binary '$HADES_BIN' not found"; exit 1; }
+fi
 DB=bident_burn_smoke
 EMBEDDER_URL=${EMBEDDER_URL:-http://localhost:8087}
 
@@ -132,9 +140,16 @@ check_min "documents written" "$DOCS_1" 1
 check_min "chunks written" "$(count chunks)" 1
 check_min "embeddings written" "$(count embeddings)" 1
 
-# Same file through a ./relative path must canonicalize to the same doc (#166).
-( cd "$DOCS_DIR" && "$HADES_BIN" --db "$DB" ingest "./smoke_note.md" --force >/dev/null 2>&1 )
-check "relative path canonicalizes to same doc" "$(count documents)" "$DOCS_1"
+# Same file through a ./relative path must canonicalize and succeed (#166).
+# The exit code is the discriminating signal: doc_key is stem-based (so the
+# count is path-invariant either way), but a pre-#166 binary hands the
+# uncanonicalized relative path to the extraction service, which fails with
+# "File not found" — the ingest exits nonzero.
+( cd "$DOCS_DIR" && "$HADES_BIN" --db "$DB" ingest "./smoke_note.md" --force ) >"$WORK/rel_ingest.json" 2>>"$WORK/stderr.log"
+REL_RC=$?
+check "relative ingest succeeds (canonicalized)" "$REL_RC" "0"
+check "relative ingest completed the document" "$(jq -r '.data.completed' "$WORK/rel_ingest.json")" "1"
+check "relative path maps to same doc" "$(count documents)" "$DOCS_1"
 
 # Batch with one missing file: envelope success=false AND exit code 1 (#166).
 BATCH_OUT=$("$HADES_BIN" --db "$DB" ingest "$DOCS_DIR/smoke_note.md" "$DOCS_DIR/does_not_exist.md" --batch --force 2>>"$WORK/stderr.log")
@@ -193,7 +208,7 @@ check_min "drift reports deleted file" "$DRIFT_MISSING" 1
 # the exact drift→retire loop the commands were designed to close (#158).
 echo "$DRIFT_JSON" | jq -r '.data.stale.keys[]' > "$WORK/stale_keys"
 step "retire drift's stale keys" h codebase retire --from "$WORK/stale_keys" --yes
-check "retire removed the file node" "$(count codebase_files)" "0"
+check "retire removed the file node" "$(count codebase_files)" "$(( FILES_1 - DRIFT_MISSING ))"
 step "prune-orphans" h codebase prune-orphans
 check "prune left no orphan chunks" "$(count codebase_chunks)" "0"
 step "codebase validate" h codebase validate

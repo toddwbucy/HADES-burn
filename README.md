@@ -88,6 +88,24 @@ cargo clippy             # lint
 
 Binary: `target/debug/hades` or `target/release/hades`.
 
+### Pre-release verification
+
+Before installing a new binary, run the end-to-end pipeline smoke test
+against it. It exercises full pipelines (tasks, document ingest, codebase
+ingest, drift→retire→prune, semantic search) on a dedicated
+`bident_burn_smoke` database and asserts the graph invariants that past
+regressions actually violated — foreign keys on chunks/embeddings,
+input canonicalization, the honest batch envelope, `--force` stability:
+
+```
+HADES_BIN=target/release/hades ./scripts/bident_burn_smoke.sh
+```
+
+Requires live ArangoDB and the embedder service; never touches
+`bident_burn` or any production database. `scripts/cli_audit.sh` remains
+the command-level companion ("does every command run"); the smoke test
+answers "is the graph right".
+
 ## Install
 
 The install procedure below has been validated end-to-end on a fresh

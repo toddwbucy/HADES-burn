@@ -515,6 +515,7 @@ mod preflight_tests {
     /// shape — must preflight with the right form and fail with the wrong
     /// one. Uses a script so the test needs no gopls installed.
     #[test]
+    #[cfg(unix)]
     fn subcommand_only_binary_preflights_with_the_right_form() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");

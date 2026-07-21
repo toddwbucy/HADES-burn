@@ -41,6 +41,6 @@ pub enum LspError {
 pub type RustAnalyzerError = LspError;
 
 pub use session::{
-    AnalyzerStatus, DEFAULT_INDEX_TIMEOUT_SECS, preflight_binary, resolve_and_probe,
-    version_args_for,
+    AnalyzerStatus, DEFAULT_INDEX_TIMEOUT_SECS, managed_tools_dir, preflight_binary,
+    resolve_and_probe, version_args_for,
 };

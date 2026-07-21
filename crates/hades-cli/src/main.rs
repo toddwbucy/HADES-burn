@@ -345,6 +345,14 @@ fn main() -> anyhow::Result<()> {
                 full,
             ))
         }
+        Commands::Tools(ToolsCmd::Install {
+            ref tool,
+            ref version,
+            allow_unverified,
+        }) => {
+            init_tracing();
+            commands::tools::run_install(tool, version.as_deref(), allow_unverified)
+        }
         Commands::Tools(ToolsCmd::Status { workspace }) => {
             init_tracing();
             commands::tools::run_status(&config, workspace)

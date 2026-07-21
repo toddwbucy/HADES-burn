@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use hades_core::code::lsp::preflight_binary;
 use hades_core::config::HadesConfig;
 
 use super::output::{self, OutputFormat};
@@ -40,25 +39,30 @@ pub fn run_status(config: &HadesConfig, workspace: Option<PathBuf>) -> Result<()
         None => std::env::current_dir().context("cannot read current directory")?,
     };
 
-    let mut all_ok = true;
+    // Failure is fatal only for a CONFIGURED analyzer: an explicit pin that
+    // does not probe is broken operator intent. An unconfigured analyzer
+    // missing from PATH is inventory (a Rust-only box without gopls is
+    // healthy), reported but not fatal — enforcement for analyzers a
+    // workspace actually needs lives in the ingest preflight.
+    let mut fatal = false;
     let mut report = serde_json::Map::new();
     for (name, configured) in [
         ("rust-analyzer", config.analyzers.rust_analyzer.as_deref()),
         ("gopls", config.analyzers.gopls.as_deref()),
     ] {
-        let (command, source) = match configured {
-            Some(p) => (p.to_string(), "config/env"),
-            None => (name.to_string(), "PATH"),
-        };
-        let entry = match preflight_binary(&command, &ws) {
+        let probe = hades_core::code::lsp::resolve_and_probe(name, configured, &ws);
+        let entry = match probe.outcome {
             Ok(version) => json!({
-                "command": command, "source": source, "ok": true, "version": version,
+                "command": probe.command, "source": probe.source, "ok": true,
+                "version": version,
             }),
             Err(e) => {
-                all_ok = false;
+                if probe.configured {
+                    fatal = true;
+                }
                 json!({
-                    "command": command, "source": source, "ok": false,
-                    "error": e.to_string(),
+                    "command": probe.command, "source": probe.source, "ok": false,
+                    "fatal": probe.configured, "error": e,
                 })
             }
         };
@@ -76,11 +80,11 @@ pub fn run_status(config: &HadesConfig, workspace: Option<PathBuf>) -> Result<()
         "tools.status",
         json!({ "workspace": ws.display().to_string(), "analyzers": report }),
         &OutputFormat::Json,
-        all_ok,
+        !fatal,
     );
-    if !all_ok {
+    if fatal {
         anyhow::bail!(
-            "one or more analyzers failed the probe from {}",
+            "a configured analyzer failed its probe from {}",
             ws.display()
         );
     }

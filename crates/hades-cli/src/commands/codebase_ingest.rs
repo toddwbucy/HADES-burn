@@ -177,18 +177,12 @@ pub async fn run(
     // so an analyzer that cannot run must stop the ingest up front — after
     // the purge is too late (#164). `--allow-analysis-downgrade` is the
     // explicit override, matching its existing fidelity semantics.
-    let needs_rust = files.iter().any(|f| {
-        matches!(
-            Language::from_path(&f.to_string_lossy()),
-            Some(Language::Rust)
-        )
-    });
-    let needs_go = files.iter().any(|f| {
-        matches!(
-            Language::from_path(&f.to_string_lossy()),
-            Some(Language::Go)
-        )
-    });
+    let needs_rust = files
+        .iter()
+        .any(|f| is_semantic_target(f, lang_override, &unparsed_set, Language::Rust, "rs"));
+    let needs_go = files
+        .iter()
+        .any(|f| is_semantic_target(f, lang_override, &unparsed_set, Language::Go, "go"));
     let rust_analyzer_cmd = if needs_rust {
         preflight_or_bail(
             "rust-analyzer",
@@ -260,15 +254,21 @@ pub async fn run(
                 .as_deref()
                 .is_some_and(|e| unparsed_set.contains(e));
 
-        // Track Rust files for rust-analyzer post-loop enrichment (parsed only).
-        let is_rust = !is_unparsed
-            && (lang_override == Some(Language::Rust) || file_ext.as_deref() == Some("rs"));
-        if is_rust {
+        // Track Rust/Go files for post-loop semantic enrichment (parsed only).
+        // Uses the SAME predicate as the preflight gate above, so the set the
+        // gate protects and the set the phases process cannot diverge — a
+        // divergence here is exactly how `--language rust` on non-.rs files
+        // would skip the preflight and silently lose enrichment (#164).
+        if is_semantic_target(
+            file_path,
+            lang_override,
+            &unparsed_set,
+            Language::Rust,
+            "rs",
+        ) {
             rust_abs_paths.push(file_path.clone());
         }
-        let is_go = !is_unparsed
-            && (lang_override == Some(Language::Go) || file_ext.as_deref() == Some("go"));
-        if is_go {
+        if is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go") {
             go_abs_paths.push(file_path.clone());
         }
 
@@ -477,6 +477,22 @@ pub async fn run(
     } else {
         SemanticLspStats::default()
     };
+
+    // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
+    // files ingested and zero modules analyzed is silent semantic loss, not
+    // success.
+    if !go_abs_paths.is_empty()
+        && gopls_cmd.is_some()
+        && gopls_stats.workspaces == 0
+        && !allow_analysis_downgrade
+    {
+        anyhow::bail!(
+            "gopls enrichment produced nothing across {} Go file(s) despite a \
+             passing preflight. Investigate the session logs above, or pass \
+             --allow-analysis-downgrade to accept the loss explicitly.",
+            go_abs_paths.len()
+        );
+    }
 
     // Output summary.
     let total = results.len();
@@ -2176,14 +2192,11 @@ fn preflight_or_bail(
     workspace: &Path,
     allow_analysis_downgrade: bool,
 ) -> Result<Option<String>> {
-    let (command, source) = match configured {
-        Some(path) => (path.to_string(), "config/env"),
-        None => (name.to_string(), "PATH"),
-    };
-    match hades_core::code::lsp::preflight_binary(&command, workspace) {
+    let probe = hades_core::code::lsp::resolve_and_probe(name, configured, workspace);
+    match probe.outcome {
         Ok(version) => {
-            info!(analyzer = name, %version, source, "analyzer preflight passed");
-            Ok(Some(command))
+            info!(analyzer = name, %version, source = probe.source, "analyzer preflight passed");
+            Ok(Some(probe.command))
         }
         Err(e) if allow_analysis_downgrade => {
             warn!(
@@ -2202,9 +2215,32 @@ fn preflight_or_bail(
              <the workspace's pinned toolchain>`), pin a binary in hades.yaml \
              under `analyzers.{}`, or pass --allow-analysis-downgrade to \
              proceed without semantic enrichment.",
-            name.replace('-', "_")
+            name.replace('-', "_"),
+            source = probe.source,
         ),
     }
+}
+
+/// Is `path` a target for semantic enrichment in `want` language?
+///
+/// The ONE predicate shared by the preflight gate and the per-file tracking
+/// loop, so the set the gate protects and the set the phases process cannot
+/// diverge. The language override counts (matching the loop's historical
+/// behavior), and unparsed-allowlisted files never count.
+fn is_semantic_target(
+    path: &Path,
+    lang_override: Option<Language>,
+    unparsed_set: &std::collections::HashSet<String>,
+    want: Language,
+    want_ext: &str,
+) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    let is_unparsed = Language::from_path(&path.to_string_lossy()).is_none()
+        && ext.as_deref().is_some_and(|e| unparsed_set.contains(e));
+    !is_unparsed && (lang_override == Some(want) || ext.as_deref() == Some(want_ext))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

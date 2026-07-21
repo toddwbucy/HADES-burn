@@ -500,8 +500,9 @@ impl Default for LoggingConfig {
 
 /// Paths to external analyzer binaries used by `codebase ingest` enrichment.
 ///
-/// Resolution order per analyzer: this config -> the environment override ->
-/// the PATH lookup. A configured path is used verbatim (no PATH search), which
+/// Resolution order per analyzer: the environment override, then this
+/// config, then the PATH lookup (env overrides are applied after the YAML
+/// loads, so the env value wins). A configured path is used verbatim (no PATH search), which
 /// is what makes enrichment deterministic across machines — the rustup shim on
 /// PATH resolves per-directory via rust-toolchain.toml, so "is rust-analyzer
 /// installed" has no directory-independent answer without a pin (#167).

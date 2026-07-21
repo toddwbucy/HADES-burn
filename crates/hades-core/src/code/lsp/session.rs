@@ -413,16 +413,21 @@ mod tests {
 /// anywhere else validates the wrong toolchain (#164, observed three ways in
 /// two days). Failures carry the binary's own stderr so the operator sees the
 /// shim's actual message.
-pub fn preflight_binary(command: &str, workspace: &std::path::Path) -> Result<String, LspError> {
+pub fn preflight_binary(
+    command: &str,
+    version_args: &[&str],
+    workspace: &std::path::Path,
+) -> Result<String, LspError> {
     let out = std::process::Command::new(command)
-        .arg("--version")
+        .args(version_args)
         .current_dir(workspace)
         .output()
         .map_err(|e| LspError::Process(format!("failed to spawn {command}: {e}")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(LspError::Process(format!(
-            "{command} --version failed (run from {}): {}",
+            "{command} {} failed (run from {}): {}",
+            version_args.join(" "),
             workspace.display(),
             err.trim()
         )));
@@ -430,14 +435,64 @@ pub fn preflight_binary(command: &str, workspace: &std::path::Path) -> Result<St
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The version invocation each analyzer understands. gopls has no
+/// `--version` flag — its form is the `version` subcommand ("flag provided
+/// but not defined: -version", verified against a live gopls v0.21.0 and
+/// matching the probe in tests/gopls_semantic.rs). Getting this wrong fails
+/// the preflight on a WORKING analyzer, which blocks ingest for the wrong
+/// reason.
+pub fn version_args_for(analyzer: &str) -> &'static [&'static str] {
+    match analyzer {
+        "gopls" => &["version"],
+        _ => &["--version"],
+    }
+}
+
+/// One analyzer's resolution and live probe result.
+pub struct AnalyzerStatus {
+    /// The command that will actually be spawned.
+    pub command: String,
+    /// Where it came from: "config/env" (pinned) or "PATH".
+    pub source: &'static str,
+    /// Whether it was explicitly pinned by the operator.
+    pub configured: bool,
+    /// Version line on success, the probe's error on failure.
+    pub outcome: Result<String, String>,
+}
+
+/// Resolve an analyzer (pin wins over PATH) and probe it from `workspace`.
+///
+/// The single shared implementation for both the ingest preflight and
+/// `hades tools status`, so the two cannot drift on resolution order or
+/// version-invocation form.
+pub fn resolve_and_probe(
+    analyzer: &str,
+    configured: Option<&str>,
+    workspace: &std::path::Path,
+) -> AnalyzerStatus {
+    let (command, source, is_pinned) = match configured {
+        Some(p) => (p.to_string(), "config/env", true),
+        None => (analyzer.to_string(), "PATH", false),
+    };
+    let outcome = preflight_binary(&command, version_args_for(analyzer), workspace)
+        .map_err(|e| e.to_string());
+    AnalyzerStatus {
+        command,
+        source,
+        configured: is_pinned,
+        outcome,
+    }
+}
+
 #[cfg(test)]
 mod preflight_tests {
-    use super::preflight_binary;
+    use super::{preflight_binary, resolve_and_probe, version_args_for};
 
     #[test]
     fn preflight_reports_missing_binary() {
         let err = preflight_binary(
             "definitely-not-a-real-analyzer",
+            &["--version"],
             std::path::Path::new("/tmp"),
         );
         assert!(err.is_err(), "a nonexistent binary must fail the preflight");
@@ -445,8 +500,48 @@ mod preflight_tests {
 
     #[test]
     fn preflight_accepts_a_working_binary() {
-        let v =
-            preflight_binary("rustc", std::path::Path::new("/tmp")).expect("rustc must preflight");
+        let v = preflight_binary("rustc", &["--version"], std::path::Path::new("/tmp"))
+            .expect("rustc must preflight");
         assert!(v.contains("rustc"), "version line captured: {v}");
+    }
+
+    #[test]
+    fn gopls_uses_the_version_subcommand_form() {
+        assert_eq!(version_args_for("gopls"), &["version"]);
+        assert_eq!(version_args_for("rust-analyzer"), &["--version"]);
+    }
+
+    /// A binary that rejects `--version` but accepts `version` — the gopls
+    /// shape — must preflight with the right form and fail with the wrong
+    /// one. Uses a script so the test needs no gopls installed.
+    #[test]
+    fn subcommand_only_binary_preflights_with_the_right_form() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-gopls");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = version ]; then echo fake v1; exit 0; fi\necho 'flag provided but not defined' >&2; exit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cmd = script.to_string_lossy();
+
+        let ok = preflight_binary(&cmd, &["version"], dir.path());
+        assert!(ok.is_ok(), "subcommand form must pass: {ok:?}");
+        let bad = preflight_binary(&cmd, &["--version"], dir.path());
+        assert!(bad.is_err(), "flag form must fail on a gopls-shaped binary");
+    }
+
+    #[test]
+    fn resolution_reports_pin_vs_path() {
+        let pinned = resolve_and_probe(
+            "rust-analyzer",
+            Some("/nonexistent/ra"),
+            std::path::Path::new("/tmp"),
+        );
+        assert!(pinned.configured && pinned.source == "config/env" && pinned.outcome.is_err());
+        let path = resolve_and_probe("rustc", None, std::path::Path::new("/tmp"));
+        assert!(!path.configured && path.source == "PATH" && path.outcome.is_ok());
     }
 }

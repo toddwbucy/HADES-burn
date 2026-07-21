@@ -345,6 +345,13 @@ fn main() -> anyhow::Result<()> {
                 full,
             ))
         }
+        Commands::Tools(ToolsCmd::Install {
+            ref tool,
+            ref version,
+        }) => {
+            init_tracing();
+            commands::tools::run_install(tool, version.as_deref())
+        }
         Commands::Tools(ToolsCmd::Status { workspace }) => {
             init_tracing();
             commands::tools::run_status(&config, workspace)

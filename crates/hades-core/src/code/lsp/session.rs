@@ -452,7 +452,8 @@ pub fn version_args_for(analyzer: &str) -> &'static [&'static str] {
 pub struct AnalyzerStatus {
     /// The command that will actually be spawned.
     pub command: String,
-    /// Where it came from: "config/env" (pinned) or "PATH".
+    /// Where it came from: "config/env" (pinned), "managed" (the HADES
+    /// tools directory), or "PATH".
     pub source: &'static str,
     /// Whether it was explicitly pinned by the operator.
     pub configured: bool,
@@ -460,19 +461,51 @@ pub struct AnalyzerStatus {
     pub outcome: Result<String, String>,
 }
 
-/// Resolve an analyzer (pin wins over PATH) and probe it from `workspace`.
+/// The HADES-managed tools directory: `HADES_TOOLS_DIR` if set, else
+/// `~/.local/share/hades/tools`. Binaries here are standalone release
+/// builds installed by `hades tools install` — not rustup shims — so
+/// they resolve identically from every directory (#167).
+pub fn managed_tools_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("HADES_TOOLS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    std::path::Path::new(&home).join(".local/share/hades/tools")
+}
+
+/// The managed binary for `analyzer`, if one is installed.
+fn managed_tool_in(dir: &std::path::Path, analyzer: &str) -> Option<std::path::PathBuf> {
+    let path = dir.join(analyzer);
+    path.is_file().then_some(path)
+}
+
+/// Resolve an analyzer and probe it from `workspace`.
 ///
-/// The single shared implementation for both the ingest preflight and
-/// `hades tools status`, so the two cannot drift on resolution order or
-/// version-invocation form.
+/// Resolution order, strict: operator pin (config/env) → HADES-managed
+/// tools directory → bare `PATH`. The single shared implementation for
+/// both the ingest preflight and `hades tools status`, so the two cannot
+/// drift on resolution order or version-invocation form.
 pub fn resolve_and_probe(
     analyzer: &str,
     configured: Option<&str>,
     workspace: &std::path::Path,
 ) -> AnalyzerStatus {
+    resolve_and_probe_in(analyzer, configured, &managed_tools_dir(), workspace)
+}
+
+/// [`resolve_and_probe`] with an explicit managed dir, for tests.
+fn resolve_and_probe_in(
+    analyzer: &str,
+    configured: Option<&str>,
+    managed_dir: &std::path::Path,
+    workspace: &std::path::Path,
+) -> AnalyzerStatus {
     let (command, source, is_pinned) = match configured {
         Some(p) => (p.to_string(), "config/env", true),
-        None => (analyzer.to_string(), "PATH", false),
+        None => match managed_tool_in(managed_dir, analyzer) {
+            Some(p) => (p.to_string_lossy().into_owned(), "managed", false),
+            None => (analyzer.to_string(), "PATH", false),
+        },
     };
     let outcome = preflight_binary(&command, version_args_for(analyzer), workspace)
         .map_err(|e| e.to_string());
@@ -486,7 +519,48 @@ pub fn resolve_and_probe(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::{preflight_binary, resolve_and_probe, version_args_for};
+    use super::{preflight_binary, resolve_and_probe, resolve_and_probe_in, version_args_for};
+
+    /// A managed-dir binary wins over PATH but loses to an explicit pin.
+    #[test]
+    #[cfg(unix)]
+    fn managed_dir_sits_between_pin_and_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let managed = dir.path().join("rust-analyzer");
+        std::fs::write(&managed, "#!/bin/sh\necho managed-ra 1.0\n").unwrap();
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // No pin → managed wins over PATH.
+        let s = resolve_and_probe_in(
+            "rust-analyzer",
+            None,
+            dir.path(),
+            std::path::Path::new("/tmp"),
+        );
+        assert_eq!(s.source, "managed");
+        assert_eq!(s.outcome.as_deref(), Ok("managed-ra 1.0"));
+
+        // Pin present → pin wins even with a managed binary installed.
+        let s = resolve_and_probe_in(
+            "rust-analyzer",
+            Some("/nonexistent/pinned-ra"),
+            dir.path(),
+            std::path::Path::new("/tmp"),
+        );
+        assert_eq!(s.source, "config/env");
+        assert!(s.configured && s.outcome.is_err());
+
+        // Managed dir without the binary → falls through to PATH.
+        let empty = tempfile::tempdir().expect("tempdir");
+        let s = resolve_and_probe_in(
+            "rust-analyzer",
+            None,
+            empty.path(),
+            std::path::Path::new("/tmp"),
+        );
+        assert_eq!(s.source, "PATH");
+    }
 
     #[test]
     fn preflight_reports_missing_binary() {

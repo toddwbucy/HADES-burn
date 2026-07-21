@@ -32,12 +32,15 @@ use super::mcp_server;
 /// Options for the optional LAN MCP endpoint (#155).
 #[derive(Debug, Clone)]
 pub struct McpOptions {
-    /// Explicit bind address, e.g. `192.168.0.10:8088`. Must be loopback
-    /// or RFC1918 — validated before any socket opens.
+    /// Explicit bind address, e.g. `192.168.0.10:8088`. Must be loopback,
+    /// RFC1918, or IPv6 unique-local — validated before any socket opens.
     pub bind: String,
     /// Bearer-token file (one token per line). Required; the endpoint
     /// never serves unauthenticated.
     pub token_file: std::path::PathBuf,
+    /// Databases served in addition to the configured default. The
+    /// endpoint refuses any database not on this list.
+    pub extra_dbs: Vec<String>,
 }
 
 /// Default socket path per the daemon protocol spec.
@@ -76,14 +79,15 @@ pub async fn run(
                 .with_context(|| format!("invalid MCP bind address '{}'", opts.bind))?;
             mcp_server::ensure_private_bind(&addr)?;
             let tokens = mcp_server::TokenSet::load(&opts.token_file)?;
+            // Build the full app before spawning: router/pool-cache
+            // failures stop daemon startup here instead of dying silently
+            // in a background task.
+            let app = mcp_server::build_app(&addr, (*config).clone(), tokens, &opts.extra_dbs)?;
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
                 .with_context(|| format!("failed to bind MCP endpoint {addr}"))?;
-            let mcp_config = (*config).clone();
             let token = mcp_shutdown.clone();
-            Some(tokio::spawn(mcp_server::serve(
-                listener, mcp_config, tokens, token,
-            )))
+            Some(tokio::spawn(mcp_server::serve_app(listener, app, token)))
         }
         None => None,
     };

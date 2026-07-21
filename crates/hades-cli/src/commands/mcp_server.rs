@@ -141,20 +141,24 @@ async fn require_bearer(
 // Bind policy
 // ---------------------------------------------------------------------------
 
-/// Refuse to serve on anything but a loopback or RFC1918 address. The
-/// LAN endpoint is plain HTTP with bearer tokens — acceptable only inside
-/// the explicitly trusted network, so a public or wildcard bind is a
-/// configuration error, not a choice.
+/// Refuse to serve on anything but a loopback, RFC1918, or IPv6
+/// unique-local (fc00::/7) address. The LAN endpoint is plain HTTP with
+/// bearer tokens — acceptable only inside the explicitly trusted
+/// network, so a public or wildcard bind is a configuration error, not
+/// a choice.
 pub fn ensure_private_bind(addr: &SocketAddr) -> Result<()> {
     let ip = addr.ip();
     let ok = match ip {
         std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        // `Ipv6Addr::is_unique_local` is unstable in std; check fc00::/7
+        // directly.
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     };
     anyhow::ensure!(
         ok,
-        "refusing to bind MCP endpoint to {ip}: bind a loopback or RFC1918 LAN address \
-         explicitly (wildcard and public addresses are not served — see #155 security boundary)"
+        "refusing to bind MCP endpoint to {ip}: bind a loopback, RFC1918, or IPv6 \
+         unique-local address explicitly (wildcard and public addresses are not \
+         served — see #155 security boundary)"
     );
     Ok(())
 }
@@ -163,32 +167,48 @@ pub fn ensure_private_bind(addr: &SocketAddr) -> Result<()> {
 // Per-database pool cache
 // ---------------------------------------------------------------------------
 
-/// Lazily-built (config, pool) pairs per database name.
-///
-/// The Unix daemon serves its one configured database; the MCP tools take
-/// an optional `db` so one endpoint can serve both the knowledge graph
-/// and the task board. ArangoDB ACLs on the `hades` user decide what each
-/// database actually permits.
 /// One database's dispatch context: the config and pool handed to
 /// `service::handle_request` for requests targeting that database.
 type DbEntry = (Arc<HadesConfig>, Arc<ArangoPool>);
 
+/// Lazily-built (config, pool) pairs per database name, scoped by an
+/// explicit allowlist.
+///
+/// The Unix daemon serves its one configured database; the MCP tools
+/// take an optional `db` so one endpoint can serve both the knowledge
+/// graph and the task board. The allowlist defaults to the configured
+/// database alone — parity with the Unix socket — and widens only via
+/// `--mcp-dbs`. Without it, an authenticated LAN agent could read every
+/// database the `hades` ArangoDB user can reach, including production
+/// research databases that are ro-readable by design. ArangoDB ACLs
+/// remain the write gate; the allowlist scopes remote *reads*.
 struct PoolCache {
     base_config: HadesConfig,
     default_db: String,
+    allowed: std::collections::HashSet<String>,
     pools: RwLock<HashMap<String, DbEntry>>,
 }
 
 impl PoolCache {
-    fn new(base_config: HadesConfig) -> Result<Self> {
+    fn new(base_config: HadesConfig, extra_dbs: &[String]) -> Result<Self> {
         let default_db = base_config
             .database
             .name
             .clone()
             .context("MCP endpoint requires a configured default database")?;
+        let mut allowed: std::collections::HashSet<String> = extra_dbs.iter().cloned().collect();
+        allowed.insert(default_db.clone());
+        for name in &allowed {
+            anyhow::ensure!(
+                is_valid_db_name(name),
+                "invalid database name '{name}' in MCP allowlist: \
+                 expected [A-Za-z0-9_-], max 64 chars"
+            );
+        }
         Ok(Self {
             base_config,
             default_db,
+            allowed,
             pools: RwLock::new(HashMap::new()),
         })
     }
@@ -200,7 +220,22 @@ impl PoolCache {
                 "invalid database name '{name}': expected [A-Za-z0-9_-], max 64 chars"
             ));
         }
+        if !self.allowed.contains(name) {
+            let mut served: Vec<&str> = self.allowed.iter().map(String::as_str).collect();
+            served.sort_unstable();
+            return Err(format!(
+                "database '{name}' is not served by this endpoint (served: {}); \
+                 add it to --mcp-dbs on the daemon to expose it",
+                served.join(", ")
+            ));
+        }
         if let Some(entry) = self.pools.read().await.get(name) {
+            return Ok(entry.clone());
+        }
+        // Re-check under the write lock so concurrent first-hits for the
+        // same database build one pool, not two.
+        let mut pools = self.pools.write().await;
+        if let Some(entry) = pools.get(name) {
             return Ok(entry.clone());
         }
         let mut config = self.base_config.clone();
@@ -208,10 +243,7 @@ impl PoolCache {
         let pool = ArangoPool::from_config(&config)
             .map_err(|e| format!("failed to open database '{name}': {e}"))?;
         let entry = (Arc::new(config), Arc::new(pool));
-        self.pools
-            .write()
-            .await
-            .insert(name.to_string(), entry.clone());
+        pools.insert(name.to_string(), entry.clone());
         Ok(entry)
     }
 }
@@ -684,8 +716,9 @@ fn build_router(
     config: HadesConfig,
     tokens: Arc<TokenSet>,
     allowed_hosts: Vec<String>,
+    extra_dbs: &[String],
 ) -> Result<Router> {
-    let pools = Arc::new(PoolCache::new(config)?);
+    let pools = Arc::new(PoolCache::new(config, extra_dbs)?);
     let mcp_service: StreamableHttpService<HadesMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(HadesMcpServer::new(pools.clone())),
@@ -706,17 +739,16 @@ fn build_router(
         .merge(mcp_router))
 }
 
-/// Serve the MCP endpoint until the cancellation token fires.
-///
-/// The caller has already validated the bind address and loaded tokens —
-/// both fail-closed before any socket opens.
-pub async fn serve(
-    listener: tokio::net::TcpListener,
+/// Build the full application for a bound listener: host allowlist from
+/// the bind address, bearer gate, pool cache. Fallible — call this
+/// BEFORE spawning the serve task so a bad configuration stops daemon
+/// startup instead of dying silently in a background task.
+pub fn build_app(
+    addr: &SocketAddr,
     config: HadesConfig,
     tokens: TokenSet,
-    shutdown: CancellationToken,
-) -> Result<()> {
-    let addr = listener.local_addr().context("mcp listener local_addr")?;
+    extra_dbs: &[String],
+) -> Result<Router> {
     // Host allowlist: localhost forms for on-box clients, plus the bind
     // address itself for LAN clients (a port-less entry matches any port).
     let allowed_hosts = vec![
@@ -725,7 +757,16 @@ pub async fn serve(
         "::1".to_string(),
         addr.ip().to_string(),
     ];
-    let app = build_router(config, Arc::new(tokens), allowed_hosts)?;
+    build_router(config, Arc::new(tokens), allowed_hosts, extra_dbs)
+}
+
+/// Serve a pre-built application until the cancellation token fires.
+pub async fn serve_app(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let addr = listener.local_addr().context("mcp listener local_addr")?;
     tracing::info!(%addr, "mcp endpoint listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled_owned().await })
@@ -757,6 +798,7 @@ mod tests {
             test_config(),
             Arc::new(TokenSet::from_tokens(vec!["tok".into()])),
             vec!["127.0.0.1".to_string(), "localhost".to_string()],
+            &[],
         )
         .unwrap()
     }
@@ -804,6 +846,7 @@ mod tests {
             "192.168.0.10:8088",
             "10.1.2.3:8088",
             "[::1]:8088",
+            "[fd00::1]:8088",
         ] {
             let addr: SocketAddr = good.parse().unwrap();
             assert!(
@@ -827,6 +870,28 @@ mod tests {
                 "{bad} should be refused"
             );
         }
+    }
+
+    // --- database allowlist ------------------------------------------------
+
+    #[tokio::test]
+    async fn db_allowlist_defaults_to_configured_database_only() {
+        let cache = PoolCache::new(test_config(), &[]).unwrap();
+        // Default database resolves.
+        assert!(cache.entry_for(None).await.is_ok());
+        assert!(cache.entry_for(Some("bident_burn")).await.is_ok());
+        // Anything else — including a ro-readable production name — is
+        // refused before any pool is built.
+        let err = cache.entry_for(Some("NestedLearning")).await.unwrap_err();
+        assert!(err.contains("not served"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn db_allowlist_widens_only_via_explicit_list() {
+        let cache = PoolCache::new(test_config(), &["weavertools_v2".to_string()]).unwrap();
+        assert!(cache.entry_for(Some("weavertools_v2")).await.is_ok());
+        assert!(cache.entry_for(Some("bident_burn")).await.is_ok());
+        assert!(cache.entry_for(Some("NestedLearning")).await.is_err());
     }
 
     // --- database names ----------------------------------------------------
@@ -931,6 +996,7 @@ mod tests {
             test_config(),
             Arc::new(TokenSet::from_tokens(vec!["tok".into()])),
             vec!["192.168.0.10".to_string()],
+            &[],
         )
         .unwrap();
         let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#;

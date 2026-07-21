@@ -187,6 +187,12 @@ enum Commands {
         /// Bearer-token file for the MCP endpoint (one token per line).
         #[arg(long, env = "HADES_MCP_TOKEN_FILE")]
         mcp_token_file: Option<std::path::PathBuf>,
+
+        /// Databases the MCP endpoint serves in addition to the
+        /// configured default (comma-separated). Anything not listed is
+        /// refused — remote reads are scoped, writes stay ACL-gated.
+        #[arg(long, env = "HADES_MCP_DBS", value_delimiter = ',')]
+        mcp_dbs: Vec<String>,
     },
 }
 
@@ -455,12 +461,15 @@ fn main() -> anyhow::Result<()> {
             socket,
             mcp_bind,
             mcp_token_file,
+            mcp_dbs,
         } => {
             init_tracing();
             let mcp = match (mcp_bind, mcp_token_file) {
-                (Some(bind), Some(token_file)) => {
-                    Some(commands::daemon::McpOptions { bind, token_file })
-                }
+                (Some(bind), Some(token_file)) => Some(commands::daemon::McpOptions {
+                    bind,
+                    token_file,
+                    extra_dbs: mcp_dbs,
+                }),
                 (Some(_), None) => anyhow::bail!(
                     "--mcp-bind requires --mcp-token-file (or HADES_MCP_TOKEN_FILE): \
                      the MCP endpoint never serves unauthenticated"

@@ -102,7 +102,7 @@ tier any request on that connection may run at:
 | Transport                 | Policy ceiling | Default when `session` omitted |
 |---------------------------|----------------|--------------------------------|
 | Unix socket (local)       | `admin`        | `admin`                        |
-| Network endpoints (future)| `agent`        | `agent`                        |
+| MCP LAN endpoint (`--mcp-bind`) | `agent`  | `agent`                        |
 
 The request's `session` field is advisory self-restriction only: a client
 may declare `"agent"` to run below its ceiling, but requesting a tier above

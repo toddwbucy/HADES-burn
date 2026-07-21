@@ -35,6 +35,12 @@ thiserror = "2"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
+# HTTP server (LAN MCP endpoint) + MCP SDK
+axum = "0.8"
+rmcp = { version = "2.2", features = ["server", "transport-streamable-http-server"] }
+schemars = "1.1"
+tower = { version = "0.5", features = ["util"] }
+
 # HTTP client (Unix socket via hyperlocal, TCP via hyper-util)
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
@@ -75,7 +81,6 @@ tonic-build = "0.13"
 hades-proto = { path = "crates/hades-proto" }
 
 # Tower middleware
-tower = "0.5"
 
 # HTTP client (high-level)
 reqwest = { version = "0.12", features = ["json", "stream"] }

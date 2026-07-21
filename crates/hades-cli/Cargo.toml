@@ -23,6 +23,12 @@ anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 ignore.workspace = true
+axum.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tower.workspace = true
+http-body-util.workspace = true

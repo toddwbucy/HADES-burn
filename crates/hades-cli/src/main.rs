@@ -173,11 +173,20 @@ enum Commands {
     #[command(subcommand)]
     Tools(ToolsCmd),
 
-    /// Start the HADES daemon (Unix socket query server).
+    /// Start the HADES daemon (Unix socket query server, optional LAN MCP endpoint).
     Daemon {
         /// Socket path (default: /run/hades/hades.sock).
         #[arg(long)]
         socket: Option<String>,
+
+        /// Serve the MCP endpoint on this address (loopback or RFC1918
+        /// only, e.g. 192.168.0.10:8088). Requires --mcp-token-file.
+        #[arg(long, env = "HADES_MCP_BIND")]
+        mcp_bind: Option<String>,
+
+        /// Bearer-token file for the MCP endpoint (one token per line).
+        #[arg(long, env = "HADES_MCP_TOKEN_FILE")]
+        mcp_token_file: Option<std::path::PathBuf>,
     },
 }
 
@@ -442,10 +451,27 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(commands::schema::run_apply(&config, &file, dry_run, force))
         }
-        Commands::Daemon { socket } => {
+        Commands::Daemon {
+            socket,
+            mcp_bind,
+            mcp_token_file,
+        } => {
             init_tracing();
+            let mcp = match (mcp_bind, mcp_token_file) {
+                (Some(bind), Some(token_file)) => {
+                    Some(commands::daemon::McpOptions { bind, token_file })
+                }
+                (Some(_), None) => anyhow::bail!(
+                    "--mcp-bind requires --mcp-token-file (or HADES_MCP_TOKEN_FILE): \
+                     the MCP endpoint never serves unauthenticated"
+                ),
+                (None, Some(_)) => {
+                    anyhow::bail!("--mcp-token-file requires --mcp-bind (or HADES_MCP_BIND)")
+                }
+                (None, None) => None,
+            };
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(commands::daemon::run(&config, socket.as_deref()))
+            rt.block_on(commands::daemon::run(&config, socket.as_deref(), mcp))
         }
         // ── Native DB search (vector + optional hybrid + optional structural)
         Commands::Db(commands::db::DbCmd::Query {

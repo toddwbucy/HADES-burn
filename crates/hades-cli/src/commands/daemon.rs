@@ -27,6 +27,19 @@ use hades_core::db::ArangoPool;
 use hades_core::dispatch::DaemonResponse;
 use hades_core::service::{self, ConnectionPolicy};
 
+use super::mcp_server;
+
+/// Options for the optional LAN MCP endpoint (#155).
+#[derive(Debug, Clone)]
+pub struct McpOptions {
+    /// Explicit bind address, e.g. `192.168.0.10:8088`. Must be loopback
+    /// or RFC1918 — validated before any socket opens.
+    pub bind: String,
+    /// Bearer-token file (one token per line). Required; the endpoint
+    /// never serves unauthenticated.
+    pub token_file: std::path::PathBuf,
+}
+
 /// Default socket path per the daemon protocol spec.
 const DEFAULT_SOCKET: &str = "/run/hades/hades.sock";
 /// Maximum payload size (16 MiB, per protocol spec).
@@ -40,11 +53,40 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run the HADES daemon, listening on a Unix domain socket.
-pub async fn run(config: &HadesConfig, socket_path: Option<&str>) -> Result<()> {
+/// Run the HADES daemon: always the Unix domain socket listener, plus
+/// the LAN MCP endpoint when explicitly enabled.
+pub async fn run(
+    config: &HadesConfig,
+    socket_path: Option<&str>,
+    mcp: Option<McpOptions>,
+) -> Result<()> {
     let socket = socket_path.unwrap_or(DEFAULT_SOCKET);
     let pool = Arc::new(ArangoPool::from_config(config).context("failed to connect to ArangoDB")?);
     let config = Arc::new(config.clone());
+
+    // Fail-closed MCP startup: bind policy and tokens are validated
+    // before either listener opens, so a misconfigured network endpoint
+    // stops the daemon rather than silently serving without it.
+    let mcp_shutdown = tokio_util::sync::CancellationToken::new();
+    let mcp_task = match mcp {
+        Some(opts) => {
+            let addr: std::net::SocketAddr = opts
+                .bind
+                .parse()
+                .with_context(|| format!("invalid MCP bind address '{}'", opts.bind))?;
+            mcp_server::ensure_private_bind(&addr)?;
+            let tokens = mcp_server::TokenSet::load(&opts.token_file)?;
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("failed to bind MCP endpoint {addr}"))?;
+            let mcp_config = (*config).clone();
+            let token = mcp_shutdown.clone();
+            Some(tokio::spawn(mcp_server::serve(
+                listener, mcp_config, tokens, token,
+            )))
+        }
+        None => None,
+    };
 
     // Clean up stale socket — but only after verifying it's actually a socket
     // and that no live daemon is listening on it.
@@ -96,6 +138,16 @@ pub async fn run(config: &HadesConfig, socket_path: Option<&str>) -> Result<()> 
     // Cleanup socket file.
     let _ = std::fs::remove_file(socket);
     tracing::info!("socket removed, daemon stopped");
+
+    // Gracefully stop the MCP endpoint, if running.
+    if let Some(task) = mcp_task {
+        mcp_shutdown.cancel();
+        match tokio::time::timeout(Duration::from_secs(5), task).await {
+            Ok(Ok(result)) => result?,
+            Ok(Err(join_err)) => tracing::warn!(error = %join_err, "mcp task join error"),
+            Err(_) => tracing::warn!("mcp endpoint did not stop within 5s"),
+        }
+    }
     Ok(())
 }
 

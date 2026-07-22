@@ -498,6 +498,20 @@ pub async fn run(
         SemanticLspStats::default()
     };
 
+    // Same store-vs-analysis attribution as the rust-analyzer path (#180):
+    // gopls analyzed its modules but the results never reached ArangoDB, so
+    // exiting 0 would silently lose the Go calls/implements layer.
+    if gopls_stats.store_failed && !allow_analysis_downgrade {
+        anyhow::bail!(
+            "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
+             failed (see the store warnings above for the database error). The \
+             graph keeps Tree-sitter symbols but loses calls/implements edges. \
+             Fix the store error and re-run, or pass --allow-analysis-downgrade \
+             to accept the loss explicitly.",
+            gopls_stats.workspaces
+        );
+    }
+
     // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
     // files ingested and zero modules analyzed is silent semantic loss, not
     // success.
@@ -1901,7 +1915,10 @@ async fn store_lsp_extractions(
                         "ArangoDB rejected some symbol documents (first 5 reasons shown)"
                     );
                 }
-                info!(count = stored_symbols, analyzer, "stored LSP symbol documents");
+                info!(
+                    count = stored_symbols,
+                    analyzer, "stored LSP symbol documents"
+                );
             }
             Err(e) => {
                 // Request-level failure: nothing was stored. Keep the analysis

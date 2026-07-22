@@ -84,6 +84,12 @@ pub fn file_key(rel_path: &str) -> String {
 ///
 /// Format: `{file_key}__{readable}__{hash8}`
 ///
+/// The readable prefix is guaranteed ArangoDB-legal: characters that ArangoDB
+/// rejects in `_key` (e.g. `& [ ] #`, non-ASCII) are replaced with `_`, and
+/// the prefix is truncated so the full key stays within ArangoDB's 254-byte
+/// `_key` limit (issue #180). Keys that were previously storable are
+/// unchanged by this sanitization.
+///
 /// `line` is the symbol's 1-based definition line. It disambiguates symbols
 /// that share a qualified name within one file -- e.g. `impl Foo { fn new }` in
 /// sibling inline modules, whose qualified name collapses to `Foo::new` (the
@@ -100,10 +106,31 @@ pub fn file_key(rel_path: &str) -> String {
 /// assert_eq!(key.len(), "src_lib_rs__Config__new__".len() + 8);
 /// ```
 pub fn symbol_key(file_key: &str, qualified_name: &str, line: usize) -> String {
-    // Readable prefix: replace :: with __, strip only ArangoDB-invalid chars.
-    let readable = qualified_name
+    // Readable prefix: replace :: with __, then keep only characters that are
+    // both ArangoDB-legal AND survived the historical sanitizer. ArangoDB `_key`
+    // allows ASCII alphanumerics plus `_ - : . @ ( ) + , = ; $ ! * ' %`; of
+    // those, `: ' ( ) ,` (and space, `< > "`) were already replaced before
+    // issue #180, so they stay replaced to keep existing keys byte-identical.
+    // Everything else — `& [ ] # { }`, non-ASCII, etc. — maps to `_` because it
+    // would 400 the import with error 1221 (illegal document key). Characters
+    // in the keep-set could never produce an illegal key, and characters
+    // outside it could never have been stored, so no stored key changes.
+    let mut readable: String = qualified_name
         .replace("::", "__")
-        .replace(['<', '>', ' ', ',', ':', '\'', '"', '(', ')'], "_");
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '_' | '-' | '.' | '@' | '+' | '=' | ';' | '$' | '!' | '*' | '%'
+                )
+            {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
 
     // Deterministic 8-char hex hash of the qualified name plus the definition
     // line. The line is what makes two same-qualified-name symbols in one file
@@ -114,10 +141,41 @@ pub fn symbol_key(file_key: &str, qualified_name: &str, line: usize) -> String {
     // Fixed-width u64 encoding so keys are identical across architectures
     // (usize::to_le_bytes() is 8 bytes on 64-bit, 4 on 32-bit).
     hasher.update((line as u64).to_le_bytes());
+
+    // ArangoDB caps `_key` at 254 bytes. Generic-heavy qualified names (deep
+    // candle/tensor impls) can exceed it, which is the same 1221 error as an
+    // illegal character. The readable prefix is cosmetic — the hash carries
+    // uniqueness — so truncate it to whatever budget the file_key leaves.
+    // All kept characters are ASCII, so byte and char counts agree.
+    const MAX_KEY_LEN: usize = 254;
+    const OVERHEAD: usize = 2 + 2 + 8; // two "__" separators + hash8
+
+    // A file_key so long it leaves no room even for an empty readable prefix
+    // could never have produced a storable key (the full key always exceeded
+    // 254 bytes → error 1221), so re-deriving is migration-free. Truncate the
+    // prefix and fold the full file_key into the hash so two distinct overlong
+    // file_keys sharing a truncated prefix cannot collide.
+    let fk_budget = MAX_KEY_LEN - OVERHEAD;
+    let fk: &str = if file_key.len() > fk_budget {
+        hasher.update(b"\n");
+        hasher.update(file_key.as_bytes());
+        // file_key may contain non-ASCII (it only maps `.` and `/`), so back
+        // the cut off to a char boundary rather than slicing blindly.
+        let mut cut = fk_budget;
+        while !file_key.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &file_key[..cut]
+    } else {
+        file_key
+    };
+
+    readable.truncate(MAX_KEY_LEN.saturating_sub(fk.len() + OVERHEAD));
+
     let digest = hasher.finalize();
     let hash8 = hex8(&digest);
 
-    format!("{file_key}__{readable}__{hash8}")
+    format!("{fk}__{readable}__{hash8}")
 }
 
 /// Build a deterministic edge key from source, type, and target.
@@ -331,5 +389,105 @@ mod tests {
         let a = symbol_key("src_lib_rs", "Vec<T>", 1);
         let b = symbol_key("src_lib_rs", "Vec_T_", 1);
         assert_ne!(a, b, "should not collide: a={a}, b={b}");
+    }
+
+    /// True iff `c` may appear in an ArangoDB document `_key`.
+    fn arango_key_legal(c: char) -> bool {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '_' | '-'
+                    | ':'
+                    | '.'
+                    | '@'
+                    | '('
+                    | ')'
+                    | '+'
+                    | ','
+                    | '='
+                    | ';'
+                    | '$'
+                    | '!'
+                    | '*'
+                    | '\''
+                    | '%'
+            )
+    }
+
+    #[test]
+    fn test_symbol_key_sanitizes_arango_illegal_chars() {
+        // #180: rust-analyzer qualified names from generic/impl-heavy code
+        // carry characters ArangoDB rejects in `_key` — `&` (references),
+        // `[ ]` (slices/arrays), `#` (closure disambiguators), `{ }`.
+        // Every one must be sanitized or the atomic import 400s (error 1221).
+        for qname in [
+            "Module for &Tensor",
+            "Index<usize> for [f32]",
+            "<&T as Iterator>::next",
+            "outer::{closure#0}",
+            "impl Deref for Box<[u8; 32]>",
+            "unicode_τ::λ",
+        ] {
+            let key = symbol_key("src_lib_rs", qname, 1);
+            for c in key.chars() {
+                assert!(
+                    arango_key_legal(c),
+                    "illegal char {c:?} in key {key:?} for qualified name {qname:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_symbol_key_previously_storable_keys_unchanged() {
+        // The #180 sanitizer must not move any key that was storable before it:
+        // stored graphs address symbols by `_key`, so a changed derivation
+        // orphans existing documents. Pin the exact pre-#180 outputs.
+        assert!(
+            symbol_key("src_lib_rs", "Config::new", 12).starts_with("src_lib_rs__Config__new__")
+        );
+        assert!(
+            symbol_key("src_go", "pkg.Type.Method", 3).starts_with("src_go__pkg.Type.Method__"),
+            "gopls dotted names passed through before #180 and must still"
+        );
+        assert!(
+            symbol_key("src_lib_rs", "Vec<String>", 1).starts_with("src_lib_rs__Vec_String___"),
+            "chars in the historical denylist must sanitize exactly as before"
+        );
+    }
+
+    #[test]
+    fn test_symbol_key_respects_arango_length_limit() {
+        // ArangoDB caps `_key` at 254 bytes; a monster generic qualified name
+        // must truncate the readable prefix, not produce an illegal key.
+        let long_name = format!("Module for {}", "Wrapper<".repeat(60));
+        let key = symbol_key("crates_weaver-spu_src_forward_rs", &long_name, 7);
+        assert!(key.len() <= 254, "key too long: {} bytes", key.len());
+
+        // Uniqueness must survive truncation: two long names sharing a 254-byte
+        // prefix still differ via the hash suffix.
+        let a = symbol_key("f", &format!("{}A", "x".repeat(400)), 1);
+        let b = symbol_key("f", &format!("{}B", "x".repeat(400)), 1);
+        assert_ne!(a, b, "hash suffix must disambiguate truncated prefixes");
+        assert!(a.ends_with(|c: char| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_symbol_key_overlong_file_key() {
+        // A pathologically deep path can push file_key alone past the 254-byte
+        // budget; the key must still respect the cap, and two distinct overlong
+        // file_keys sharing a truncated prefix must not collide (the full
+        // file_key is folded into the hash in that case).
+        let shared = "d".repeat(300);
+        let a = symbol_key(&format!("{shared}_a_rs"), "Config::new", 1);
+        let b = symbol_key(&format!("{shared}_b_rs"), "Config::new", 1);
+        assert!(a.len() <= 254, "key too long: {} bytes", a.len());
+        assert!(b.len() <= 254, "key too long: {} bytes", b.len());
+        assert_ne!(a, b, "overlong file_keys must not collide after truncation");
+
+        // Non-ASCII file_key must not panic on the boundary-safe cut.
+        let unicode_fk = "π".repeat(200);
+        let k = symbol_key(&unicode_fk, "Config::new", 1);
+        assert!(k.len() <= 254);
     }
 }

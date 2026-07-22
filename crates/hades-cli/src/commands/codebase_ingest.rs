@@ -425,12 +425,16 @@ pub async fn run(
                     symbols = stats.symbols,
                     edges = stats.edges,
                     crates = stats.workspaces,
+                    store_errors = stats.store_errors,
                     "rust-analyzer enrichment complete"
                 );
                 stats
             }
             Err(e) => {
-                warn!(error = %e, "rust-analyzer enrichment failed, syn-based data retained");
+                // `{e:#}` prints the full anyhow context chain — plain `{e}`
+                // shows only the outermost context and swallows the underlying
+                // cause (#180).
+                warn!(error = %format!("{e:#}"), "rust-analyzer enrichment failed, syn-based data retained");
                 SemanticLspStats::default()
             }
         }
@@ -446,6 +450,7 @@ pub async fn run(
     if !rust_abs_paths.is_empty()
         && rust_analyzer_cmd.is_some()
         && ra_stats.workspaces == 0
+        && !ra_stats.store_failed
         && !allow_analysis_downgrade
     {
         anyhow::bail!(
@@ -455,6 +460,21 @@ pub async fn run(
              analyzer session logs above, or pass --allow-analysis-downgrade to \
              accept the loss explicitly.",
             rust_abs_paths.len()
+        );
+    }
+
+    // A store failure is a distinct stage from analysis failure (#180): the
+    // analyzer did its job, but the results never reached ArangoDB. Attribute
+    // it correctly so operators don't chase analyzer session logs for a
+    // database error.
+    if ra_stats.store_failed && !allow_analysis_downgrade {
+        anyhow::bail!(
+            "rust-analyzer analyzed {} crate(s) but storing the enrichment to \
+             ArangoDB failed (see the store warnings above for the database \
+             error). The graph keeps syn symbols but loses calls/implements \
+             edges. Fix the store error and re-run, or pass \
+             --allow-analysis-downgrade to accept the loss explicitly.",
+            ra_stats.workspaces
         );
     }
 
@@ -470,13 +490,27 @@ pub async fn run(
                 stats
             }
             Err(error) => {
-                warn!(%error, "gopls enrichment failed; Tree-sitter Go data retained");
+                warn!(error = %format!("{error:#}"), "gopls enrichment failed; Tree-sitter Go data retained");
                 SemanticLspStats::default()
             }
         }
     } else {
         SemanticLspStats::default()
     };
+
+    // Same store-vs-analysis attribution as the rust-analyzer path (#180):
+    // gopls analyzed its modules but the results never reached ArangoDB, so
+    // exiting 0 would silently lose the Go calls/implements layer.
+    if gopls_stats.store_failed && !allow_analysis_downgrade {
+        anyhow::bail!(
+            "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
+             failed (see the store warnings above for the database error). The \
+             graph keeps Tree-sitter symbols but loses calls/implements edges. \
+             Fix the store error and re-run, or pass --allow-analysis-downgrade \
+             to accept the loss explicitly.",
+            gopls_stats.workspaces
+        );
+    }
 
     // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
     // files ingested and zero modules analyzed is silent semantic loss, not
@@ -543,11 +577,15 @@ pub async fn run(
             "symbols": ra_stats.symbols,
             "edges": ra_stats.edges,
             "crates_analyzed": ra_stats.workspaces,
+            "store_errors": ra_stats.store_errors,
+            "store_failed": ra_stats.store_failed,
         },
         "gopls": {
             "symbols": gopls_stats.symbols,
             "edges": gopls_stats.edges,
             "modules_analyzed": gopls_stats.workspaces,
+            "store_errors": gopls_stats.store_errors,
+            "store_failed": gopls_stats.store_failed,
         },
         "results": results,
         "duration_ms": duration_ms,
@@ -1662,11 +1700,26 @@ async fn check_unchanged(
 // ── semantic language-server enrichment ───────────────────────────────
 
 /// Stats returned from the rust-analyzer enrichment phase.
+///
+/// Analysis and storage are reported separately (#180): `workspaces` counts
+/// crates/modules the analyzer processed, while `store_errors`/`store_failed`
+/// describe what happened when writing the results to ArangoDB. A store
+/// failure must not be conflated with `workspaces == 0` — that signature is
+/// reserved for the analyzer itself producing nothing (#164).
 #[derive(Default)]
 struct SemanticLspStats {
+    /// Symbol documents actually stored (created + updated).
     symbols: usize,
+    /// Edge documents actually stored (created + updated).
     edges: usize,
+    /// Crates (rust-analyzer) or modules (gopls) successfully analyzed.
     workspaces: usize,
+    /// Documents ArangoDB rejected individually (illegal key, bad body).
+    /// Non-zero means degraded-but-usable enrichment.
+    store_errors: usize,
+    /// The store stage failed wholesale (request-level error). Analysis
+    /// results exist but none of them reached the database.
+    store_failed: bool,
 }
 
 /// Run rust-analyzer over ingested Rust files to produce rich symbols and edges.
@@ -1836,19 +1889,53 @@ async fn store_lsp_extractions(
     let symbol_docs = resolver.build_symbol_documents();
     let semantic_edges = resolver.build_edges();
 
-    let sym_count = symbol_docs.len();
-    let edge_count = semantic_edges.len();
+    let mut stored_symbols = 0usize;
+    let mut stored_edges = 0usize;
+    let mut store_errors = 0usize;
 
     // Store enriched symbol documents (overwrite=true for idempotent re-runs).
+    // Per-document error reporting (#180): one rejected document degrades one
+    // symbol, not the whole batch, and ArangoDB's rejection reasons are logged
+    // instead of swallowed.
     if !symbol_docs.is_empty() {
         let docs: Vec<Value> = symbol_docs
             .iter()
             .filter_map(|s| serde_json::to_value(s).ok())
             .collect();
-        crud::insert_documents(db, CODEBASE.symbols, &docs, true)
-            .await
-            .with_context(|| format!("failed to store {analyzer} symbol documents"))?;
-        info!(count = docs.len(), analyzer, "stored LSP symbol documents");
+        match crud::insert_documents_detailed(db, CODEBASE.symbols, &docs, true).await {
+            Ok((result, details)) => {
+                stored_symbols = (result.created + result.updated) as usize;
+                store_errors += result.errors as usize;
+                if result.errors > 0 {
+                    warn!(
+                        analyzer,
+                        rejected = result.errors,
+                        stored = stored_symbols,
+                        details = %details.iter().take(5).cloned().collect::<Vec<_>>().join(" | "),
+                        "ArangoDB rejected some symbol documents (first 5 reasons shown)"
+                    );
+                }
+                info!(
+                    count = stored_symbols,
+                    analyzer, "stored LSP symbol documents"
+                );
+            }
+            Err(e) => {
+                // Request-level failure: nothing was stored. Keep the analysis
+                // stats so the caller reports the store as the failed stage
+                // rather than pretending the analyzer produced nothing.
+                warn!(
+                    analyzer,
+                    error = %e,
+                    "failed to store symbol documents; skipping edge store"
+                );
+                return Ok(SemanticLspStats {
+                    workspaces,
+                    store_failed: true,
+                    ..Default::default()
+                });
+            }
+        }
     }
 
     // Store edges grouped by collection (collection-per-relation).
@@ -1888,16 +1975,40 @@ async fn store_lsp_extractions(
                 .map(|(_, d)| d.clone())
                 .collect();
             if !docs.is_empty() {
-                crud::insert_documents(db, kind.collection(), &docs, true)
-                    .await
-                    .with_context(|| format!("failed to store {} edges", kind.as_str()))?;
+                match crud::insert_documents_detailed(db, kind.collection(), &docs, true).await {
+                    Ok((result, details)) => {
+                        stored_edges += (result.created + result.updated) as usize;
+                        store_errors += result.errors as usize;
+                        if result.errors > 0 {
+                            warn!(
+                                analyzer,
+                                collection = kind.collection(),
+                                rejected = result.errors,
+                                details = %details.iter().take(5).cloned().collect::<Vec<_>>().join(" | "),
+                                "ArangoDB rejected some edge documents (first 5 reasons shown)"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            analyzer,
+                            collection = kind.collection(),
+                            error = %e,
+                            "failed to store edge batch"
+                        );
+                        return Ok(SemanticLspStats {
+                            symbols: stored_symbols,
+                            edges: stored_edges,
+                            workspaces,
+                            store_errors,
+                            store_failed: true,
+                        });
+                    }
+                }
             }
         }
 
-        info!(
-            count = edge_docs.len(),
-            analyzer, "stored LSP semantic edges"
-        );
+        info!(count = stored_edges, analyzer, "stored LSP semantic edges");
     }
 
     let mut patched_count = 0;
@@ -1970,9 +2081,11 @@ async fn store_lsp_extractions(
     }
 
     Ok(SemanticLspStats {
-        symbols: sym_count,
-        edges: edge_count,
+        symbols: stored_symbols,
+        edges: stored_edges,
         workspaces,
+        store_errors,
+        store_failed: false,
     })
 }
 

@@ -195,6 +195,77 @@ pub async fn insert_documents(
     Ok(result)
 }
 
+/// Import documents in NDJSON format with per-document error reporting.
+///
+/// Unlike [`insert_documents`], this uses `complete=false&details=true`: a
+/// document that ArangoDB rejects (illegal `_key`, malformed body) fails
+/// alone instead of aborting the whole batch, and the response's `details`
+/// array reports each rejection with its line number and reason (#180).
+///
+/// `overwrite` has the same semantics as [`insert_documents`]: `true` maps
+/// to `onDuplicate=replace`, `false` leaves duplicate keys as per-document
+/// errors.
+///
+/// Returns the [`ImportResult`] counts together with the raw detail strings
+/// for any rejected documents (empty when everything imported).
+#[instrument(skip(pool, docs), fields(db = %pool.database(), count = docs.len()))]
+pub async fn insert_documents_detailed(
+    pool: &ArangoPool,
+    collection: &str,
+    docs: &[Value],
+    overwrite: bool,
+) -> Result<(ImportResult, Vec<String>), ArangoError> {
+    if docs.is_empty() {
+        return Ok((ImportResult::empty(), Vec::new()));
+    }
+
+    let path = if overwrite {
+        format!(
+            "import?collection={collection}&type=documents&complete=false&details=true&onDuplicate=replace"
+        )
+    } else {
+        format!("import?collection={collection}&type=documents&complete=false&details=true")
+    };
+
+    let mut ndjson = String::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if i > 0 {
+            ndjson.push('\n');
+        }
+        ndjson.push_str(&serde_json::to_string(doc)?);
+    }
+
+    debug!(
+        collection,
+        doc_count = docs.len(),
+        overwrite,
+        "importing documents (per-document error reporting)"
+    );
+
+    let resp = pool
+        .writer()
+        .post_raw(&path, &ndjson, "application/x-ndjson")
+        .await?;
+
+    let result = ImportResult::from_response(&resp);
+    let details: Vec<String> = resp["details"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    debug!(
+        created = result.created,
+        errors = result.errors,
+        updated = result.updated,
+        "import complete"
+    );
+    Ok((result, details))
+}
+
 /// Error returned when a chunked bulk insert fails partway through.
 ///
 /// Earlier chunks may have been committed (each chunk is atomic via

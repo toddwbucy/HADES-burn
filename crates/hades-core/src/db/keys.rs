@@ -84,6 +84,12 @@ pub fn file_key(rel_path: &str) -> String {
 ///
 /// Format: `{file_key}__{readable}__{hash8}`
 ///
+/// The readable prefix is guaranteed ArangoDB-legal: characters that ArangoDB
+/// rejects in `_key` (e.g. `& [ ] #`, non-ASCII) are replaced with `_`, and
+/// the prefix is truncated so the full key stays within ArangoDB's 254-byte
+/// `_key` limit (issue #180). Keys that were previously storable are
+/// unchanged by this sanitization.
+///
 /// `line` is the symbol's 1-based definition line. It disambiguates symbols
 /// that share a qualified name within one file -- e.g. `impl Foo { fn new }` in
 /// sibling inline modules, whose qualified name collapses to `Foo::new` (the
@@ -100,10 +106,37 @@ pub fn file_key(rel_path: &str) -> String {
 /// assert_eq!(key.len(), "src_lib_rs__Config__new__".len() + 8);
 /// ```
 pub fn symbol_key(file_key: &str, qualified_name: &str, line: usize) -> String {
-    // Readable prefix: replace :: with __, strip only ArangoDB-invalid chars.
-    let readable = qualified_name
+    // Readable prefix: replace :: with __, then keep only characters that are
+    // both ArangoDB-legal AND survived the historical sanitizer. ArangoDB `_key`
+    // allows ASCII alphanumerics plus `_ - : . @ ( ) + , = ; $ ! * ' %`; of
+    // those, `: ' ( ) ,` (and space, `< > "`) were already replaced before
+    // issue #180, so they stay replaced to keep existing keys byte-identical.
+    // Everything else — `& [ ] # { }`, non-ASCII, etc. — maps to `_` because it
+    // would 400 the import with error 1221 (illegal document key). Characters
+    // in the keep-set could never produce an illegal key, and characters
+    // outside it could never have been stored, so no stored key changes.
+    let mut readable: String = qualified_name
         .replace("::", "__")
-        .replace(['<', '>', ' ', ',', ':', '\'', '"', '(', ')'], "_");
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '@' | '+' | '=' | ';' | '$' | '!' | '*' | '%')
+            {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    // ArangoDB caps `_key` at 254 bytes. Generic-heavy qualified names (deep
+    // candle/tensor impls) can exceed it, which is the same 1221 error as an
+    // illegal character. The readable prefix is cosmetic — the hash carries
+    // uniqueness — so truncate it to whatever budget the file_key leaves.
+    // All kept characters are ASCII, so byte and char counts agree.
+    const MAX_KEY_LEN: usize = 254;
+    let budget = MAX_KEY_LEN.saturating_sub(file_key.len() + "__".len() * 2 + 8);
+    readable.truncate(budget);
 
     // Deterministic 8-char hex hash of the qualified name plus the definition
     // line. The line is what makes two same-qualified-name symbols in one file
@@ -331,5 +364,84 @@ mod tests {
         let a = symbol_key("src_lib_rs", "Vec<T>", 1);
         let b = symbol_key("src_lib_rs", "Vec_T_", 1);
         assert_ne!(a, b, "should not collide: a={a}, b={b}");
+    }
+
+    /// True iff `c` may appear in an ArangoDB document `_key`.
+    fn arango_key_legal(c: char) -> bool {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '_' | '-'
+                    | ':'
+                    | '.'
+                    | '@'
+                    | '('
+                    | ')'
+                    | '+'
+                    | ','
+                    | '='
+                    | ';'
+                    | '$'
+                    | '!'
+                    | '*'
+                    | '\''
+                    | '%'
+            )
+    }
+
+    #[test]
+    fn test_symbol_key_sanitizes_arango_illegal_chars() {
+        // #180: rust-analyzer qualified names from generic/impl-heavy code
+        // carry characters ArangoDB rejects in `_key` — `&` (references),
+        // `[ ]` (slices/arrays), `#` (closure disambiguators), `{ }`.
+        // Every one must be sanitized or the atomic import 400s (error 1221).
+        for qname in [
+            "Module for &Tensor",
+            "Index<usize> for [f32]",
+            "<&T as Iterator>::next",
+            "outer::{closure#0}",
+            "impl Deref for Box<[u8; 32]>",
+            "unicode_τ::λ",
+        ] {
+            let key = symbol_key("src_lib_rs", qname, 1);
+            for c in key.chars() {
+                assert!(
+                    arango_key_legal(c),
+                    "illegal char {c:?} in key {key:?} for qualified name {qname:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_symbol_key_previously_storable_keys_unchanged() {
+        // The #180 sanitizer must not move any key that was storable before it:
+        // stored graphs address symbols by `_key`, so a changed derivation
+        // orphans existing documents. Pin the exact pre-#180 outputs.
+        assert!(symbol_key("src_lib_rs", "Config::new", 12).starts_with("src_lib_rs__Config__new__"));
+        assert!(
+            symbol_key("src_go", "pkg.Type.Method", 3).starts_with("src_go__pkg.Type.Method__"),
+            "gopls dotted names passed through before #180 and must still"
+        );
+        assert!(
+            symbol_key("src_lib_rs", "Vec<String>", 1).starts_with("src_lib_rs__Vec_String___"),
+            "chars in the historical denylist must sanitize exactly as before"
+        );
+    }
+
+    #[test]
+    fn test_symbol_key_respects_arango_length_limit() {
+        // ArangoDB caps `_key` at 254 bytes; a monster generic qualified name
+        // must truncate the readable prefix, not produce an illegal key.
+        let long_name = format!("Module for {}", "Wrapper<".repeat(60));
+        let key = symbol_key("crates_weaver-spu_src_forward_rs", &long_name, 7);
+        assert!(key.len() <= 254, "key too long: {} bytes", key.len());
+
+        // Uniqueness must survive truncation: two long names sharing a 254-byte
+        // prefix still differ via the hash suffix.
+        let a = symbol_key("f", &format!("{}A", "x".repeat(400)), 1);
+        let b = symbol_key("f", &format!("{}B", "x".repeat(400)), 1);
+        assert_ne!(a, b, "hash suffix must disambiguate truncated prefixes");
+        assert!(a.ends_with(|c: char| c.is_ascii_hexdigit()));
     }
 }

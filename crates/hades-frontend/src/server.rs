@@ -37,6 +37,12 @@ struct AppState {
     /// When set, every request must present HTTP Basic credentials whose password
     /// matches. Protects the viewer when it's exposed on a LAN address.
     password: Option<Arc<String>>,
+    /// Host header values this server will answer to. A browser enforces
+    /// same-origin by *name*, not address, so without this an attacker page can
+    /// point a short-TTL hostname at 127.0.0.1 (DNS rebinding), reach an
+    /// unauthenticated loopback bind as a same-origin request, and read every
+    /// served database. Checking Host closes that: the rebound name never matches.
+    allowed_hosts: Arc<Vec<String>>,
 }
 
 impl AppState {
@@ -94,6 +100,7 @@ pub async fn serve(
         limit,
         databases: Arc::new(databases),
         password: password.map(Arc::new),
+        allowed_hosts: Arc::new(allowed_hosts_for(&addr)),
     };
     let app = Router::new()
         .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
@@ -108,6 +115,7 @@ pub async fn serve(
         .route("/api/node", get(node))
         .route("/api/content", get(content))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_known_host))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -118,6 +126,40 @@ pub async fn serve(
         .await
         .context("server error")?;
     Ok(())
+}
+
+/// The Host header values this server answers to: the literal bind address, plus
+/// the loopback spellings when bound to loopback.
+fn allowed_hosts_for(addr: &SocketAddr) -> Vec<String> {
+    let port = addr.port();
+    let mut hosts = vec![addr.to_string(), format!("{}:{}", addr.ip(), port)];
+    if addr.ip().is_loopback() {
+        hosts.push(format!("localhost:{port}"));
+        hosts.push(format!("127.0.0.1:{port}"));
+        hosts.push(format!("[::1]:{port}"));
+    }
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// Reject requests whose Host header isn't one this server was bound as, which
+/// defeats DNS rebinding against the unauthenticated loopback bind.
+async fn require_known_host(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default();
+    if state.allowed_hosts.iter().any(|h| h == host) {
+        return next.run(req).await;
+    }
+    tracing::warn!(%host, "rejected request with unrecognized Host header");
+    (
+        StatusCode::MISDIRECTED_REQUEST,
+        Json(serde_json::json!({ "error": "unrecognized Host header" })),
+    )
+        .into_response()
 }
 
 /// HTTP Basic auth gate (no-op when no password is configured). The username is
@@ -232,9 +274,14 @@ async fn graph_data(State(state): State<AppState>, Query(q): Query<GraphQuery>) 
         Ok(b) => b,
         Err(r) => return r,
     };
-    if q.limit.is_some() {
-        backend.limit = q.limit; // per-request override
-    }
+    // Per-request limit may only narrow the operator's cap, never widen it.
+    // An unclamped override would let any client erase `--limit` and force a
+    // full in-memory export of every collection.
+    backend.limit = match (state.limit, q.limit) {
+        (Some(op), Some(client)) => Some(op.min(client)),
+        (Some(op), None) => Some(op),
+        (None, client) => client,
+    };
     match backend.assemble(&q.graph).await {
         Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => error_response(e),

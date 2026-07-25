@@ -19,6 +19,18 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Added
 
+- `hades-viewer` (`crates/hades-frontend`) — a local WebGL graph viewer for
+  any HADES graph, plus a shared-reference channel between a human and an
+  agent. Renders a named graph as a force-directed view with styling driven
+  by attributes discovered from the data, expands neighborhoods on demand,
+  and makes every view addressable (`?db=&graph=&node=`) so an agent can
+  hand back a link to the exact node it means; right-click copies a
+  briefing with the node's attributes, connections, and runnable `hades`
+  commands. Depends on no other HADES crate — it consumes the CLI's
+  JSON/jsonl output only. Binds loopback or a private LAN range, validates
+  the Host header, and requires `--password` for any non-loopback
+  bind. (#182)
+
 - `scripts/install/test/` — container-based install validation harness.
   Builds a fresh Ubuntu 24.04 image with ArangoDB pre-installed, then
   runs the README install steps end-to-end. Catches packaging,
@@ -29,6 +41,14 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   `systemd-sysusers` had created it. (#96)
 
 ### Changed
+
+- **Breaking (CLI):** `-g` is no longer an alias for `--graph` on
+  `db graph traverse`, `db graph shortest-path`, and `db graph neighbors`.
+  It collided with the global `--gpu -g`, which made clap's uniqueness
+  assertion fire on every invocation of those three commands in debug
+  builds. Release builds resolved `-g` to `--graph`, so scripts using the
+  short form worked there and now need the long `--graph` form; `-g` is
+  the global `--gpu` everywhere. `scripts/cli_audit.sh` updated. (#182)
 
 - README **Install** section rewritten end-to-end. Drop the WIP banner
   (the procedure has been validated via the harness), add prerequisites

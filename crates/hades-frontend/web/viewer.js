@@ -142,12 +142,36 @@ async function loadGraph(name) {
     return;
   }
   state.snapshot = await r.json();
+  // Per-graph view state must not survive a graph/database switch: a selection
+  // or filter carried over from the previous graph refers to ids and
+  // collections that don't exist here, which would silently dim or hide the
+  // entire new graph.
+  resetViewState();
   buildGraph();
   buildControls();
   render();
   runLayout();
   reportStats();
   await applyPendingNode();
+}
+
+/// Clear selection/filter state and drop styling choices that the newly loaded
+/// graph cannot honor. A styling field is kept only if the new snapshot actually
+/// exposes it, so a deliberate choice survives where it still means something.
+function resetViewState() {
+  state.selected = null;
+  state.neighbors = new Set();
+  state.hidden = new Set();
+  state.edgeVal = "";
+  setInspector('<div class="empty">Click a node or edge.</div>');
+
+  const m = state.snapshot.meta;
+  const nodeKeys = unionKeys(m.attribute_index, m.node_collections);
+  const edgeKeys = unionKeys(m.attribute_index, m.edge_collections);
+  if (state.colorBy !== "collection" && !nodeKeys.includes(state.colorBy)) state.colorBy = "collection";
+  if (state.sizeBy !== "degree" && !nodeKeys.includes(state.sizeBy)) state.sizeBy = "degree";
+  if (state.edgeColorBy !== "collection" && !edgeKeys.includes(state.edgeColorBy)) state.edgeColorBy = "collection";
+  if (state.edgeAttr !== "collection" && !edgeKeys.includes(state.edgeAttr)) state.edgeAttr = "collection";
 }
 
 // ---------- graph construction ----------
@@ -543,8 +567,12 @@ function agentPayload(id) {
     "",
     "### Inspect from the CLI",
     "```bash",
-    `hades --db ${db} db get ${collection} ${key}`,
-    `hades --db ${db} db graph neighbors --graph ${g} -- ${id}`,
+    // Shell-quoted: this block is meant to be handed to an agent that RUNS it,
+    // and HADES keys are path-derived, so they can carry spaces, $, backticks,
+    // or ;. Unquoted interpolation here would be command injection into the
+    // agent's shell, not merely a broken command.
+    `hades --db ${shq(db)} db get ${shq(collection)} ${shq(key)}`,
+    `hades --db ${shq(db)} db graph neighbors --graph ${shq(g)} -- ${shq(id)}`,
     "```",
   ];
   const connBlock = renderConnections(collectConnections(id));
@@ -795,18 +823,31 @@ function buildControls() {
       renderer.refresh();
     }));
 
-  onChange("db-picker", (v) => { state.db = v; loadGraphList(); });
-  onChange("graph-picker", (v) => loadGraph(v));
+  // Styling controls depend on the loaded snapshot, so they are (re)bound here.
   onChange("color-by", (v) => { state.colorBy = v; recomputeColors(); syncFilterSwatches(); renderer.refresh(); });
   onChange("size-by", (v) => { state.sizeBy = v; recomputeSizes(); renderer.refresh(); });
   onChange("edge-color-by", (v) => { state.edgeColorBy = v; recomputeEdgeColors(); renderer.refresh(); });
   onChange("edge-attr", (v) => { state.edgeAttr = v; refreshEdgeValues(); renderer.refresh(); });
   onChange("edge-val", (v) => { state.edgeVal = v; renderer.refresh(); });
-  document.getElementById("reload").onclick = () =>
-    loadGraph(document.getElementById("graph-picker").value);
+}
+
+/// Wire the controls that must work even when NO graph has loaded — the database
+/// and graph pickers, reload, and layout. These live outside `buildControls`
+/// because that only runs after a *successful* graph load: binding them there
+/// would leave the UI permanently inert whenever the first database has no
+/// graphs (e.g. `_system`, commonly first in the discovered list) or the first
+/// load errors, with no way out but editing the URL by hand.
+function wireStaticControls() {
+  onChange("db-picker", (v) => { state.db = v; loadGraphList(); });
+  onChange("graph-picker", (v) => loadGraph(v));
+  document.getElementById("reload").onclick = () => {
+    const g = document.getElementById("graph-picker").value;
+    if (g) loadGraph(g);
+    else loadGraphList();
+  };
   document.getElementById("layout-toggle").onclick = () => {
     if (layout && layout.isRunning()) stopLayout();
-    else runLayout();
+    else if (graph) runLayout();
   };
 }
 
@@ -876,6 +917,9 @@ function reportStats() {
 function setInspector(html) { document.getElementById("inspect-body").innerHTML = html; }
 function setOverlay(t) { const el = document.getElementById("overlay"); if (el) el.textContent = t; }
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+/// POSIX shell single-quoting for values pasted into a runnable command.
+function shq(s) { return `'${String(s).replace(/'/g, "'\\''")}'`; }
 
 wireContextMenu();
+wireStaticControls();
 loadDatabases();

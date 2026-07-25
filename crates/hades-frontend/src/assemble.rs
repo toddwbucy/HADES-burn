@@ -25,6 +25,9 @@ use tokio::process::Command;
 /// A parsed ArangoDB document.
 type Doc = serde_json::Map<String, serde_json::Value>;
 
+/// Collection holding chunked source text in the codebase schema.
+const CHUNK_COLLECTION: &str = "codebase_chunks";
+
 /// Discover every database the hades user can access (`db databases` run against
 /// `_system`). Used when `serve` is launched without an explicit `--db` list, so
 /// the viewer offers exactly the databases ArangoDB grants — the ACL layer is the
@@ -163,6 +166,13 @@ impl Backend {
     /// vec for graphs without this schema.
     pub async fn file_content(&self, file_key: &str) -> Result<Vec<ChunkText>> {
         reject_flaglike("file_key", file_key)?;
+        // Honor the documented "empty for graphs without this schema" contract.
+        // Querying a non-existent collection is an ArangoDB error, which would
+        // surface to the viewer as HTTP 502 / "failed to load source" instead of
+        // the honest "no source text for this node".
+        if !self.collection_counts().await?.contains_key(CHUNK_COLLECTION) {
+            return Ok(Vec::new());
+        }
         let bind = serde_json::json!({ "fk": file_key }).to_string();
         let out = self
             .run(&[
@@ -175,6 +185,32 @@ impl Backend {
             ])
             .await?;
         parse_chunk_texts(&out)
+    }
+
+    /// Fetch a collection's edges restricted to a known vertex set.
+    ///
+    /// Used whenever a cap is in play. Capping vertices and edges independently
+    /// produces two unrelated `LIMIT` windows, and since edges pointing outside
+    /// the vertex slice are then dropped, the survivors are roughly the square of
+    /// the sampling fraction — a 2k-of-45k slice keeps well under 1% of its edges
+    /// and renders as disconnected dust. Selecting edges *within* the fetched
+    /// vertex set instead yields a real induced subgraph.
+    async fn export_edges_within(&self, collection: &str, ids: &[String]) -> Result<Vec<Doc>> {
+        reject_flaglike("collection", collection)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bind = serde_json::json!({ "@col": collection, "ids": ids }).to_string();
+        let out = self
+            .run(&[
+                "db",
+                "aql",
+                "FOR e IN @@col FILTER e._from IN @ids AND e._to IN @ids RETURN e",
+                "-b",
+                &bind,
+            ])
+            .await?;
+        parse_aql_docs(&out)
     }
 
     /// Stream a collection's documents (raw jsonl) into parsed objects.
@@ -206,9 +242,22 @@ impl Backend {
         for col in &node_collections {
             node_docs.insert(col.clone(), self.export_collection(col).await?);
         }
+        // With a cap in play, take the induced subgraph over the vertices we
+        // actually fetched; uncapped, a plain export is already consistent.
         let mut edge_docs = BTreeMap::new();
-        for col in &edge_collections {
-            edge_docs.insert(col.clone(), self.export_collection(col).await?);
+        if self.limit.is_some() {
+            let ids: Vec<String> = node_docs
+                .values()
+                .flatten()
+                .filter_map(|d| take_str(d, "_id"))
+                .collect();
+            for col in &edge_collections {
+                edge_docs.insert(col.clone(), self.export_edges_within(col, &ids).await?);
+            }
+        } else {
+            for col in &edge_collections {
+                edge_docs.insert(col.clone(), self.export_collection(col).await?);
+            }
         }
 
         // True totals (pre-limit) so the viewer can honestly say "X of Y".
@@ -330,6 +379,21 @@ pub fn parse_single_node(bytes: &[u8]) -> Result<Option<Node>> {
         .and_then(node_from_doc))
 }
 
+/// Parse `db aql` output whose rows are whole documents (`.data.results`).
+pub fn parse_aql_docs(bytes: &[u8]) -> Result<Vec<Doc>> {
+    let v: serde_json::Value =
+        serde_json::from_slice(bytes).context("db aql: invalid JSON envelope")?;
+    let rows = v
+        .get("data")
+        .and_then(|d| d.get("results"))
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow!("db aql: missing .data.results"))?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| r.as_object().cloned())
+        .collect())
+}
+
 /// Parse `db aql` content output (enveloped, `.data.results` is the array) into
 /// ordered chunk texts.
 pub fn parse_chunk_texts(bytes: &[u8]) -> Result<Vec<ChunkText>> {
@@ -412,6 +476,7 @@ pub fn build_snapshot(
     let mut attribute_index: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
+    let mut dropped_edges = 0usize;
 
     for col in &node_collections {
         let mut keys: BTreeSet<String> = BTreeSet::new();
@@ -438,8 +503,10 @@ pub fn build_snapshot(
                 continue; // malformed edge
             };
             // Skip edges whose endpoints are outside the fetched node set, so the
-            // graph handed to the viewer never dangles.
+            // graph handed to the viewer never dangles. Counted, because dropping
+            // them silently would misreport the payload as complete.
             if !present.contains(source.as_str()) || !present.contains(target.as_str()) {
+                dropped_edges += 1;
                 continue;
             }
             strip_internal(&mut doc, &mut keys);
@@ -460,9 +527,13 @@ pub fn build_snapshot(
 
     let node_count = nodes.len();
     let edge_count = edges.len();
-    // A slice is partial when a cap was set AND fewer items came back than the
-    // collections actually hold.
-    let partial = limit.is_some() && (node_count < node_total || edge_count < edge_total);
+    // The payload is partial when a cap held items back, OR when edges were
+    // dropped for pointing outside the fetched node set. The second case happens
+    // with no cap at all — `graph materialize` writes edges directly to the
+    // collection and deleting a vertex leaves stale edges — so gating `partial`
+    // on `limit.is_some()` would report a lossy snapshot as complete.
+    let partial =
+        dropped_edges > 0 || (limit.is_some() && (node_count < node_total || edge_count < edge_total));
 
     GraphSnapshot {
         meta: SnapshotMeta {
@@ -552,13 +623,42 @@ fn take_str(doc: &Doc, field: &str) -> Option<String> {
     doc.get(field).and_then(|v| v.as_str()).map(String::from)
 }
 
-/// Remove ArangoDB-internal fields from `attrs` and record the remaining keys.
+/// Any numeric array longer than this is treated as an embedding vector and
+/// replaced by a dimension marker rather than shipped.
+const VECTOR_MIN_LEN: usize = 32;
+
+/// Remove ArangoDB-internal fields from `attrs`, collapse embedding vectors, and
+/// record the remaining keys.
+///
+/// Vectors are replaced with `{"dims": N}` instead of being sent verbatim.
+/// HADES stores `embedding` on every standard collection profile (plus
+/// `structural_embedding` after RGCN training), and at 1024+ floats per document
+/// they dominate the payload — a full graph export would serialize hundreds of
+/// megabytes and hang the browser on `await r.json()`. The viewer only ever
+/// displays these as "[N numbers — vector]", so the values themselves are never
+/// used client-side. Detected structurally (numeric array over the threshold)
+/// rather than by field name, to stay graph-agnostic.
 fn strip_internal(doc: &mut Doc, keys: &mut BTreeSet<String>) {
     for f in INTERNAL_FIELDS {
         doc.remove(*f);
     }
+    for (_, v) in doc.iter_mut() {
+        if let Some(dims) = vector_len(v) {
+            *v = serde_json::json!({ "dims": dims });
+        }
+    }
     for k in doc.keys() {
         keys.insert(k.clone());
+    }
+}
+
+/// Length of `v` if it looks like an embedding vector, else `None`.
+fn vector_len(v: &serde_json::Value) -> Option<usize> {
+    let arr = v.as_array()?;
+    if arr.len() >= VECTOR_MIN_LEN && arr.iter().all(|x| x.is_number()) {
+        Some(arr.len())
+    } else {
+        None
     }
 }
 
@@ -753,6 +853,45 @@ mod tests {
         assert_eq!(delta.edges[0].collection, "imports");
         assert_eq!(delta.edges[0].source, "files/a");
         assert!(!delta.edges[0].attrs.contains_key("_from"));
+    }
+
+    #[test]
+    fn build_snapshot_collapses_embedding_vectors() {
+        let embedding: Vec<serde_json::Value> =
+            (0..128).map(|i| json!(i as f64 * 0.01)).collect();
+        let node_docs = BTreeMap::from([(
+            "files".to_string(),
+            docs(json!([{ "_id": "files/a", "_key": "a", "path": "a.rs", "embedding": embedding }])),
+        )]);
+        let snap = build_snapshot(
+            "db", "g",
+            vec!["files".into()], vec![],
+            node_docs, BTreeMap::new(), 1, 0, None,
+        );
+        // The vector is replaced by a dimension marker, not shipped verbatim.
+        assert_eq!(snap.nodes[0].attrs["embedding"], json!({ "dims": 128 }));
+        // Short numeric arrays are ordinary data and must survive untouched.
+        assert_eq!(snap.nodes[0].attrs["path"], "a.rs");
+    }
+
+    #[test]
+    fn build_snapshot_reports_partial_when_edges_are_dropped_without_a_limit() {
+        let node_docs = BTreeMap::from([(
+            "files".to_string(),
+            docs(json!([{ "_id": "files/a", "_key": "a" }])),
+        )]);
+        // Stale edge pointing at a vertex that no longer exists; no limit set.
+        let edge_docs = BTreeMap::from([(
+            "defines".to_string(),
+            docs(json!([{ "_id": "defines/e", "_from": "files/a", "_to": "files/gone" }])),
+        )]);
+        let snap = build_snapshot(
+            "db", "g",
+            vec!["files".into()], vec!["defines".into()],
+            node_docs, edge_docs, 1, 1, None,
+        );
+        assert_eq!(snap.edges.len(), 0);
+        assert!(snap.meta.partial, "dropping edges must mark the payload partial");
     }
 
     #[test]

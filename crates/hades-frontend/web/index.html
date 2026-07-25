@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hades-viewer</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --edge: #30363d; --fg: #c9d1d9;
+    --muted: #8b949e; --accent: #58a6ff; --accent-dim: #1f6feb33;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 system-ui, -apple-system, sans-serif; }
+  #app { display: grid; grid-template-columns: 260px 1fr 320px; height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--edge);
+    overflow-y: auto; padding: 12px; }
+  #inspector { border-right: none; border-left: 1px solid var(--edge); }
+  #stage { position: relative; }
+  #graph { position: absolute; inset: 0; }
+  h1 { font-size: 14px; margin: 0 0 4px; letter-spacing: .3px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin: 18px 0 6px; }
+  label { display: block; margin: 6px 0 2px; color: var(--muted); font-size: 11px; }
+  select, button, input[type=number] { width: 100%; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--edge); border-radius: 6px; padding: 6px; font: inherit; }
+  button { cursor: pointer; margin-top: 6px; }
+  button:hover { border-color: var(--accent); }
+  button.active { background: var(--accent-dim); border-color: var(--accent); }
+  .filters label { display: flex; align-items: center; gap: 6px; cursor: pointer;
+    color: var(--fg); text-transform: none; }
+  .filters input { width: auto; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+  #stats { color: var(--muted); font-size: 11px; }
+  #stats b { color: var(--fg); }
+  #partial { color: #d29922; }
+  .sublabel { color: var(--muted); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .5px; margin: 8px 0 3px; }
+  #legend, #edge-legend { display: flex; flex-direction: column; gap: 3px; }
+  .legend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  #inspector .kv { border-top: 1px solid var(--edge); padding: 6px 0; }
+  #inspector .k { color: var(--accent); font-size: 11px; word-break: break-all; }
+  #inspector .v { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+  #inspector .empty { color: var(--muted); margin-top: 20px; }
+  #inspector .source { white-space: pre; overflow: auto; max-height: 45vh; margin-top: 8px;
+    background: var(--bg); border: 1px solid var(--edge); border-radius: 6px; padding: 8px;
+    font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.45; }
+  #load-source { width: 100%; margin-top: 10px; cursor: pointer; background: var(--bg);
+    color: var(--fg); border: 1px solid var(--edge); border-radius: 6px; padding: 6px; font: inherit; }
+  #load-source:hover { border-color: var(--accent); }
+  #overlay { position: absolute; top: 10px; left: 10px; background: #000a;
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  /* Right-click menu */
+  .ctx { position: fixed; z-index: 50; background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 8px; padding: 4px; min-width: 210px; box-shadow: 0 8px 24px #000a; }
+  .ctx button { display: block; width: 100%; text-align: left; background: none; border: 0;
+    color: var(--fg); padding: 7px 10px; border-radius: 5px; cursor: pointer; font: inherit; }
+  .ctx button:hover { background: var(--accent-dim); }
+  /* Clipboard fallback modal */
+  #copy-modal { position: fixed; inset: 0; z-index: 60; background: #000b;
+    display: flex; align-items: center; justify-content: center; }
+  #copy-modal[hidden] { display: none; }
+  .modal-box { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 14px; width: min(760px, 92vw); }
+  #modal-title { color: var(--muted); font-size: 11px; margin-bottom: 8px; }
+  #modal-text { width: 100%; height: 46vh; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--edge); border-radius: 6px; padding: 8px;
+    font-family: ui-monospace, monospace; font-size: 11px; }
+  #modal-close { margin-top: 10px; }
+  #share-view { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="controls">
+    <h1>hades-viewer</h1>
+    <div id="stats">no graph loaded</div>
+
+    <h2>Database</h2>
+    <select id="db-picker"></select>
+
+    <h2>Graph</h2>
+    <select id="graph-picker"></select>
+    <label>Max nodes per collection (0 = all)</label>
+    <input id="load-limit" type="number" min="0" value="0" step="100">
+    <button id="reload">Reload snapshot</button>
+    <div class="hint">Cap the initial load for large graphs, then double-click any
+      node to pull its real neighborhood from the backend and grow outward.</div>
+
+    <h2>Styling</h2>
+    <label>Color nodes by</label>
+    <select id="color-by"></select>
+    <label>Size nodes by</label>
+    <select id="size-by"></select>
+    <label>Color edges by</label>
+    <select id="edge-color-by"></select>
+    <div class="hint">In HADES the edge collection name is the relation type, so
+      coloring edges by collection separates grounded vs. asserted relations at a
+      glance.</div>
+    <label>Emphasize edges where</label>
+    <select id="edge-attr"></select>
+    <select id="edge-val"></select>
+    <div class="hint">Emphasis dims everything else — a focus tool on top of the
+      persistent edge coloring.</div>
+
+    <h2>Legend</h2>
+    <div class="sublabel">Nodes</div>
+    <div id="legend"></div>
+    <div class="sublabel">Edges</div>
+    <div id="edge-legend"></div>
+
+    <h2>Filters</h2>
+    <div id="filters" class="filters"></div>
+
+    <h2>Layout</h2>
+    <button id="layout-toggle">Pause layout</button>
+    <div class="hint">ForceAtlas2 runs in a Web Worker; pausing frees the CPU
+      once the graph has settled.</div>
+  </aside>
+
+  <div id="stage">
+    <div id="graph"></div>
+    <div id="overlay">drag &middot; scroll to zoom &middot; click to inspect &middot; double-click to expand</div>
+  </div>
+
+  <aside id="inspector">
+    <h1>Inspector</h1>
+    <button id="share-view">Copy link to this view</button>
+    <div id="inspect-body"><div class="empty">Click a node or edge.</div></div>
+  </aside>
+</div>
+
+<!-- Right-click menu: the shared-reference actions. -->
+<div id="ctxmenu" class="ctx" hidden>
+  <button data-act="agent">Send to agent (copy briefing)</button>
+  <button data-act="link">Copy deep link</button>
+  <button data-act="source">Show source</button>
+  <button data-act="expand">Expand neighborhood</button>
+  <button data-act="focus">Focus</button>
+</div>
+
+<!-- Fallback when the clipboard API is unavailable (plain-HTTP LAN access). -->
+<div id="copy-modal" hidden>
+  <div class="modal-box">
+    <div id="modal-title"></div>
+    <textarea id="modal-text" readonly></textarea>
+    <button id="modal-close">Close</button>
+  </div>
+</div>
+
+<script src="/vendor/graphology.min.js"></script>
+<script src="/vendor/sigma.min.js"></script>
+<script src="/vendor/fa2.bundle.min.js"></script>
+<script src="/viewer.js"></script>
+</body>
+</html>

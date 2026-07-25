@@ -130,8 +130,8 @@ if hades --db $DB db graph list 2>/dev/null | grep -q '"name"'; then
     GRAPH_NAME=$(hades --db $DB db graph list 2>/dev/null | grep -oE '"name":\s*"[^"]+"' | head -1 | sed 's/.*: "\([^"]*\)".*/\1/')
     SOME_FILE_ID=$(hades --db $DB db aql 'FOR f IN codebase_files LIMIT 1 RETURN f._id' 2>/dev/null | grep -oE '"codebase_files/[^"]+"' | head -1 | tr -d '"')
     if [[ -n "${SOME_FILE_ID:-}" && -n "${GRAPH_NAME:-}" ]]; then
-        run "graph traverse"   "hades --db $DB db graph traverse \"$SOME_FILE_ID\" -d outbound --max-depth 2 -g \"$GRAPH_NAME\""
-        run "graph neighbors"  "hades --db $DB db graph neighbors \"$SOME_FILE_ID\" -g \"$GRAPH_NAME\""
+        run "graph traverse"   "hades --db $DB db graph traverse \"$SOME_FILE_ID\" -d outbound --max-depth 2 --graph \"$GRAPH_NAME\""
+        run "graph neighbors"  "hades --db $DB db graph neighbors \"$SOME_FILE_ID\" --graph \"$GRAPH_NAME\""
     else
         skip "graph traverse"  "no file vertex found"
         skip "graph neighbors" "no file vertex found"

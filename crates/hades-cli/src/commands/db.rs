@@ -339,7 +339,7 @@ pub enum DbGraphCmd {
         max_depth: u32,
 
         /// Graph name.
-        #[arg(short = 'g', long)]
+        #[arg(long)]
         graph: Option<String>,
 
         /// Output format (json, jsonl, table).
@@ -356,7 +356,7 @@ pub enum DbGraphCmd {
         target: String,
 
         /// Graph name.
-        #[arg(short = 'g', long)]
+        #[arg(long)]
         graph: Option<String>,
 
         /// Output format (json, jsonl, table).
@@ -378,7 +378,7 @@ pub enum DbGraphCmd {
         limit: u32,
 
         /// Graph name.
-        #[arg(short = 'g', long)]
+        #[arg(long)]
         graph: Option<String>,
 
         /// Output format (json, jsonl, table).

@@ -19,7 +19,11 @@ use assemble::Backend;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "hades-viewer", version, about = "WebGL graph viewer for HADES graphs")]
+#[command(
+    name = "hades-viewer",
+    version,
+    about = "WebGL graph viewer for HADES graphs"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

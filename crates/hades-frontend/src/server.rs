@@ -12,15 +12,15 @@
 //! The pinned database is fixed at startup and not client-selectable, containing
 //! blast radius to the one graph store this server was pointed at.
 
-use crate::assemble::{discover_databases, Backend};
-use anyhow::{anyhow, Context, Result};
+use crate::assemble::{Backend, discover_databases};
+use anyhow::{Context, Result, anyhow};
 use axum::{
+    Json, Router,
     extract::{Query, Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use base64::Engine;
 use serde::Deserialize;
@@ -58,7 +58,11 @@ impl AppState {
             )
                 .into_response());
         }
-        Ok(Backend { bin: self.bin.clone(), database: db.to_string(), limit: self.limit })
+        Ok(Backend {
+            bin: self.bin.clone(),
+            database: db.to_string(),
+            limit: self.limit,
+        })
     }
 }
 
@@ -103,11 +107,23 @@ pub async fn serve(
         allowed_hosts: Arc::new(allowed_hosts_for(&addr)),
     };
     let app = Router::new()
-        .route("/", get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }))
+        .route(
+            "/",
+            get(|| async { asset(INDEX_HTML, "text/html; charset=utf-8") }),
+        )
         .route("/viewer.js", get(|| async { asset(VIEWER_JS, JS) }))
-        .route("/vendor/graphology.min.js", get(|| async { asset(GRAPHOLOGY_JS, JS) }))
-        .route("/vendor/sigma.min.js", get(|| async { asset(SIGMA_JS, JS) }))
-        .route("/vendor/fa2.bundle.min.js", get(|| async { asset(FA2_JS, JS) }))
+        .route(
+            "/vendor/graphology.min.js",
+            get(|| async { asset(GRAPHOLOGY_JS, JS) }),
+        )
+        .route(
+            "/vendor/sigma.min.js",
+            get(|| async { asset(SIGMA_JS, JS) }),
+        )
+        .route(
+            "/vendor/fa2.bundle.min.js",
+            get(|| async { asset(FA2_JS, JS) }),
+        )
         .route("/api/databases", get(list_databases))
         .route("/api/graphs", get(list_graphs))
         .route("/api/graph-data", get(graph_data))
@@ -115,16 +131,17 @@ pub async fn serve(
         .route("/api/node", get(node))
         .route("/api/content", get(content))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_known_host))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_known_host,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!(%addr, "hades-viewer serving");
-    axum::serve(listener, app)
-        .await
-        .context("server error")?;
+    axum::serve(listener, app).await.context("server error")?;
     Ok(())
 }
 

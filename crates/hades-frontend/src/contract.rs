@@ -101,9 +101,10 @@ pub const INTERNAL_FIELDS: &[&str] = &["_id", "_key", "_rev", "_from", "_to"];
 pub fn label_for(doc: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
     for field in ["name", "qualified_name", "title", "path", "label"] {
         if let Some(serde_json::Value::String(s)) = doc.get(field)
-            && !s.is_empty() {
-                return s.clone();
-            }
+            && !s.is_empty()
+        {
+            return s.clone();
+        }
     }
     key.to_string()
 }

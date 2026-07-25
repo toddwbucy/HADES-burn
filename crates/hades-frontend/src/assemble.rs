@@ -16,9 +16,9 @@
 //! coupling paid back as testability.
 
 use crate::contract::{
-    label_for, ChunkText, Edge, GraphDelta, GraphSnapshot, Node, SnapshotMeta, INTERNAL_FIELDS,
+    ChunkText, Edge, GraphDelta, GraphSnapshot, INTERNAL_FIELDS, Node, SnapshotMeta, label_for,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::process::Command;
 
@@ -56,7 +56,10 @@ pub fn parse_database_list(bytes: &[u8]) -> Result<Vec<String>> {
         .and_then(|d| d.get("databases"))
         .and_then(|x| x.as_array())
         .ok_or_else(|| anyhow!("db databases: missing .data.databases"))?;
-    Ok(arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+    Ok(arr
+        .iter()
+        .filter_map(|s| s.as_str().map(String::from))
+        .collect())
 }
 
 /// How to invoke the backend CLI. `bin` defaults to `hades` on PATH; `database`
@@ -135,10 +138,19 @@ impl Backend {
         let limit_s = limit.to_string();
         let out = self
             .run(&[
-                "db", "graph", "neighbors", "--graph", graph_name, "-d", direction, "-n", &limit_s,
+                "db",
+                "graph",
+                "neighbors",
+                "--graph",
+                graph_name,
+                "-d",
+                direction,
+                "-n",
+                &limit_s,
                 // `--` ends option parsing; the untrusted node is a bare positional
                 // after it, so it can never be reinterpreted as a flag.
-                "--", node,
+                "--",
+                node,
             ])
             .await?;
         parse_neighbors(&out)
@@ -170,7 +182,11 @@ impl Backend {
         // Querying a non-existent collection is an ArangoDB error, which would
         // surface to the viewer as HTTP 502 / "failed to load source" instead of
         // the honest "no source text for this node".
-        if !self.collection_counts().await?.contains_key(CHUNK_COLLECTION) {
+        if !self
+            .collection_counts()
+            .await?
+            .contains_key(CHUNK_COLLECTION)
+        {
             return Ok(Vec::new());
         }
         let bind = serde_json::json!({ "fk": file_key }).to_string();
@@ -222,7 +238,8 @@ impl Backend {
             args.push("-n");
             args.push(&limit_str);
         }
-        let text = String::from_utf8(self.run(&args).await?).context("db export: non-UTF8 output")?;
+        let text =
+            String::from_utf8(self.run(&args).await?).context("db export: non-UTF8 output")?;
         parse_jsonl(&text, collection)
     }
 
@@ -358,13 +375,15 @@ pub fn parse_neighbors(bytes: &[u8]) -> Result<GraphDelta> {
     for item in results {
         if let Some(vtx) = item.get("vertex").and_then(|x| x.as_object())
             && let Some(node) = node_from_doc(vtx.clone())
-                && seen.insert(node.id.clone()) {
-                    nodes.push(node);
-                }
+            && seen.insert(node.id.clone())
+        {
+            nodes.push(node);
+        }
         if let Some(edg) = item.get("edge").and_then(|x| x.as_object())
-            && let Some(edge) = edge_from_doc(edg.clone()) {
-                edges.push(edge);
-            }
+            && let Some(edge) = edge_from_doc(edg.clone())
+        {
+            edges.push(edge);
+        }
     }
     Ok(GraphDelta { nodes, edges })
 }
@@ -388,10 +407,7 @@ pub fn parse_aql_docs(bytes: &[u8]) -> Result<Vec<Doc>> {
         .and_then(|d| d.get("results"))
         .and_then(|r| r.as_array())
         .ok_or_else(|| anyhow!("db aql: missing .data.results"))?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| r.as_object().cloned())
-        .collect())
+    Ok(rows.iter().filter_map(|r| r.as_object().cloned()).collect())
 }
 
 /// Parse `db aql` content output (enveloped, `.data.results` is the array) into
@@ -411,7 +427,10 @@ pub fn parse_chunk_texts(bytes: &[u8]) -> Result<Vec<ChunkText>> {
                 // chunk_index may arrive as a number or a numeric string.
                 chunk_index: r
                     .get("chunk_index")
-                    .and_then(|c| c.as_u64().or_else(|| c.as_str().and_then(|s| s.parse().ok())))
+                    .and_then(|c| {
+                        c.as_u64()
+                            .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .unwrap_or(0) as u32,
                 text: r.get("text")?.as_str()?.to_string(),
             })
@@ -432,7 +451,12 @@ pub fn parse_jsonl(text: &str, collection: &str) -> Result<Vec<Doc>> {
             .with_context(|| format!("db export {collection}: bad jsonl at line {}", i + 1))?;
         match doc {
             serde_json::Value::Object(m) => docs.push(m),
-            _ => return Err(anyhow!("db export {collection}: line {} is not an object", i + 1)),
+            _ => {
+                return Err(anyhow!(
+                    "db export {collection}: line {} is not an object",
+                    i + 1
+                ));
+            }
         }
     }
     Ok(docs)
@@ -487,7 +511,13 @@ pub fn build_snapshot(
             let key = take_str(&doc, "_key").unwrap_or_default();
             let label = label_for(&doc, &key);
             strip_internal(&mut doc, &mut keys);
-            nodes.push(Node { id, collection: col.clone(), label, degree: 0, attrs: doc });
+            nodes.push(Node {
+                id,
+                collection: col.clone(),
+                label,
+                degree: 0,
+                attrs: doc,
+            });
         }
         attribute_index.insert(col.clone(), keys.into_iter().collect());
     }
@@ -510,7 +540,13 @@ pub fn build_snapshot(
                 continue;
             }
             strip_internal(&mut doc, &mut keys);
-            edges.push(Edge { id, source, target, collection: col.clone(), attrs: doc });
+            edges.push(Edge {
+                id,
+                source,
+                target,
+                collection: col.clone(),
+                attrs: doc,
+            });
         }
         attribute_index.insert(col.clone(), keys.into_iter().collect());
     }
@@ -532,8 +568,8 @@ pub fn build_snapshot(
     // with no cap at all — `graph materialize` writes edges directly to the
     // collection and deleting a vertex leaves stale edges — so gating `partial`
     // on `limit.is_some()` would report a lossy snapshot as complete.
-    let partial =
-        dropped_edges > 0 || (limit.is_some() && (node_count < node_total || edge_count < edge_total));
+    let partial = dropped_edges > 0
+        || (limit.is_some() && (node_count < node_total || edge_count < edge_total));
 
     GraphSnapshot {
         meta: SnapshotMeta {
@@ -570,12 +606,19 @@ fn collect_topology(defs: &[serde_json::Value]) -> Vec<EdgeTopology> {
 
 fn str_array(v: Option<&serde_json::Value>) -> Vec<String> {
     v.and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn sum_counts(counts: &BTreeMap<String, usize>, collections: &[String]) -> usize {
-    collections.iter().map(|c| counts.get(c).copied().unwrap_or(0)).sum()
+    collections
+        .iter()
+        .map(|c| counts.get(c).copied().unwrap_or(0))
+        .sum()
 }
 
 /// Reject a value that could be smuggled as a CLI flag. A leading `-` (even after
@@ -587,7 +630,9 @@ fn reject_flaglike(field: &str, value: &str) -> Result<()> {
         return Err(anyhow!("empty `{field}` value"));
     }
     if value.starts_with('-') {
-        return Err(anyhow!("invalid `{field}` value `{value}`: leading dash not allowed"));
+        return Err(anyhow!(
+            "invalid `{field}` value `{value}`: leading dash not allowed"
+        ));
     }
     Ok(())
 }
@@ -605,7 +650,13 @@ fn node_from_doc(mut doc: Doc) -> Option<Node> {
     let collection = collection_of(&id).to_string();
     let label = label_for(&doc, &key);
     strip_internal(&mut doc, &mut BTreeSet::new());
-    Some(Node { id, collection, label, degree: 0, attrs: doc })
+    Some(Node {
+        id,
+        collection,
+        label,
+        degree: 0,
+        attrs: doc,
+    })
 }
 
 /// Build an [`Edge`] from a raw document, deriving its collection from `_id`.
@@ -615,7 +666,13 @@ fn edge_from_doc(mut doc: Doc) -> Option<Edge> {
     let target = take_str(&doc, "_to")?;
     let collection = collection_of(&id).to_string();
     strip_internal(&mut doc, &mut BTreeSet::new());
-    Some(Edge { id, source, target, collection, attrs: doc })
+    Some(Edge {
+        id,
+        source,
+        target,
+        collection,
+        attrs: doc,
+    })
 }
 
 /// Read a string field without removing it.
@@ -686,7 +743,8 @@ mod tests {
                 ]},
                 { "name": "g2", "edge_definitions": [] }
             ]}
-        })).unwrap();
+        }))
+        .unwrap();
         let graphs = parse_graph_list(&bytes).unwrap();
         assert_eq!(graphs.len(), 2);
         assert_eq!(graphs[0].name, "g1");
@@ -699,8 +757,16 @@ mod tests {
         let g = GraphInfo {
             name: "g".into(),
             edge_collections: vec![
-                EdgeTopology { collection: "calls".into(), from: vec!["symbols".into()], to: vec!["symbols".into()] },
-                EdgeTopology { collection: "defines".into(), from: vec!["files".into()], to: vec!["symbols".into()] },
+                EdgeTopology {
+                    collection: "calls".into(),
+                    from: vec!["symbols".into()],
+                    to: vec!["symbols".into()],
+                },
+                EdgeTopology {
+                    collection: "defines".into(),
+                    from: vec!["files".into()],
+                    to: vec!["symbols".into()],
+                },
             ],
         };
         let (edges, nodes) = discover_collections(&g);
@@ -718,32 +784,45 @@ mod tests {
 
     #[test]
     fn parse_jsonl_reports_bad_line() {
-        let err = parse_jsonl("{\"ok\":1}\nnot json\n", "c").unwrap_err().to_string();
+        let err = parse_jsonl("{\"ok\":1}\nnot json\n", "c")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("line 2"), "got: {err}");
     }
 
     #[test]
     fn build_snapshot_wires_labels_degrees_attrs_and_strips_internals() {
         let node_docs = BTreeMap::from([
-            ("files".to_string(), docs(json!([
-                { "_id": "files/a", "_key": "a", "_rev": "r1", "path": "a.rs", "status": "PROCESSED" }
-            ]))),
-            ("symbols".to_string(), docs(json!([
-                { "_id": "symbols/s", "_key": "s", "name": "Foo", "kind": "struct" }
-            ]))),
+            (
+                "files".to_string(),
+                docs(json!([
+                    { "_id": "files/a", "_key": "a", "_rev": "r1", "path": "a.rs", "status": "PROCESSED" }
+                ])),
+            ),
+            (
+                "symbols".to_string(),
+                docs(json!([
+                    { "_id": "symbols/s", "_key": "s", "name": "Foo", "kind": "struct" }
+                ])),
+            ),
         ]);
-        let edge_docs = BTreeMap::from([
-            ("defines".to_string(), docs(json!([
+        let edge_docs = BTreeMap::from([(
+            "defines".to_string(),
+            docs(json!([
                 { "_id": "defines/e", "_from": "files/a", "_to": "symbols/s", "sym": "Foo" }
-            ]))),
-        ]);
+            ])),
+        )]);
 
         let snap = build_snapshot(
-            "db", "g",
+            "db",
+            "g",
             vec!["files".into(), "symbols".into()],
             vec!["defines".into()],
-            node_docs, edge_docs,
-            2, 1, None,
+            node_docs,
+            edge_docs,
+            2,
+            1,
+            None,
         );
 
         assert_eq!(snap.meta.node_count, 2);
@@ -770,19 +849,27 @@ mod tests {
 
     #[test]
     fn build_snapshot_drops_dangling_edges() {
-        let node_docs = BTreeMap::from([
-            ("files".to_string(), docs(json!([{ "_id": "files/a", "_key": "a" }]))),
-        ]);
+        let node_docs = BTreeMap::from([(
+            "files".to_string(),
+            docs(json!([{ "_id": "files/a", "_key": "a" }])),
+        )]);
         // Edge points to a symbol we never fetched -> must be dropped.
-        let edge_docs = BTreeMap::from([
-            ("defines".to_string(), docs(json!([
+        let edge_docs = BTreeMap::from([(
+            "defines".to_string(),
+            docs(json!([
                 { "_id": "defines/e", "_from": "files/a", "_to": "symbols/missing" }
-            ]))),
-        ]);
+            ])),
+        )]);
         let snap = build_snapshot(
-            "db", "g",
-            vec!["files".into()], vec!["defines".into()],
-            node_docs, edge_docs, 1, 1, None,
+            "db",
+            "g",
+            vec!["files".into()],
+            vec!["defines".into()],
+            node_docs,
+            edge_docs,
+            1,
+            1,
+            None,
         );
         assert_eq!(snap.edges.len(), 0, "dangling edge must be dropped");
         assert_eq!(snap.nodes[0].degree, 0);
@@ -800,11 +887,26 @@ mod tests {
     async fn neighbors_rejects_flag_smuggling_before_spawning() {
         // bin points nowhere; if validation is skipped we'd get a spawn error,
         // if it runs we get the validation error — assert the latter.
-        let b = Backend { bin: "/nonexistent/hades".into(), database: "db".into(), limit: None };
-        let err = b.neighbors("g", "--database=NL", "any", 10).await.unwrap_err().to_string();
-        assert!(err.contains("leading dash"), "expected validation error, got: {err}");
+        let b = Backend {
+            bin: "/nonexistent/hades".into(),
+            database: "db".into(),
+            limit: None,
+        };
+        let err = b
+            .neighbors("g", "--database=NL", "any", 10)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("leading dash"),
+            "expected validation error, got: {err}"
+        );
 
-        let err = b.neighbors("g", "files/a", "sideways", 10).await.unwrap_err().to_string();
+        let err = b
+            .neighbors("g", "files/a", "sideways", 10)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid direction"), "got: {err}");
     }
 
@@ -812,8 +914,12 @@ mod tests {
     fn parse_database_list_reads_names() {
         let bytes = serde_json::to_vec(&json!({
             "data": { "count": 2, "databases": ["bident_burn", "NestedLearning"] }
-        })).unwrap();
-        assert_eq!(parse_database_list(&bytes).unwrap(), ["bident_burn", "NestedLearning"]);
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_database_list(&bytes).unwrap(),
+            ["bident_burn", "NestedLearning"]
+        );
     }
 
     #[test]
@@ -823,11 +929,15 @@ mod tests {
                 { "chunk_index": 0, "text": "line a\n" },
                 { "chunk_index": 1, "text": "line b\n" }
             ]}
-        })).unwrap();
+        }))
+        .unwrap();
         let chunks = parse_chunk_texts(&bytes).unwrap();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chunk_index, 0);
-        assert_eq!(chunks.iter().map(|c| c.text.as_str()).collect::<String>(), "line a\nline b\n");
+        assert_eq!(
+            chunks.iter().map(|c| c.text.as_str()).collect::<String>(),
+            "line a\nline b\n"
+        );
     }
 
     #[test]
@@ -857,16 +967,23 @@ mod tests {
 
     #[test]
     fn build_snapshot_collapses_embedding_vectors() {
-        let embedding: Vec<serde_json::Value> =
-            (0..128).map(|i| json!(i as f64 * 0.01)).collect();
+        let embedding: Vec<serde_json::Value> = (0..128).map(|i| json!(i as f64 * 0.01)).collect();
         let node_docs = BTreeMap::from([(
             "files".to_string(),
-            docs(json!([{ "_id": "files/a", "_key": "a", "path": "a.rs", "embedding": embedding }])),
+            docs(
+                json!([{ "_id": "files/a", "_key": "a", "path": "a.rs", "embedding": embedding }]),
+            ),
         )]);
         let snap = build_snapshot(
-            "db", "g",
-            vec!["files".into()], vec![],
-            node_docs, BTreeMap::new(), 1, 0, None,
+            "db",
+            "g",
+            vec!["files".into()],
+            vec![],
+            node_docs,
+            BTreeMap::new(),
+            1,
+            0,
+            None,
         );
         // The vector is replaced by a dimension marker, not shipped verbatim.
         assert_eq!(snap.nodes[0].attrs["embedding"], json!({ "dims": 128 }));
@@ -886,25 +1003,40 @@ mod tests {
             docs(json!([{ "_id": "defines/e", "_from": "files/a", "_to": "files/gone" }])),
         )]);
         let snap = build_snapshot(
-            "db", "g",
-            vec!["files".into()], vec!["defines".into()],
-            node_docs, edge_docs, 1, 1, None,
+            "db",
+            "g",
+            vec!["files".into()],
+            vec!["defines".into()],
+            node_docs,
+            edge_docs,
+            1,
+            1,
+            None,
         );
         assert_eq!(snap.edges.len(), 0);
-        assert!(snap.meta.partial, "dropping edges must mark the payload partial");
+        assert!(
+            snap.meta.partial,
+            "dropping edges must mark the payload partial"
+        );
     }
 
     #[test]
     fn build_snapshot_marks_partial_when_capped_below_total() {
-        let node_docs = BTreeMap::from([
-            ("files".to_string(), docs(json!([{ "_id": "files/a", "_key": "a" }]))),
-        ]);
+        let node_docs = BTreeMap::from([(
+            "files".to_string(),
+            docs(json!([{ "_id": "files/a", "_key": "a" }])),
+        )]);
         // limit=1, but the collection truly holds 50 -> partial slice.
         let snap = build_snapshot(
-            "db", "g",
-            vec!["files".into()], vec![],
-            node_docs, BTreeMap::new(),
-            50, 0, Some(1),
+            "db",
+            "g",
+            vec!["files".into()],
+            vec![],
+            node_docs,
+            BTreeMap::new(),
+            50,
+            0,
+            Some(1),
         );
         assert!(snap.meta.partial);
         assert_eq!(snap.meta.node_count, 1);

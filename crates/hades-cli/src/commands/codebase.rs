@@ -87,9 +87,26 @@ pub enum CodebaseCmd {
 
     /// Compare the graph against the source tree it describes (read-only).
     ///
-    /// Reports file nodes whose source file no longer exists ("stale") and
-    /// source files with no node ("uningested"). `codebase validate` checks
-    /// only internal consistency and cannot see either.
+    /// `codebase validate` checks only internal consistency and cannot see any
+    /// of this.
+    ///
+    /// Buckets: `stale` (a file node whose source file no longer exists),
+    /// `uningested` (a source file with no node), `changed` (a matched file
+    /// whose content differs from what was ingested), and `unhandled` (files
+    /// under the root ingest has no handler for, with a reason for each).
+    ///
+    /// `changed.unverifiable` counts matched files that could not be compared at
+    /// all, because they were ingested before `content_hash` existed or are no
+    /// longer readable as text.
+    ///
+    /// `clean` is true only when stale, uningested, changed and
+    /// `changed.unverifiable` are all zero. `unhandled` does not gate it, since
+    /// every repository contains files no analyzer handles.
+    ///
+    /// `changed` exists because incremental ingest keys on `symbol_hash`, which
+    /// covers symbol *names* only: an edited body, signature or comment leaves
+    /// it identical, so a plain `codebase ingest` skips the file while its
+    /// stored chunks go stale. Refresh those with `codebase ingest --force`.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

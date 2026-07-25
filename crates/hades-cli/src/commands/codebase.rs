@@ -37,8 +37,22 @@ pub enum CodebaseCmd {
         /// unchanged. This rebuilds the node's symbols, chunks, and embeddings
         /// in place — it does NOT drop the file node or its inbound edges, so
         /// authored bridge edges survive (unlike `db purge`). Use it to refresh
-        /// a node whose stored view has drifted from the source.
-        /// This never permits an analyzer-fidelity downgrade by itself.
+        /// a node whose stored view has drifted from the source — in particular
+        /// after an edit that touched only bodies, signatures, or comments,
+        /// which the name-keyed `symbol_hash` cannot see and which
+        /// `codebase drift` reports as `changed`.
+        ///
+        /// If a rebuild drops a symbol that another file points at, those
+        /// inbound edges are reported as `dangling_inbound_edges` — not
+        /// deleted, since each records a real dependency. Re-ingest the
+        /// dependent files to re-resolve them, or run
+        /// `hades codebase prune-orphans` to drop them; until then
+        /// `codebase validate` will flag them.
+        ///
+        /// This never permits an analyzer-fidelity downgrade by itself, so a
+        /// file whose stored analysis came from a richer analyzer than the one
+        /// available now is still skipped — pass `--allow-analysis-downgrade`
+        /// as well to refresh it.
         #[arg(short = 'f', long = "force", alias = "no-skip")]
         force: bool,
 

@@ -38,6 +38,41 @@ impl Language {
         }
     }
 
+    /// Detect language from a shebang line (`#!/usr/bin/env python3`).
+    ///
+    /// Extensionless scripts are identified only by their first line, so an
+    /// extension-keyed lookup cannot see them at all. Returns `None` both for
+    /// non-shebang lines and for interpreters HADES has no analyzer for (shell,
+    /// perl, …) — the caller still wants those files ingested, just through the
+    /// parser-free raw-text path.
+    pub fn from_shebang(first_line: &str) -> Option<Self> {
+        let rest = first_line.strip_prefix("#!")?;
+        // `#!/usr/bin/env python3` -> the interpreter is the argument to `env`.
+        let mut words = rest.split_whitespace();
+        let first = words.next()?;
+        let interpreter = if Path::new(first).file_name()?.to_str()? == "env" {
+            words.next()?
+        } else {
+            first
+        };
+        // Strip the path and any version suffix: /usr/bin/python3.11 -> python
+        let stem = Path::new(interpreter).file_name()?.to_str()?;
+        let base = stem.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        match base {
+            "python" => Some(Self::Python),
+            _ => None,
+        }
+    }
+
+    /// Whether a first line is a shebang at all, regardless of interpreter.
+    ///
+    /// Discovery uses this to decide an extensionless file is *source* even when
+    /// no analyzer matches, so it lands in the raw-text path instead of being
+    /// dropped without a trace.
+    pub fn is_shebang(first_line: &str) -> bool {
+        first_line.starts_with("#!")
+    }
+
     /// Human-readable name for this language.
     pub fn name(self) -> &'static str {
         match self {
@@ -57,6 +92,43 @@ impl std::fmt::Display for Language {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn shebang_maps_python_interpreters() {
+        assert_eq!(
+            Language::from_shebang("#!/usr/bin/env python3"),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::from_shebang("#!/usr/bin/python"),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::from_shebang("#!/usr/bin/python3.11"),
+            Some(Language::Python)
+        );
+    }
+
+    #[test]
+    fn shebang_without_analyzer_is_none_but_still_a_shebang() {
+        // Shell has no analyzer: the file must still be recognized as source so
+        // it reaches the raw-text path rather than being dropped silently.
+        assert_eq!(Language::from_shebang("#!/bin/bash"), None);
+        assert!(Language::is_shebang("#!/bin/bash"));
+        assert!(Language::is_shebang("#!/usr/bin/env perl"));
+    }
+
+    #[test]
+    fn non_shebang_first_lines_are_not_shebangs() {
+        assert!(!Language::is_shebang("import os"));
+        assert!(!Language::is_shebang("# regular comment"));
+        assert_eq!(Language::from_shebang("import os"), None);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
     use super::*;
 
     #[test]

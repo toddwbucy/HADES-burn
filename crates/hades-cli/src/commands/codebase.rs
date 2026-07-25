@@ -42,10 +42,17 @@ pub enum CodebaseCmd {
         /// which the name-keyed `symbol_hash` cannot see and which
         /// `codebase drift` reports as `changed`.
         ///
-        /// Inbound edges pointing at a symbol the rebuild drops are swept at
-        /// the end of the run, so a forced re-ingest leaves the graph passing
-        /// `codebase validate` without a follow-up `codebase prune-orphans`.
-        /// This never permits an analyzer-fidelity downgrade by itself.
+        /// If a rebuild drops a symbol that another file points at, those
+        /// inbound edges are reported as `dangling_inbound_edges` — not
+        /// deleted, since each records a real dependency. Re-ingest the
+        /// dependent files to re-resolve them, or run
+        /// `hades codebase prune-orphans` to drop them; until then
+        /// `codebase validate` will flag them.
+        ///
+        /// This never permits an analyzer-fidelity downgrade by itself, so a
+        /// file whose stored analysis came from a richer analyzer than the one
+        /// available now is still skipped — pass `--allow-analysis-downgrade`
+        /// as well to refresh it.
         #[arg(short = 'f', long = "force", alias = "no-skip")]
         force: bool,
 

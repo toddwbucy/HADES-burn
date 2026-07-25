@@ -161,13 +161,21 @@ pub async fn run_drift(
         },
     });
 
-    // The whole point of the two new buckets: a run that cannot see part of the
-    // tree must not read as a clean sweep.
-    if !changed.is_empty() || !unhandled.is_empty() {
-        report["clean"] = json!(false);
-    } else {
-        report["clean"] = json!(stale.is_empty() && uningested.is_empty());
-    }
+    // `clean` answers one question: does the graph match the tree for everything
+    // drift was able to check?
+    //
+    // `unverifiable` counts, because a file whose stored digest predates
+    // `content_hash` was never compared — reporting a clean sweep over
+    // uncompared files is the false green this command exists to remove.
+    //
+    // `unhandled` deliberately does NOT count. Every repository contains files
+    // no analyzer handles — README.md, Cargo.toml, LICENSE — so gating on it
+    // would pin `clean` to false forever and trade a false green for a
+    // permanent false red, which carries just as little information. The count
+    // and per-file reasons are reported either way, so a caller that wants to
+    // treat unhandled files as a gap can read the bucket and decide.
+    report["clean"] =
+        json!(stale.is_empty() && uningested.is_empty() && changed.is_empty() && unverifiable == 0);
 
     // A near-total mismatch in both directions almost always means the root is
     // wrong, not that the graph is worthless. Say so rather than let an

@@ -83,12 +83,18 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   shebang of extensionless files: a recognized interpreter selects the
   analyzer (`#!…python3` → Python), and any other shebang routes the file
   to the raw-text path so its content is at least visible. (#183)
-- `codebase ingest --force` could leave the graph failing `codebase
-  validate`. A rebuild that drops a symbol left inbound
-  `codebase_imports_edges` dangling, breaking the `imports_edge_endpoints`
-  invariant until `codebase prune-orphans` was run. Forced re-ingest now
-  sweeps inbound edges whose target symbol no longer exists, scoped to the
-  files it rebuilt and to targets that genuinely do not resolve. (#183)
+- `codebase ingest` gave no signal when a rebuild left inbound edges
+  dangling. A rebuild that drops a symbol (rename, re-qualification,
+  analyzer change) leaves `codebase_imports_edges` from *other* files
+  pointing at nothing, breaking the `imports_edge_endpoints` invariant
+  with nothing in the output to say so. Ingest now reports
+  `dangling_inbound_edges` in its JSON summary, scoped to the files it
+  rebuilt and to targets that genuinely do not resolve, and `--force`
+  documents the repair. They are reported rather than deleted: each edge
+  records a real dependency, and removing it would erase the only signal
+  that the dependent needs re-ingesting — the dependent is unchanged, so
+  every later ingest skips it and never re-derives the relation. Re-ingest
+  the dependents, or run `codebase prune-orphans` to drop them. (#183)
 
 - Embedding coverage gap during `codebase ingest`. Two root causes:
   the embedder service OOMed on per-file batches whose padded sequence

@@ -265,12 +265,18 @@ pub async fn run(
         // An explicit `--language` still wins; shebang only fills the gap where
         // there was previously no signal at all.
         let effective_override = lang_override.or(shebang_lang);
+        // The unparsed allowlist stays orthogonal to `--language`: an
+        // allowlisted extension with no parser takes the raw-text path even when
+        // `--language` is set for other files. Only the shebang clause is gated,
+        // and only on a shebang-derived language — gating the whole predicate on
+        // `effective_override` would send `--unparsed-ext sh` files through
+        // whatever `--language` names, and diverge from `is_semantic_target`,
+        // which is the split #164 exists to prevent.
         let is_unparsed = Language::from_path(&rel_path).is_none()
-            && effective_override.is_none()
             && (file_ext
                 .as_deref()
                 .is_some_and(|e| unparsed_set.contains(e))
-                || has_shebang);
+                || (has_shebang && shebang_lang.is_none() && lang_override.is_none()));
 
         // Track Rust/Go files for post-loop semantic enrichment (parsed only).
         // Uses the SAME predicate as the preflight gate above, so the set the
@@ -554,20 +560,22 @@ pub async fn run(
         );
     }
 
-    // Sweep inbound edges left dangling by this run's rebuilds.
+    // Report inbound edges left dangling by this run's rebuilds.
     //
     // Purging a file removes only its *outgoing* edges, by design — inbound ones
-    // are owned by other source files that this run may not have touched. But a
-    // rebuild can drop a symbol (rename, re-qualification, analyzer change), and
-    // an inbound edge pointing at it then dangles and fails the
-    // `imports_edge_endpoints` invariant in `codebase validate` (#183). Runs
-    // after the enrichment phases so a symbol that rust-analyzer/gopls recreates
-    // is not treated as gone.
-    let swept = sweep_dangling_inbound(&db, &rewritten_file_keys).await;
-    if swept > 0 {
-        info!(
-            edges = swept,
-            "removed inbound edges whose target symbol no longer exists after re-ingest"
+    // are owned by other source files this run may not have touched. A rebuild
+    // that drops a symbol (rename, re-qualification, analyzer change) leaves
+    // those pointing at nothing, which fails the `imports_edge_endpoints`
+    // invariant in `codebase validate` (#183). Counted, not deleted: the edge
+    // records a real dependency, and removing it would erase the only signal
+    // that the dependent needs re-ingesting. Runs after the enrichment phases so
+    // a symbol rust-analyzer/gopls recreates is not counted as gone.
+    let dangling_inbound = count_dangling_inbound(&db, &rewritten_file_keys).await;
+    if dangling_inbound > 0 {
+        warn!(
+            edges = dangling_inbound,
+            "inbound edges now point at symbols this run removed; re-ingest the \
+             dependent files, or run `hades codebase prune-orphans` to drop them"
         );
     }
 
@@ -609,6 +617,10 @@ pub async fn run(
             "files_with_embedding_failures": embedding_failures.len(),
             "embedding_failure_paths": embedding_failures,
         },
+        // Inbound edges now pointing at symbols this run removed. Surfaced in
+        // the JSON contract, not just stderr, so an agent parsing stdout sees
+        // that the graph needs attention rather than only "completed: N".
+        "dangling_inbound_edges": dangling_inbound,
         "import_edges": total_import_edges,
         "python_import_edges": py_import_edges.len(),
         "rust_import_edges": rs_import_edges.len(),
@@ -876,11 +888,21 @@ pub(crate) struct Discovery {
 ///
 /// Used only for shebang sniffing, so a binary (invalid UTF-8) simply yields
 /// `None` and stays out of discovery.
+///
+/// The read is capped: `read_line` alone allocates until the first newline, so
+/// an extensionless blob with none near the start (a compiled `a.out`, a
+/// checked-in artifact, a minified single-line bundle) would be pulled entirely
+/// into memory during a directory walk that previously never opened it.
+/// A shebang lives in the first handful of bytes or not at all.
 fn first_line(path: &Path) -> Option<String> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
+    /// Longest plausible shebang line; anything beyond cannot be one.
+    const SHEBANG_PROBE_BYTES: u64 = 256;
     let file = std::fs::File::open(path).ok()?;
     let mut line = String::new();
-    BufReader::new(file).read_line(&mut line).ok()?;
+    BufReader::new(file.take(SHEBANG_PROBE_BYTES))
+        .read_line(&mut line)
+        .ok()?;
     Some(line)
 }
 
@@ -888,7 +910,15 @@ fn first_line(path: &Path) -> Option<String> {
 ///
 /// Only consulted for extensionless files: an extension is cheaper and more
 /// reliable when present.
+/// Only extensionless files are sniffed. An extension is cheaper and more
+/// reliable when present, and — critically — the ingest loop applies the same
+/// restriction, so admitting an extension-bearing script here would let it pass
+/// discovery and then fail with "cannot detect language" instead of the
+/// actionable "unsupported file type … use --language or --unparsed-ext".
 pub(crate) fn shebang_of(path: &Path) -> Option<(bool, Option<Language>)> {
+    if path.extension().is_some() {
+        return None;
+    }
     let line = first_line(path)?;
     let trimmed = line.trim_end();
     if !Language::is_shebang(trimmed) {
@@ -1711,42 +1741,47 @@ async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
     }
 }
 
-/// Remove inbound edges whose target symbol vanished in this run's rebuilds.
+/// Count inbound edges left dangling by this run's rebuilds. **Read-only.**
 ///
-/// Scoped two ways so it cannot over-reach: the target key must carry the
+/// Deliberately reports rather than deletes. An inbound edge belongs to a file
+/// this run may not have touched, and it encodes a real relationship: `b.py`
+/// imports something from `a.py`. When a rebuild of `a.py` renames the target
+/// symbol, deleting that edge destroys the only record that `b.py` depends on
+/// `a.py` — and nothing re-derives it, because `b.py` is itself unchanged and
+/// every later ingest skips it. The graph would then pass `validate` and `drift`
+/// while silently missing a true relation, which is the same class of false
+/// green this change set exists to remove. Re-ingesting the dependent (or an
+/// explicit `codebase prune-orphans`) is the honest repair, so the count is
+/// surfaced in the JSON summary and the operator decides.
+///
+/// Scoped two ways so the number means something: the target key must carry the
 /// `{file_key}__` prefix of a file this run actually rewrote, AND the target
-/// document must genuinely not resolve. An edge whose symbol was recreated by
-/// enrichment therefore survives.
-///
-/// This is the same repair `codebase prune-orphans` performs globally; doing it
-/// inline keeps `--force` from leaving the graph failing `codebase validate`
-/// until a separate prune is remembered (#183).
+/// must genuinely not resolve — a symbol recreated by enrichment is not counted.
 ///
 /// Note: symbols of files whose key exceeds the 254-byte budget carry a
-/// *truncated* file_key prefix, so they fall outside this filter and remain
-/// prune-orphans' job.
-async fn sweep_dangling_inbound(db: &ArangoPool, file_keys: &[String]) -> u64 {
+/// *truncated* file_key prefix and fall outside this filter; `prune-orphans`
+/// remains the global backstop.
+async fn count_dangling_inbound(db: &ArangoPool, file_keys: &[String]) -> u64 {
     if file_keys.is_empty() {
         return 0;
     }
-    // One query per edge collection, each with a SINGLE modification block.
-    // ArangoDB forbids calling DOCUMENT() after a data-modification operation in
-    // the same query (error 1579), so chaining the three sweeps into one query
-    // fails at runtime — this mirrors the one-collection-per-query shape that
-    // `codebase prune-orphans` already uses.
-    let mut removed = 0u64;
+    let mut dangling = 0u64;
     for edges in [
         CODEBASE.imports_edges,
         CODEBASE.calls_edges,
         CODEBASE.implements_edges,
     ] {
+        // Prefix test first: it is a cheap string comparison that eliminates
+        // almost every edge, whereas DOCUMENT() is an unindexable per-edge
+        // lookup. Ordering it last made this a full scan of all three edge
+        // collections on every run.
         let aql = "\
             LET prefixes = (FOR fk IN @keys RETURN CONCAT(@symbols_name, '/', fk, '__')) \
-            LET gone = (FOR e IN @@edges \
-                FILTER DOCUMENT(e._to) == null \
-                  AND LENGTH(FOR p IN prefixes FILTER STARTS_WITH(e._to, p) LIMIT 1 RETURN 1) > 0 \
-                REMOVE e IN @@edges RETURN 1) \
-            RETURN LENGTH(gone)";
+            RETURN LENGTH( \
+                FOR e IN @@edges \
+                    FILTER LENGTH(FOR p IN prefixes FILTER STARTS_WITH(e._to, p) LIMIT 1 RETURN 1) > 0 \
+                      AND DOCUMENT(e._to) == null \
+                    RETURN 1)";
         let bind = json!({
             "@edges": edges,
             "symbols_name": CODEBASE.symbols,
@@ -1758,23 +1793,23 @@ async fn sweep_dangling_inbound(db: &ArangoPool, file_keys: &[String]) -> u64 {
             Some(&bind),
             None,
             false,
-            ExecutionTarget::Writer,
+            ExecutionTarget::Reader,
         )
         .await
         {
             Ok(rows) => {
-                removed += rows
+                dangling += rows
                     .results
                     .first()
                     .and_then(|v| v.as_u64())
                     .unwrap_or_default();
             }
             Err(e) => {
-                warn!(collection = edges, error = %e, "failed to sweep dangling inbound edges after re-ingest (non-fatal; run `codebase prune-orphans`)");
+                warn!(collection = edges, error = %e, "failed to check for dangling inbound edges after re-ingest (non-fatal)");
             }
         }
     }
-    removed
+    dangling
 }
 
 /// Purge a file's existing symbols and the **source-owned (outgoing) edges**
@@ -3010,6 +3045,34 @@ mod tests {
         let unhandled: Vec<&str> = d.unhandled.iter().map(|u| u.reason).collect();
         assert_eq!(d.unhandled.len(), 1, "{:?}", d.unhandled);
         assert_eq!(unhandled[0], "no extension and no shebang");
+    }
+
+    #[test]
+    fn test_shebang_sniffing_is_extensionless_only() {
+        let dir = tempfile::tempdir().unwrap();
+        // An extension-bearing script must NOT be admitted by the shebang path:
+        // the ingest loop only sniffs extensionless files, so admitting it here
+        // would pass discovery and then fail with "cannot detect language"
+        // instead of the actionable unsupported-file-type bail.
+        let with_ext = dir.path().join("deploy.sh");
+        fs::write(&with_ext, "#!/bin/bash\necho hi\n").unwrap();
+        assert!(shebang_of(&with_ext).is_none());
+
+        let without_ext = dir.path().join("deploy-thing");
+        fs::write(&without_ext, "#!/bin/bash\necho hi\n").unwrap();
+        assert!(shebang_of(&without_ext).is_some());
+    }
+
+    #[test]
+    fn test_first_line_probe_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        // A newline-free blob must not be read whole during a directory walk.
+        let blob = dir.path().join("bigblob");
+        fs::write(&blob, "x".repeat(2 * 1024 * 1024)).unwrap();
+        let line = first_line(&blob).unwrap();
+        assert!(line.len() <= 256, "probe read {} bytes", line.len());
+        // And it is correctly not treated as a script.
+        assert!(shebang_of(&blob).is_none());
     }
 
     #[test]

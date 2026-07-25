@@ -894,6 +894,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hades-frontend"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hades-prefetch"
 version = "0.3.0"
 dependencies = [

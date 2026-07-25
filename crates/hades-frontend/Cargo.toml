@@ -1,0 +1,25 @@
+[package]
+name = "hades-frontend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Local WebGL graph-visualization frontend for HADES graphs (loosely coupled — consumes the `hades` CLI JSON contract)"
+
+[[bin]]
+name = "hades-viewer"
+path = "src/main.rs"
+
+# Loose coupling by design: this crate depends on NO other HADES crate. It talks
+# to HADES only through the `hades` CLI's JSON/jsonl output contract, so the
+# backend we know works stays untouched. See crate docs in src/main.rs.
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

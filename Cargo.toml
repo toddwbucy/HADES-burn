@@ -4,6 +4,7 @@ members = [
     "crates/hades-core",
     "crates/hades-proto",
     "crates/hades-prefetch",
+    "crates/hades-frontend",
 ]
 resolver = "2"
 

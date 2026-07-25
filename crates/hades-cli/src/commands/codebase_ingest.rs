@@ -206,6 +206,9 @@ pub async fn run(
 
     // Process each file with per-file error isolation.
     let mut results: Vec<FileResult> = Vec::with_capacity(files.len());
+    // File keys whose symbol set was rebuilt this run — the inputs to the
+    // post-run dangling-edge sweep (#183).
+    let mut rewritten_file_keys: Vec<String> = Vec::new();
     // Accumulators for cross-file import resolution.
     let mut imports = ImportContext {
         python_imports: HashMap::new(),
@@ -249,10 +252,25 @@ pub async fn run(
         // extension with no recognized parser (e.g. `.cu`) always takes the
         // parser-free path, even when `--language` is set for other files.
         // `discover_files` likewise includes these regardless of the override.
+        // Extensionless scripts are classified by shebang: a `#!…python3` file
+        // gets the Python analyzer, a `#!/bin/bash` one has no analyzer and
+        // takes the raw-text path rather than erroring out (#183).
+        let shebang = if file_ext.is_none() {
+            shebang_of(file_path)
+        } else {
+            None
+        };
+        let shebang_lang = shebang.and_then(|(_, lang)| lang);
+        let has_shebang = shebang.is_some();
+        // An explicit `--language` still wins; shebang only fills the gap where
+        // there was previously no signal at all.
+        let effective_override = lang_override.or(shebang_lang);
         let is_unparsed = Language::from_path(&rel_path).is_none()
-            && file_ext
+            && effective_override.is_none()
+            && (file_ext
                 .as_deref()
-                .is_some_and(|e| unparsed_set.contains(e));
+                .is_some_and(|e| unparsed_set.contains(e))
+                || has_shebang);
 
         // Track Rust/Go files for post-loop semantic enrichment (parsed only).
         // Uses the SAME predicate as the preflight gate above, so the set the
@@ -292,7 +310,7 @@ pub async fn run(
                 config,
                 file_path,
                 &rel_path,
-                lang_override,
+                effective_override,
                 &mut imports,
                 compile_commands,
                 force,
@@ -303,10 +321,18 @@ pub async fn run(
 
         let duration = item_start.elapsed().as_millis() as u64;
         match result {
-            Ok(r) => results.push(FileResult {
-                duration_ms: duration,
-                ..r
-            }),
+            Ok(r) => {
+                // A file that was actually rewritten (not skipped) had its symbol
+                // set purged and rebuilt, so a symbol another file points at may
+                // have disappeared. Remember it for the post-run dangling sweep.
+                if r.skipped != Some(true) && r.success {
+                    rewritten_file_keys.push(keys::file_key(&rel_path));
+                }
+                results.push(FileResult {
+                    duration_ms: duration,
+                    ..r
+                })
+            }
             Err(e) => {
                 error!(path = %rel_path, error = %e, "ingest failed");
                 results.push(FileResult {
@@ -525,6 +551,23 @@ pub async fn run(
              passing preflight. Investigate the session logs above, or pass \
              --allow-analysis-downgrade to accept the loss explicitly.",
             go_abs_paths.len()
+        );
+    }
+
+    // Sweep inbound edges left dangling by this run's rebuilds.
+    //
+    // Purging a file removes only its *outgoing* edges, by design — inbound ones
+    // are owned by other source files that this run may not have touched. But a
+    // rebuild can drop a symbol (rename, re-qualification, analyzer change), and
+    // an inbound edge pointing at it then dangles and fails the
+    // `imports_edge_endpoints` invariant in `codebase validate` (#183). Runs
+    // after the enrichment phases so a symbol that rust-analyzer/gopls recreates
+    // is not treated as gone.
+    let swept = sweep_dangling_inbound(&db, &rewritten_file_keys).await;
+    if swept > 0 {
+        info!(
+            edges = swept,
+            "removed inbound edges whose target symbol no longer exists after re-ingest"
         );
     }
 
@@ -811,11 +854,64 @@ pub(crate) fn file_key_for(base: &Path, file_path: &Path) -> String {
     keys::file_key(&rel_path_for(base, file_path))
 }
 
+/// A file under the ingest root that discovery deliberately did not pick up.
+///
+/// Recorded rather than dropped so `codebase drift` can report a third bucket.
+/// A file that is neither ingested nor reportable is a silent hole: the pair
+/// (ingest, drift) otherwise reports a clean sweep over a partially-covered
+/// tree, which is a false green rather than a visible gap (#183).
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct UnhandledFile {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+/// The outcome of a discovery walk: what will be ingested, and what will not.
+pub(crate) struct Discovery {
+    pub files: Vec<PathBuf>,
+    pub unhandled: Vec<UnhandledFile>,
+}
+
+/// The first line of a file, if it is readable as UTF-8.
+///
+/// Used only for shebang sniffing, so a binary (invalid UTF-8) simply yields
+/// `None` and stays out of discovery.
+fn first_line(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(file).read_line(&mut line).ok()?;
+    Some(line)
+}
+
+/// The analyzer language implied by a file's shebang, plus whether it had one.
+///
+/// Only consulted for extensionless files: an extension is cheaper and more
+/// reliable when present.
+pub(crate) fn shebang_of(path: &Path) -> Option<(bool, Option<Language>)> {
+    let line = first_line(path)?;
+    let trimmed = line.trim_end();
+    if !Language::is_shebang(trimmed) {
+        return None;
+    }
+    Some((true, Language::from_shebang(trimmed)))
+}
+
 pub(crate) fn discover_files(
     path: &Path,
     lang_override: Option<Language>,
     unparsed_set: &std::collections::HashSet<String>,
 ) -> Result<Vec<PathBuf>> {
+    Ok(discover_files_detailed(path, lang_override, unparsed_set)?.files)
+}
+
+/// Walk the tree, returning both the files ingest will process and the ones it
+/// will not, each with a reason.
+pub(crate) fn discover_files_detailed(
+    path: &Path,
+    lang_override: Option<Language>,
+    unparsed_set: &std::collections::HashSet<String>,
+) -> Result<Discovery> {
     // Whether a path's (lowercased) extension is in the unparsed allowlist.
     let ext_allowed = |p: &Path| {
         p.extension()
@@ -825,9 +921,15 @@ pub(crate) fn discover_files(
 
     if path.is_file() {
         let path_str = path.to_string_lossy();
-        if lang_override.is_some() || Language::from_path(&path_str).is_some() || ext_allowed(path)
+        if lang_override.is_some()
+            || Language::from_path(&path_str).is_some()
+            || ext_allowed(path)
+            || shebang_of(path).is_some()
         {
-            return Ok(vec![path.to_path_buf()]);
+            return Ok(Discovery {
+                files: vec![path.to_path_buf()],
+                unhandled: Vec::new(),
+            });
         }
         bail!(
             "unsupported file type: {}. Use --language or --unparsed-ext to override.",
@@ -836,6 +938,7 @@ pub(crate) fn discover_files(
     }
 
     let mut files = Vec::new();
+    let mut unhandled = Vec::new();
     let walker = WalkBuilder::new(path)
         .follow_links(false)
         .add_custom_ignore_filename(".hadesignore")
@@ -856,27 +959,43 @@ pub(crate) fn discover_files(
         }
         let entry_path = entry.path();
         let path_str = entry_path.to_string_lossy();
-        let include = if Language::from_path(&path_str).is_some() {
+        let has_ext = entry_path.extension().is_some();
+
+        let (include, reason) = if Language::from_path(&path_str).is_some() {
             // File has a recognized source extension — always include.
-            true
+            (true, "")
         } else if ext_allowed(entry_path) {
             // Extension is in the unparsed allowlist (e.g. cu,cuh) — include
             // for the parser-free embedding fallback (#121).
-            true
-        } else if lang_override.is_some() {
+            (true, "")
+        } else if lang_override.is_some() && !has_ext {
             // Language override active: include extensionless files only
             // (skip .md, .json, images, etc.).
-            entry_path.extension().is_none()
+            (true, "")
+        } else if !has_ext && shebang_of(entry_path).is_some() {
+            // Extensionless script identified by its shebang. `--unparsed-ext`
+            // is extension-keyed and so can never name these (#183); without
+            // this branch they are invisible to both ingest and drift.
+            (true, "")
+        } else if has_ext {
+            (false, "no handler for extension")
         } else {
-            false
+            (false, "no extension and no shebang")
         };
+
         if include {
             files.push(entry_path.to_path_buf());
+        } else {
+            unhandled.push(UnhandledFile {
+                path: path_str.to_string(),
+                reason,
+            });
         }
     }
 
     files.sort();
-    Ok(files)
+    unhandled.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Discovery { files, unhandled })
 }
 
 // ── Per-file ingest ─────────────────────────────────────────────────────
@@ -1186,6 +1305,13 @@ async fn ingest_file(
         "language": lang.name(),
         "metrics": analysis.metrics,
         "symbol_hash": analysis.symbol_hash,
+        // Full-source digest, stored alongside the symbol hash so `codebase
+        // drift` can see content staleness. `symbol_hash` is deliberately
+        // name-only (see compute_symbol_hash), so a rewritten body, changed
+        // signature, or edited comment leaves it identical — without this field
+        // nothing in the system can tell that stored chunks have gone stale
+        // (#183). Recorded only; it does not gate incremental re-ingest.
+        "content_hash": hades_core::code::compute_content_hash(&source),
         "symbol_count": primitive_count,
         "chunk_count": num_chk,
         "embedding_count": num_embeddings_written,
@@ -1475,7 +1601,11 @@ async fn ingest_unparsed_file(
         "rel_path": rel_path,
         "kind": "file",
         "language": lang_label,
+        // The parser-free path has no symbols, so its change-detection digest is
+        // already the full-source hash. Recorded under both names so drift has a
+        // single uniform column across parsed and unparsed files.
         "symbol_hash": content_hash,
+        "content_hash": content_hash,
         "symbol_count": 0,
         "chunk_count": num_chk,
         "embedding_count": num_embeddings_written,
@@ -1579,6 +1709,72 @@ async fn delete_file_chunks(db: &ArangoPool, file_key: &str) {
     {
         debug!(file_key, error = %e, "failed to clean up old chunks (non-fatal)");
     }
+}
+
+/// Remove inbound edges whose target symbol vanished in this run's rebuilds.
+///
+/// Scoped two ways so it cannot over-reach: the target key must carry the
+/// `{file_key}__` prefix of a file this run actually rewrote, AND the target
+/// document must genuinely not resolve. An edge whose symbol was recreated by
+/// enrichment therefore survives.
+///
+/// This is the same repair `codebase prune-orphans` performs globally; doing it
+/// inline keeps `--force` from leaving the graph failing `codebase validate`
+/// until a separate prune is remembered (#183).
+///
+/// Note: symbols of files whose key exceeds the 254-byte budget carry a
+/// *truncated* file_key prefix, so they fall outside this filter and remain
+/// prune-orphans' job.
+async fn sweep_dangling_inbound(db: &ArangoPool, file_keys: &[String]) -> u64 {
+    if file_keys.is_empty() {
+        return 0;
+    }
+    // One query per edge collection, each with a SINGLE modification block.
+    // ArangoDB forbids calling DOCUMENT() after a data-modification operation in
+    // the same query (error 1579), so chaining the three sweeps into one query
+    // fails at runtime — this mirrors the one-collection-per-query shape that
+    // `codebase prune-orphans` already uses.
+    let mut removed = 0u64;
+    for edges in [
+        CODEBASE.imports_edges,
+        CODEBASE.calls_edges,
+        CODEBASE.implements_edges,
+    ] {
+        let aql = "\
+            LET prefixes = (FOR fk IN @keys RETURN CONCAT(@symbols_name, '/', fk, '__')) \
+            LET gone = (FOR e IN @@edges \
+                FILTER DOCUMENT(e._to) == null \
+                  AND LENGTH(FOR p IN prefixes FILTER STARTS_WITH(e._to, p) LIMIT 1 RETURN 1) > 0 \
+                REMOVE e IN @@edges RETURN 1) \
+            RETURN LENGTH(gone)";
+        let bind = json!({
+            "@edges": edges,
+            "symbols_name": CODEBASE.symbols,
+            "keys": file_keys,
+        });
+        match hades_core::db::query::query(
+            db,
+            aql,
+            Some(&bind),
+            None,
+            false,
+            ExecutionTarget::Writer,
+        )
+        .await
+        {
+            Ok(rows) => {
+                removed += rows
+                    .results
+                    .first()
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_default();
+            }
+            Err(e) => {
+                warn!(collection = edges, error = %e, "failed to sweep dangling inbound edges after re-ingest (non-fatal; run `codebase prune-orphans`)");
+            }
+        }
+    }
+    removed
 }
 
 /// Purge a file's existing symbols and the **source-owned (outgoing) edges**
@@ -2787,6 +2983,52 @@ mod tests {
 
         let files = discover_files(dir.path(), None, &HashSet::new()).unwrap();
         assert_eq!(files.len(), 1); // only a.py
+    }
+
+    #[test]
+    fn test_discover_files_includes_extensionless_shebang_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        // Extensionless shell script: `--unparsed-ext` is extension-keyed and so
+        // can never name this file (#183).
+        fs::write(dir.path().join("deploy-thing"), "#!/bin/bash\necho hi\n").unwrap();
+        // Extensionless Python script: should be recognized as Python.
+        fs::write(dir.path().join("runner"), "#!/usr/bin/env python3\nx = 1\n").unwrap();
+        // Extensionless non-script: no shebang, stays out.
+        fs::write(dir.path().join("NOTES"), "just prose\n").unwrap();
+
+        let d = discover_files_detailed(dir.path(), None, &HashSet::new()).unwrap();
+        let names: Vec<String> = d
+            .files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"deploy-thing".to_string()), "got {names:?}");
+        assert!(names.contains(&"runner".to_string()), "got {names:?}");
+        assert!(!names.contains(&"NOTES".to_string()), "got {names:?}");
+
+        // And the one that stayed out is REPORTED, not silently dropped.
+        let unhandled: Vec<&str> = d.unhandled.iter().map(|u| u.reason).collect();
+        assert_eq!(d.unhandled.len(), 1, "{:?}", d.unhandled);
+        assert_eq!(unhandled[0], "no extension and no shebang");
+    }
+
+    #[test]
+    fn test_discover_files_reports_unhandled_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+        fs::write(dir.path().join("data.json"), "{}\n").unwrap();
+        fs::write(dir.path().join("Config.toml"), "k = 1\n").unwrap();
+
+        let d = discover_files_detailed(dir.path(), None, &HashSet::new()).unwrap();
+        assert_eq!(d.files.len(), 1, "only the .py is handled");
+        // The two unhandled files are counted with a reason rather than falling
+        // outside drift's notion of source entirely — that silence was the bug.
+        assert_eq!(d.unhandled.len(), 2, "{:?}", d.unhandled);
+        assert!(
+            d.unhandled
+                .iter()
+                .all(|u| u.reason == "no handler for extension")
+        );
     }
 
     #[test]

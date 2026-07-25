@@ -62,6 +62,34 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Fixed
 
+- `codebase drift` reported a clean sweep over partially-covered trees.
+  Files with no ingest handler fell outside drift's notion of source
+  entirely — neither ingested nor reportable — so `stale=0 uningested=0`
+  was returned for a tree ingest had only partly read. Drift now reports
+  an `unhandled` bucket with a per-file reason, and a `clean` flag that
+  is false whenever anything is unhandled or changed. (#183)
+- `codebase drift` could not see content staleness at all. `symbol_hash`
+  is deliberately name-only (a rewritten body, changed signature, or
+  edited comment leaves it identical), and drift compared only file
+  existence, so an edited file reported clean while its stored chunks and
+  embeddings were stale. Ingest now records a full-source `content_hash`
+  alongside it and drift reports a `changed` bucket. Files ingested before
+  this change are counted as `unverifiable` rather than assumed clean.
+  Incremental re-ingest behavior is unchanged — `--force` still refreshes
+  such a file. (#183)
+- Extensionless scripts were invisible to ingest. `--unparsed-ext` is
+  extension-keyed, so a file named `deploy-thing` with a `#!/bin/bash`
+  first line could not be named by any flag. Discovery now sniffs the
+  shebang of extensionless files: a recognized interpreter selects the
+  analyzer (`#!…python3` → Python), and any other shebang routes the file
+  to the raw-text path so its content is at least visible. (#183)
+- `codebase ingest --force` could leave the graph failing `codebase
+  validate`. A rebuild that drops a symbol left inbound
+  `codebase_imports_edges` dangling, breaking the `imports_edge_endpoints`
+  invariant until `codebase prune-orphans` was run. Forced re-ingest now
+  sweeps inbound edges whose target symbol no longer exists, scoped to the
+  files it rebuilt and to targets that genuinely do not resolve. (#183)
+
 - Embedding coverage gap during `codebase ingest`. Two root causes:
   the embedder service OOMed on per-file batches whose padded sequence
   lengths exceeded available GPU memory (typically on large source

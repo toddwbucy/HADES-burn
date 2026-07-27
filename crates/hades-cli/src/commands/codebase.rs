@@ -107,10 +107,13 @@ pub enum CodebaseCmd {
     /// keys on `symbol_hash`, which covers symbol *names* only: an edited body,
     /// signature or comment leaves it identical, so a plain `codebase ingest`
     /// skips the file while its stored chunks go stale. Refresh those with
-    /// `codebase ingest --force`. Files taken through the raw-text path
-    /// (shebang scripts, `--unparsed-ext`) store the full-content digest as
-    /// their `symbol_hash`, so a plain re-ingest already picks those up and
-    /// `--force` is not needed for them.
+    /// `codebase ingest --force`.
+    ///
+    /// Files stored at `analysis_tier: "text"` store the full-content digest as
+    /// their `symbol_hash` instead, so a plain re-ingest already picks those up
+    /// and `--force` is not needed. Check the tier, not the extension: besides
+    /// shebang scripts and `--unparsed-ext` files, any file whose analyzer
+    /// failed lands there too (a `.go` without gopls, a `.c` without libclang).
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

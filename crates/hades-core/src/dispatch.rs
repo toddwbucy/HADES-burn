@@ -1261,7 +1261,6 @@ pub async fn dispatch(
         DaemonCommand::CodebaseStats(_) => handlers::codebase_stats(pool)
             .await
             .map_err(DispatchError::Handler),
-
         // No catch-all arm. Every `DaemonCommand` variant is handled above,
         // and it stays that way: a new variant without an arm is now a
         // compile error rather than a runtime NOT_IMPLEMENTED that only

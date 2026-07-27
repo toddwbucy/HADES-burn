@@ -72,8 +72,9 @@ Do these in order. Skipping step 2 is the single most common way agents conclude
 "search is broken" when it is not.
 
 ```bash
-# 1. What databases can I see? (--db is required even here: list via _system)
-hades --db _system db databases
+# 1. What databases can I see? (--db is required even here: the listing is
+#    scoped to the connection, so name any database you can already reach)
+hades --db <any-reachable-db> db databases
 
 # 2. What is actually in this one, and which profile holds it?
 hades --db <name> orient
@@ -86,6 +87,12 @@ hades --db <name> db schema list
 # 4. Now search, naming the profile you learned in step 2.
 hades --db <name> db query "your question" -c codebase -n 10
 ```
+
+On step 1: the listing endpoint is scoped to whatever `--db` names and returns the
+databases the connecting user can access, so every reachable database returns the
+same list. `_system` is the conventional guess when you have no name at all, but
+access is granted per database, so `_system` may be the one database this user
+cannot reach. A 401 or 403 there is a permissions answer, not a broken install.
 
 ## The one concept that trips everyone: profiles
 
@@ -116,9 +123,9 @@ or `-S` instead.
 |---|---|
 | Orientation | `status`, `orient`, `db stats`, `db collections`, `db databases`, `db health` |
 | Search | `db query "text" -c <profile> -n 10 [-H] [-S]`, `db aql '<read-only>' -b '{...}'` |
-| Read | `db get <col> <key>`, `db list -c <col>`, `db count <col>`, `db export <col>`, `db check <id>` |
+| Read | `db get <col> <key>`, `db list -c <profile>`, `db count <col>`, `db export <col>`, `db check <id>` |
 | Write | `db insert <col> --data '[...]'`, `db update <col> <key> --data '{...}'`, `db delete <col> <key> -y` |
-| Collections | `db create <name> -t document|edge`, `db truncate <col> -y`, `db drop-collection <col> -y`, `db create-index`, `db index-status` |
+| Collections | `db create <name> -t document\|edge`, `db truncate <col> -y`, `db drop-collection <col> -y`, `db create-index`, `db index-status` |
 | Graph | `db graph list`, `db graph neighbors <id> --graph <g>`, `db graph traverse <id> --graph <g>`, `db graph shortest-path`, `db graph create`, `db graph materialize` |
 | Schema | `schema apply <file.yaml> [--dry-run] [-y]`, `db schema {init,list,version}`, `db schema show <name>` |
 | Code graph | `codebase ingest <path>`, `codebase drift <path>`, `codebase validate`, `codebase stats`, `codebase prune-orphans`, `codebase retire`, `codebase update` |
@@ -193,11 +200,21 @@ so that one stays counted until the file is readable again or its node is retire
 `unhandled` does **not** block `clean`, because every repository contains a
 README. Read the bucket and judge for yourself whether the gap matters.
 
-`changed` is worth understanding. Incremental re-ingest keys on the file node's
+`changed` is worth understanding, and it means different things on the two ingest
+paths.
+
+For a file a parser analyzed, incremental re-ingest keys on the file node's
 `symbol_hash` field, which covers symbol **names** only, so an edit to a body, a
 signature, or a comment leaves it unchanged and an ordinary `codebase ingest`
 will skip the file. Drift compares a full-content hash and will still report it
 as `changed`. The remedy is `codebase ingest --force <path>`.
+
+For a file that came in through the raw-text path (shebang scripts,
+`--unparsed-ext`), `symbol_hash` is stored as the full-content digest, so any
+edit changes it and a plain `codebase ingest` picks the file up on its own. Check
+which bucket you are in before reaching for `--force`, because `--force` applies
+to the whole ingest root and rebuilds symbols, chunks and embeddings for every
+file under it.
 
 One caveat on `--force`, in both of the cases above: it still refuses to replace
 a richer stored analysis with a poorer one. If the file was originally analyzed
@@ -216,10 +233,19 @@ sound, keys are deterministic). Note that `validate` and `drift` answer differen
 questions. `validate` asks "is the graph self-consistent". `drift` asks "does the
 graph still describe the tree". A graph can pass one and fail the other.
 
-If `validate` reports dangling edges after a forced re-ingest, that is expected
-and reported: rebuilding a file can drop a symbol another file points at. HADES
-reports these as `dangling_inbound_edges` rather than deleting them, because each
-one records a real dependency.
+If `validate` reports dangling edges after a forced re-ingest, that is expected:
+rebuilding a file can drop a symbol another file points at. HADES leaves those
+edges in place rather than deleting them, because each one records a real
+dependency.
+
+The two commands name this differently, which matters if you grep. `codebase
+ingest` reports the count in its own output under `dangling_inbound_edges`.
+`codebase validate` has no such key: it emits one record per invariant, shaped
+`{id, name, description, violations, violation_count}`, and unresolved endpoints
+appear under the invariant **names** `defines_edge_endpoints`,
+`calls_edge_endpoints`, `implements_edge_endpoints` and
+`imports_edge_endpoints`. Searching validate output for `dangling_inbound_edges`
+finds nothing and reads as a clean graph.
 
 Two repairs, in order of preference. Re-ingesting the dependent files re-resolves
 the relation and is non-destructive. `codebase prune-orphans` drops the edges,

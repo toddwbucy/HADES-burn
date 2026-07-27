@@ -103,10 +103,14 @@ pub enum CodebaseCmd {
     /// `changed.unverifiable` are all zero. `unhandled` does not gate it, since
     /// every repository contains files no analyzer handles.
     ///
-    /// `changed` exists because incremental ingest keys on `symbol_hash`, which
-    /// covers symbol *names* only: an edited body, signature or comment leaves
-    /// it identical, so a plain `codebase ingest` skips the file while its
-    /// stored chunks go stale. Refresh those with `codebase ingest --force`.
+    /// `changed` exists because for a parser-analyzed file, incremental ingest
+    /// keys on `symbol_hash`, which covers symbol *names* only: an edited body,
+    /// signature or comment leaves it identical, so a plain `codebase ingest`
+    /// skips the file while its stored chunks go stale. Refresh those with
+    /// `codebase ingest --force`. Files taken through the raw-text path
+    /// (shebang scripts, `--unparsed-ext`) store the full-content digest as
+    /// their `symbol_hash`, so a plain re-ingest already picks those up and
+    /// `--force` is not needed for them.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

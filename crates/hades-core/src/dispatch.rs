@@ -2,9 +2,11 @@
 //!
 //! Defines [`DaemonCommand`] — the set of commands the daemon exposes —
 //! and [`dispatch`] which routes them to native Rust handlers.
-//! Commands not yet ported to native Rust return
-//! [`DispatchError::NotImplemented`] so the caller (daemon) can fall
-//! back to subprocess invocation.
+//!
+//! Every command has a native handler. [`dispatch`] matches exhaustively
+//! with no catch-all, so adding a [`DaemonCommand`] variant without a
+//! handler fails to compile instead of surfacing at runtime as a
+//! NOT_IMPLEMENTED error to whichever agent called the tool.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +24,11 @@ const MAX_LIMIT: u32 = 1000;
 /// Dispatch-level errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
-    /// The command has no native Rust handler yet.
+    /// The command has no native Rust handler.
+    ///
+    /// No longer produced by [`dispatch`], which is now exhaustive.
+    /// Retained because it is public API and callers (see `service.rs`)
+    /// still map it to the `NOT_IMPLEMENTED` error code.
     #[error("command not yet implemented natively: {0}")]
     NotImplemented(String),
 
@@ -925,9 +931,9 @@ fn default_metric() -> String {
 
 /// Route a [`DaemonCommand`] to its native handler.
 ///
-/// Returns the handler's JSON result on success.  Commands without a
-/// native Rust implementation return [`DispatchError::NotImplemented`]
-/// so the daemon can fall back to subprocess invocation.
+/// Returns the handler's JSON result on success. The match is exhaustive
+/// with no catch-all arm, so every variant is guaranteed to have a
+/// handler at compile time.
 pub async fn dispatch(
     pool: &ArangoPool,
     config: &HadesConfig,
@@ -1200,6 +1206,27 @@ pub async fn dispatch(
             .map_err(DispatchError::Handler),
         DaemonCommand::TaskGraphIntegration(_) => Ok(handlers::task_graph_integration()),
 
+        // ── Semantic search ───────────────────────────────────────────
+        DaemonCommand::DbQuery {
+            text,
+            limit,
+            collection,
+            hybrid,
+            rerank,
+            structural,
+        } => handlers::db_query(
+            pool,
+            config,
+            &text,
+            limit.unwrap_or(10),
+            collection.as_deref(),
+            hybrid,
+            rerank,
+            structural,
+        )
+        .await
+        .map_err(DispatchError::Handler),
+
         // ── Embedding ─────────────────────────────────────────────────
         DaemonCommand::EmbedText { text } => handlers::embed_text(config, &text)
             .await
@@ -1235,14 +1262,11 @@ pub async fn dispatch(
             .await
             .map_err(DispatchError::Handler),
 
-        // All other commands are not yet implemented natively.
-        // The daemon (P6.3) will fall back to Python subprocess.
-        other => Err(DispatchError::NotImplemented(
-            serde_json::to_value(&other)
-                .ok()
-                .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
-                .unwrap_or_else(|| format!("{other:?}")),
-        )),
+        // No catch-all arm. Every `DaemonCommand` variant is handled above,
+        // and it stays that way: a new variant without an arm is now a
+        // compile error rather than a runtime NOT_IMPLEMENTED that only
+        // shows up when an agent calls the tool. `db.query` was the last
+        // unimplemented command (#187), which is what made this possible.
     }
 }
 
@@ -4392,6 +4416,393 @@ mod handlers {
         })
     }
 
+    // ── Semantic search ───────────────────────────────────────────────
+
+    /// Semantic search over a collection profile.
+    ///
+    /// Two-phase vector search that needs no vector index:
+    /// 1. Embed the query text (`retrieval.query` task, not `passage`).
+    /// 2. Fetch stored embedding vectors + keys (compact, no text).
+    /// 3. Cosine-similarity in Rust, take top-K.
+    /// 4. Batch-fetch chunk text + metadata for the top-K only.
+    /// 5. Optional hybrid keyword rerank, then optional structural fusion.
+    ///
+    /// Efficient up to roughly 100K embeddings per collection. Beyond that
+    /// an `APPROX_NEAR_COSINE` vector index would be needed.
+    ///
+    /// Shared by `hades db query` and the MCP `db_query` tool so the two
+    /// surfaces cannot drift apart.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn db_query(
+        pool: &ArangoPool,
+        config: &crate::config::HadesConfig,
+        text: &str,
+        limit: u32,
+        collection: Option<&str>,
+        hybrid: bool,
+        rerank: bool,
+        structural: bool,
+    ) -> Result<Value, HandlerError> {
+        use crate::persephone::embedding::EmbeddingClient;
+
+        if rerank {
+            return Err(HandlerError::InvalidParameter {
+                name: "rerank".into(),
+                reason: "cross-encoder reranking is not available; use hybrid \
+                         and/or structural instead"
+                    .into(),
+            });
+        }
+
+        // 1. Resolve the collection profile. An omitted profile goes through
+        //    `default_profile()`, which honors HADES_DEFAULT_COLLECTION and
+        //    falls back to `default` — same resolution the CLI has always used.
+        let (profile_name, profile) = match collection {
+            Some(name) => (
+                name.to_string(),
+                CollectionProfile::get(name).ok_or_else(|| HandlerError::InvalidParameter {
+                    name: "collection".into(),
+                    reason: format!(
+                        "unknown profile '{name}' — valid profiles: {}",
+                        CollectionProfile::all()
+                            .iter()
+                            .map(|(n, _)| *n)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                })?,
+            ),
+            None => {
+                let resolved = CollectionProfile::default_profile();
+                let name = CollectionProfile::all()
+                    .iter()
+                    .find(|(_, p)| p.metadata == resolved.metadata)
+                    .map(|(n, _)| (*n).to_string())
+                    .unwrap_or_else(|| "default".to_string());
+                (name, resolved)
+            }
+        };
+
+        // 2. Embed the query text. `retrieval.query` is deliberate: the
+        //    embedder is asymmetric, and embedding a query as a passage
+        //    measurably degrades retrieval.
+        let client = EmbeddingClient::connect_at(&config.embedding.service.socket)
+            .await
+            .map_err(|e| {
+                HandlerError::ServiceError(format!(
+                    "failed to connect to embedding service — is it running? {e}"
+                ))
+            })?;
+        let embed_result = client
+            .embed(&[text.to_string()], "retrieval.query", None)
+            .await
+            .map_err(|e| HandlerError::ServiceError(format!("failed to embed query text: {e}")))?;
+        let query_vec = embed_result.embeddings.first().ok_or_else(|| {
+            HandlerError::ServiceError("embedder returned empty embeddings array".into())
+        })?;
+
+        // 3. Phase 1 — fetch embedding vectors with their keys.
+        let fk = profile.foreign_key;
+        let fetch_aql = format!(
+            "FOR emb IN @@embeddings \
+                 FILTER emb.chunk_key != null AND emb.{fk} != null AND emb.{fk} != '' \
+                 RETURN {{ chunk_key: emb.chunk_key, {fk}: emb.{fk}, embedding: emb.embedding }}"
+        );
+        let fetch_bind = json!({ "@embeddings": profile.embeddings });
+
+        let emb_result = query::query(
+            pool,
+            &fetch_aql,
+            Some(&fetch_bind),
+            None,
+            false,
+            ExecutionTarget::Reader,
+        )
+        .await
+        .map_err(|e| HandlerError::Query {
+            context: format!(
+                "failed to fetch embeddings from '{}' for vector search",
+                profile.embeddings
+            ),
+            source: e,
+        })?;
+
+        // 4. Phase 2 — cosine similarity in Rust, take top-K.
+        let mut scored: Vec<(f64, &Value)> = emb_result
+            .results
+            .iter()
+            .filter_map(|doc| {
+                let emb = doc["embedding"].as_array()?;
+                let stored: Vec<f32> = emb
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                if stored.len() != query_vec.len() {
+                    return None;
+                }
+                Some((cosine_similarity(query_vec, &stored) as f64, doc))
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit as usize);
+
+        // 5. Phase 3 — batch-fetch chunk + metadata for the top-K only.
+        let items: Vec<Value> = scored
+            .iter()
+            .map(|(score, doc)| {
+                json!({
+                    "chunk_key": doc["chunk_key"].as_str().unwrap_or(""),
+                    "parent_key": doc[fk].as_str().unwrap_or(""),
+                    "score": score,
+                })
+            })
+            .collect();
+
+        let mut results: Vec<Value> = if items.is_empty() {
+            Vec::new()
+        } else {
+            let detail_aql = format!(
+                "FOR item IN @items \
+                     LET chunk = DOCUMENT(CONCAT(@chunks_col, '/', item.chunk_key)) \
+                     LET meta = DOCUMENT(CONCAT(@metadata_col, '/', item.parent_key)) \
+                     RETURN {{ \
+                         parent_key: item.parent_key, \
+                         {fk}: item.parent_key, \
+                         text: chunk.text, \
+                         chunk_index: chunk.chunk_index, \
+                         total_chunks: chunk.total_chunks, \
+                         title: meta.title, \
+                         external_id: meta.external_id, \
+                         score: item.score \
+                     }}"
+            );
+            let detail_bind = json!({
+                "chunks_col": profile.chunks,
+                "metadata_col": profile.metadata,
+                "items": items,
+            });
+
+            query::query(
+                pool,
+                &detail_aql,
+                Some(&detail_bind),
+                None,
+                false,
+                ExecutionTarget::Reader,
+            )
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to fetch result details".into(),
+                source: e,
+            })?
+            .results
+        };
+
+        // 6. Optional reranking passes.
+        if hybrid && !results.is_empty() {
+            results = hybrid_rerank(text, results);
+        }
+        if structural && !results.is_empty() {
+            results = structural_rerank(pool, profile.metadata, &results).await?;
+        }
+
+        Ok(json!({
+            "query": text,
+            "collection": profile_name,
+            "model": embed_result.model,
+            "dimension": embed_result.dimension,
+            "result_count": results.len(),
+            "results": results,
+        }))
+    }
+
+    // ── Search scoring helpers ────────────────────────────────────────
+    //
+    // `cosine_similarity` already lives in this module (used by the
+    // graph-embedding handlers), so the search path reuses it rather than
+    // carrying a second copy.
+
+    /// Element-wise mean of a set of vectors.
+    fn compute_centroid(vecs: &[&Vec<f32>]) -> Vec<f32> {
+        if vecs.is_empty() {
+            return Vec::new();
+        }
+        let dim = vecs[0].len();
+        let n = vecs.len() as f32;
+        let mut centroid = vec![0.0f32; dim];
+        for v in vecs {
+            for (i, val) in v.iter().enumerate() {
+                if i < dim {
+                    centroid[i] += val;
+                }
+            }
+        }
+        for c in &mut centroid {
+            *c /= n;
+        }
+        centroid
+    }
+
+    /// Tokenize into lowercase terms, dropping tokens shorter than 2 chars.
+    fn tokenize(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric() && c != '-')
+            .filter(|w| w.len() >= 2)
+            .map(|w| w.to_lowercase())
+            .collect()
+    }
+
+    /// Fraction of unique query terms present in the text.
+    fn keyword_tf_score(query_terms: &[String], text: &str) -> f64 {
+        use std::collections::HashSet;
+
+        let text_lower = text.to_lowercase();
+        let text_terms: HashSet<&str> = text_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '-')
+            .filter(|w| w.len() >= 2)
+            .collect();
+
+        let unique_terms: HashSet<&str> = query_terms.iter().map(|s| s.as_str()).collect();
+        if unique_terms.is_empty() {
+            return 0.0;
+        }
+
+        let matches = unique_terms
+            .iter()
+            .filter(|qt| text_terms.contains(*qt))
+            .count();
+        matches as f64 / unique_terms.len() as f64
+    }
+
+    /// Blend vector similarity with keyword term coverage:
+    /// `0.7 * vector + 0.3 * keyword`, then re-sort.
+    fn hybrid_rerank(query_text: &str, mut results: Vec<Value>) -> Vec<Value> {
+        let query_terms = tokenize(query_text);
+        if query_terms.is_empty() {
+            return results;
+        }
+
+        for result in &mut results {
+            let vector_score = result["score"].as_f64().unwrap_or(0.0);
+            let text = result["text"].as_str().unwrap_or("");
+            let keyword_score = keyword_tf_score(&query_terms, text);
+
+            result["vector_score"] = json!(vector_score);
+            result["keyword_score"] = json!(keyword_score);
+            result["score"] = json!(0.7 * vector_score + 0.3 * keyword_score);
+        }
+
+        results.sort_by(|a, b| {
+            let sa = a["score"].as_f64().unwrap_or(0.0);
+            let sb = b["score"].as_f64().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        results
+    }
+
+    /// Blend search scores with RGCN structural-embedding similarity.
+    ///
+    /// Builds a centroid from the top-3 results that carry a structural
+    /// embedding, scores every result against it, and blends
+    /// `0.7 * current + 0.3 * structural`. Degrades to a no-op when the
+    /// graph has no structural embeddings or their dimensions disagree.
+    async fn structural_rerank(
+        pool: &ArangoPool,
+        metadata_col: &str,
+        results: &[Value],
+    ) -> Result<Vec<Value>, HandlerError> {
+        use std::collections::HashMap;
+
+        let parent_keys: Vec<&str> = results
+            .iter()
+            .filter_map(|r| r.get("parent_key").and_then(|v| v.as_str()))
+            .collect();
+
+        if parent_keys.is_empty() {
+            return Ok(results.to_vec());
+        }
+
+        let aql = "FOR key IN @keys \
+                   LET doc = DOCUMENT(CONCAT(@col, '/', key)) \
+                   RETURN { _key: key, structural_embedding: doc.structural_embedding }";
+        let bind = json!({ "keys": parent_keys, "col": metadata_col });
+
+        let emb_result = query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await
+            .map_err(|e| HandlerError::Query {
+                context: "failed to fetch structural embeddings".into(),
+                source: e,
+            })?;
+
+        let mut emb_map: HashMap<String, Vec<f32>> = HashMap::new();
+        for doc in &emb_result.results {
+            let key = doc["_key"].as_str().unwrap_or("");
+            if let Some(arr) = doc["structural_embedding"].as_array() {
+                let vec: Vec<f32> = arr
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                if !vec.is_empty() {
+                    emb_map.insert(key.to_string(), vec);
+                }
+            }
+        }
+
+        if emb_map.is_empty() {
+            tracing::info!("no structural embeddings found, skipping structural fusion");
+            return Ok(results.to_vec());
+        }
+
+        let top_vecs: Vec<&Vec<f32>> = results
+            .iter()
+            .filter_map(|r| {
+                let key = r.get("parent_key").and_then(|v| v.as_str())?;
+                emb_map.get(key)
+            })
+            .take(3)
+            .collect();
+
+        if top_vecs.is_empty() {
+            return Ok(results.to_vec());
+        }
+
+        let expected_dim = top_vecs[0].len();
+        if top_vecs.iter().any(|v| v.len() != expected_dim) {
+            tracing::info!("mismatched structural embedding dimensions, skipping fusion");
+            return Ok(results.to_vec());
+        }
+
+        let centroid = compute_centroid(&top_vecs);
+
+        let mut fused: Vec<Value> = results
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                let current_score = r["score"].as_f64().unwrap_or(0.0);
+                let key = r.get("parent_key").and_then(|v| v.as_str()).unwrap_or("");
+
+                let structural_sim = emb_map
+                    .get(key)
+                    .filter(|emb| emb.len() == expected_dim)
+                    .map(|emb| cosine_similarity(&centroid, emb) as f64)
+                    .unwrap_or(0.0);
+
+                r["structural_score"] = json!(structural_sim);
+                r["score"] = json!(0.7 * current_score + 0.3 * structural_sim);
+                r
+            })
+            .collect();
+
+        fused.sort_by(|a, b| {
+            let sa = a["score"].as_f64().unwrap_or(0.0);
+            let sb = b["score"].as_f64().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(fused)
+    }
+
     // ── Embedding handlers ────────────────────────────────────────────
 
     /// Embed a single text via the gRPC embedding service.
@@ -5427,6 +5838,88 @@ mod handlers {
             "num_relations": schema.meta.num_relations,
             "feature_dim": schema.meta.feature_dim,
         }))
+    }
+
+    #[cfg(test)]
+    mod search_tests {
+        use super::*;
+
+        #[test]
+        fn tokenize_lowercases_and_splits() {
+            assert_eq!(tokenize("Hello World"), vec!["hello", "world"]);
+            assert_eq!(tokenize("multi-word tool"), vec!["multi-word", "tool"]);
+        }
+
+        #[test]
+        fn tokenize_filters_short_tokens() {
+            assert_eq!(tokenize("a an the tool"), vec!["an", "the", "tool"]);
+        }
+
+        #[test]
+        fn keyword_score_full_and_partial_match() {
+            let terms = tokenize("tool trait");
+            assert_eq!(keyword_tf_score(&terms, "the tool trait is here"), 1.0);
+            assert_eq!(keyword_tf_score(&terms, "the tool is here"), 0.5);
+            assert_eq!(keyword_tf_score(&terms, "nothing relevant"), 0.0);
+        }
+
+        #[test]
+        fn keyword_score_empty_terms_is_zero() {
+            assert_eq!(keyword_tf_score(&[], "any text at all"), 0.0);
+        }
+
+        #[test]
+        fn cosine_similarity_identical_and_orthogonal() {
+            let a = vec![1.0, 0.0, 0.0];
+            let b = vec![0.0, 1.0, 0.0];
+            assert!((cosine_similarity(&a, &a) - 1.0).abs() < 1e-6);
+            assert!(cosine_similarity(&a, &b).abs() < 1e-6);
+        }
+
+        #[test]
+        fn cosine_similarity_zero_vector_is_zero_not_nan() {
+            let zero = vec![0.0, 0.0, 0.0];
+            let a = vec![1.0, 2.0, 3.0];
+            assert_eq!(cosine_similarity(&zero, &a), 0.0);
+        }
+
+        #[test]
+        fn centroid_of_single_vector_is_itself() {
+            let v = vec![1.0, 2.0, 3.0];
+            assert_eq!(compute_centroid(&[&v]), v);
+        }
+
+        #[test]
+        fn centroid_averages_elementwise() {
+            let a = vec![0.0, 2.0];
+            let b = vec![2.0, 4.0];
+            assert_eq!(compute_centroid(&[&a, &b]), vec![1.0, 3.0]);
+        }
+
+        #[test]
+        fn centroid_of_nothing_is_empty() {
+            assert!(compute_centroid(&[]).is_empty());
+        }
+
+        #[test]
+        fn hybrid_rerank_reorders_by_blended_score() {
+            let results = vec![
+                json!({"score": 0.9, "text": "unrelated content"}),
+                json!({"score": 0.8, "text": "tool trait implementation"}),
+            ];
+            let reranked = hybrid_rerank("tool trait", results);
+            // 0.7*0.8 + 0.3*1.0 = 0.86 beats 0.7*0.9 + 0.3*0.0 = 0.63.
+            assert_eq!(reranked[0]["text"], "tool trait implementation");
+            assert_eq!(reranked[0]["vector_score"], 0.8);
+            assert_eq!(reranked[0]["keyword_score"], 1.0);
+        }
+
+        #[test]
+        fn hybrid_rerank_with_no_query_terms_is_a_noop() {
+            let results = vec![json!({"score": 0.5, "text": "a b"})];
+            let reranked = hybrid_rerank("a", results.clone());
+            assert_eq!(reranked, results);
+        }
     }
 }
 

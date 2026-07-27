@@ -291,8 +291,10 @@ struct DbQueryArgs {
     limit: Option<u32>,
     #[schemars(description = "Combine vector similarity with keyword matching (BM25 hybrid)")]
     hybrid: Option<bool>,
-    #[schemars(description = "Rerank results with the reranker model")]
-    rerank: Option<bool>,
+    // No `rerank` field. The cross-encoder it needs does not ship, so the
+    // shared handler rejects it — advertising it would hand an agent a
+    // schema-legal argument that always errors. The CLI likewise rejects
+    // `--rerank` at the argument boundary.
     #[schemars(description = "Blend in structural (graph-topology) embedding similarity")]
     structural: Option<bool>,
 }
@@ -499,7 +501,7 @@ impl HadesMcpServer {
     }
 
     #[tool(
-        description = "Semantic search over a HADES knowledge graph. Embeds the query text and returns the closest chunks/nodes, optionally hybrid (BM25) or reranked."
+        description = "Semantic search over a HADES knowledge graph. Embeds the query text and returns the closest chunks/nodes, optionally blended with keyword (BM25 hybrid) or structural graph similarity. `collection` names a profile (default, codebase), not an arbitrary collection."
     )]
     async fn db_query(
         &self,
@@ -512,7 +514,8 @@ impl HadesMcpServer {
                 limit: a.limit,
                 collection: a.collection,
                 hybrid: a.hybrid.unwrap_or(false),
-                rerank: a.rerank.unwrap_or(false),
+                // Never set from MCP: the tool does not advertise rerank.
+                rerank: false,
                 structural: a.structural.unwrap_or(false),
             },
         )

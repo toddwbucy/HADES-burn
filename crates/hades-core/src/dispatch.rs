@@ -1218,7 +1218,7 @@ pub async fn dispatch(
             pool,
             config,
             &text,
-            limit.unwrap_or(10),
+            limit.unwrap_or(10).min(MAX_LIMIT),
             collection.as_deref(),
             hybrid,
             rerank,
@@ -4417,6 +4417,49 @@ mod handlers {
 
     // ── Semantic search ───────────────────────────────────────────────
 
+    /// Resolve which collection profile a search targets, and its name.
+    ///
+    /// Precedence: an explicit `collection`, then `HADES_DEFAULT_COLLECTION`
+    /// (passed in as `env_default` so this stays pure and testable), then
+    /// `default`.
+    ///
+    /// An unknown name is an error at every level, including from the
+    /// environment. Deliberately NOT `CollectionProfile::default_profile()`,
+    /// which swallows an unknown name and hands back `default`: for search
+    /// that turns a typo'd env var into a silent sweep of the wrong
+    /// collections, reporting zero hits as success. Wrong-profile searches
+    /// are already the most common way this tool gets misread, so the one
+    /// case we can detect should be loud.
+    ///
+    /// Name and profile are resolved together so the `collection` reported
+    /// in the response is always the one actually searched.
+    fn resolve_query_profile(
+        collection: Option<&str>,
+        env_default: Option<&str>,
+    ) -> Result<(String, &'static CollectionProfile), HandlerError> {
+        let name = match collection {
+            Some(name) => name.to_string(),
+            None => env_default
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("default")
+                .to_string(),
+        };
+        let profile =
+            CollectionProfile::get(&name).ok_or_else(|| HandlerError::InvalidParameter {
+                name: "collection".into(),
+                reason: format!(
+                    "unknown profile '{name}' — valid profiles: {}",
+                    CollectionProfile::all()
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            })?;
+        Ok((name, profile))
+    }
+
     /// Semantic search over a collection profile.
     ///
     /// Two-phase vector search that needs no vector index:
@@ -4453,34 +4496,11 @@ mod handlers {
             });
         }
 
-        // 1. Resolve the collection profile. An omitted profile goes through
-        //    `default_profile()`, which honors HADES_DEFAULT_COLLECTION and
-        //    falls back to `default` — same resolution the CLI has always used.
-        let (profile_name, profile) = match collection {
-            Some(name) => (
-                name.to_string(),
-                CollectionProfile::get(name).ok_or_else(|| HandlerError::InvalidParameter {
-                    name: "collection".into(),
-                    reason: format!(
-                        "unknown profile '{name}' — valid profiles: {}",
-                        CollectionProfile::all()
-                            .iter()
-                            .map(|(n, _)| *n)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                })?,
-            ),
-            None => {
-                let resolved = CollectionProfile::default_profile();
-                let name = CollectionProfile::all()
-                    .iter()
-                    .find(|(_, p)| p.metadata == resolved.metadata)
-                    .map(|(n, _)| (*n).to_string())
-                    .unwrap_or_else(|| "default".to_string());
-                (name, resolved)
-            }
-        };
+        // 1. Resolve the collection profile.
+        let (profile_name, profile) = resolve_query_profile(
+            collection,
+            std::env::var("HADES_DEFAULT_COLLECTION").ok().as_deref(),
+        )?;
 
         // 2. Embed the query text. `retrieval.query` is deliberate: the
         //    embedder is asymmetric, and embedding a query as a passage
@@ -4499,6 +4519,12 @@ mod handlers {
         let query_vec = embed_result.embeddings.first().ok_or_else(|| {
             HandlerError::ServiceError("embedder returned empty embeddings array".into())
         })?;
+        tracing::info!(
+            dimension = embed_result.dimension,
+            model = %embed_result.model,
+            duration_ms = embed_result.duration_ms,
+            "embedded query"
+        );
 
         // 3. Phase 1 — fetch embedding vectors with their keys.
         let fk = profile.foreign_key;
@@ -4525,6 +4551,10 @@ mod handlers {
             ),
             source: e,
         })?;
+        tracing::info!(
+            embedding_count = emb_result.results.len(),
+            "fetched embeddings"
+        );
 
         // 4. Phase 2 — cosine similarity in Rust, take top-K.
         let mut scored: Vec<(f64, &Value)> = emb_result
@@ -4798,6 +4828,12 @@ mod handlers {
             let sb = b["score"].as_f64().unwrap_or(0.0);
             sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        tracing::info!(
+            structural_embeddings = emb_map.len(),
+            centroid_sources = top_vecs.len(),
+            "structural fusion applied"
+        );
 
         Ok(fused)
     }
@@ -5918,6 +5954,63 @@ mod handlers {
             let results = vec![json!({"score": 0.5, "text": "a b"})];
             let reranked = hybrid_rerank("a", results.clone());
             assert_eq!(reranked, results);
+        }
+
+        // ── Profile resolution ────────────────────────────────────────
+
+        #[test]
+        fn explicit_profile_wins_over_env() {
+            let (name, p) = resolve_query_profile(Some("codebase"), Some("default")).unwrap();
+            assert_eq!(name, "codebase");
+            assert_eq!(
+                p.metadata,
+                CollectionProfile::get("codebase").unwrap().metadata
+            );
+        }
+
+        #[test]
+        fn omitted_profile_falls_back_to_env_then_default() {
+            let (name, _) = resolve_query_profile(None, None).unwrap();
+            assert_eq!(name, "default");
+
+            let (name, _) = resolve_query_profile(None, Some("codebase")).unwrap();
+            assert_eq!(name, "codebase");
+        }
+
+        #[test]
+        fn blank_env_is_ignored() {
+            let (name, _) = resolve_query_profile(None, Some("   ")).unwrap();
+            assert_eq!(name, "default");
+        }
+
+        #[test]
+        fn unknown_explicit_profile_errors() {
+            let err = resolve_query_profile(Some("nope"), None).unwrap_err();
+            assert!(matches!(err, HandlerError::InvalidParameter { .. }));
+            assert!(err.to_string().contains("unknown profile 'nope'"));
+        }
+
+        /// A typo in HADES_DEFAULT_COLLECTION must error rather than silently
+        /// searching `default`, which would report an empty result as success.
+        #[test]
+        fn unknown_env_profile_errors_rather_than_falling_back() {
+            let err = resolve_query_profile(None, Some("codebse")).unwrap_err();
+            assert!(matches!(err, HandlerError::InvalidParameter { .. }));
+            assert!(err.to_string().contains("unknown profile 'codebse'"));
+        }
+
+        /// The reported name must be the profile actually searched, not one
+        /// recovered by reverse-matching a metadata collection.
+        #[test]
+        fn reported_name_matches_resolved_profile() {
+            for expected in ["default", "codebase"] {
+                let (name, p) = resolve_query_profile(Some(expected), None).unwrap();
+                assert_eq!(name, expected);
+                assert_eq!(
+                    p.metadata,
+                    CollectionProfile::get(expected).unwrap().metadata
+                );
+            }
         }
     }
 }

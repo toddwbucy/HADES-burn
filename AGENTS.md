@@ -161,10 +161,14 @@ Ingest at the **repository root, as a directory**, not file by file. A node key 
 its path relative to the ingest root with `.` and `/` replaced by `_`. Ingesting
 piecemeal produces inconsistent keys and edges that do not resolve.
 
-Files with a recognized extension get AST analysis. Files with an unhandled
-extension are skipped. Extensionless files are classified by shebang, so a script
-starting with `#!/bin/bash` is picked up and stored as raw text. Use
+Files with a recognized extension are sent to AST analysis, though a file whose
+analyzer fails falls back to raw text rather than erroring. Files with an
+unhandled extension are skipped. Extensionless files are classified by shebang,
+so a script starting with `#!/bin/bash` is picked up and stored as raw text. Use
 `--unparsed-ext cu,cuh` to bring extra extensions in through the raw-text path.
+
+Which path a file actually took is recorded on its node as `analysis_tier`, and
+that is the only reliable way to know. Extension is not a proxy for it.
 
 ### Check whether a graph still matches its source tree
 
@@ -209,18 +213,38 @@ signature, or a comment leaves it unchanged and an ordinary `codebase ingest`
 will skip the file. Drift compares a full-content hash and will still report it
 as `changed`. The remedy is `codebase ingest --force <path>`.
 
-For a file that came in through the raw-text path (shebang scripts,
-`--unparsed-ext`), `symbol_hash` is stored as the full-content digest, so any
-edit changes it and a plain `codebase ingest` picks the file up on its own. Check
-which bucket you are in before reaching for `--force`, because `--force` applies
-to the whole ingest root and rebuilds symbols, chunks and embeddings for every
-file under it.
+For a file that came in through the raw-text path, `symbol_hash` is stored as the
+full-content digest, so any edit changes it and a plain `codebase ingest` picks
+the file up on its own. Check which path a file took before reaching for
+`--force`, because `--force` applies to the whole ingest root and rebuilds
+symbols, chunks and embeddings for every file under it.
 
-One caveat on `--force`, in both of the cases above: it still refuses to replace
-a richer stored analysis with a poorer one. If the file was originally analyzed
-by a tool that is not available now (rust-analyzer, gopls), the forced run
-reports the file as skipped and drift keeps reporting it. Add
-`--allow-analysis-downgrade` when that is what you want.
+Do not classify by extension. Three things land on the raw-text path: shebang
+scripts, `--unparsed-ext` files, and **any file whose analyzer failed** (a `.go`
+file ingested on a host without gopls, a `.c` or `.cu` without libclang). The
+third case is invisible from the filename, which is why the discriminator is the
+stored `analysis_tier`. A node whose tier is `text` has a full-content
+`symbol_hash` and needs no `--force`, whatever its extension.
+
+`--force` never permits an analyzer-fidelity downgrade on its own, and that shows
+up in two very different ways.
+
+**Analyzer missing: the whole run refuses, up front.** rust-analyzer and gopls
+are probed before any file is touched. If the tree contains `.rs` or `.go` files
+and the tool is not runnable, ingest exits non-zero with
+`<name> preflight failed (...)` having written nothing. It stops early on
+purpose, because `--force` purges semantic edges the analyzer would rebuild and
+aborting after the purge would be too late. So on a host without rust-analyzer,
+`codebase ingest --force /repo` to clear a large `unverifiable` moves no counter
+at all. `--allow-analysis-downgrade` is not an afterthought here, it is the only
+thing that lets the command run.
+
+**Analyzer present but beaten on one file: that file alone is skipped.** When a
+lower-tier analysis would overwrite a richer stored one, that single file is
+returned as skipped with
+`error: "higher-fidelity stored analysis preserved"` and drift keeps reporting
+it. The rest of the run proceeds normally. `--allow-analysis-downgrade` lets the
+poorer analysis win.
 
 ### Verify graph integrity
 
@@ -248,17 +272,36 @@ appear under the invariant **names** `defines_edge_endpoints`,
 finds nothing and reads as a clean graph.
 
 Two repairs, in order of preference. Re-ingesting the dependent files re-resolves
-the relation and is non-destructive. `codebase prune-orphans` drops the edges,
-which is destructive, so preview it first:
+the relation and is non-destructive:
 
 ```bash
-hades --db <name> codebase prune-orphans --dry-run   # what would be deleted
-# read the report, confirm it is only what you expect, then:
+hades --db <name> codebase ingest --force <dependent-path>
+```
+
+The `--force` is required, and this is the one place it is easy to get wrong. The
+dependent file is dependent precisely because the *other* file changed, so its
+own symbol set is untouched, its `symbol_hash` still matches, and a plain
+`codebase ingest` skips it. A skipped file is never re-purged and never feeds the
+import and call resolvers that run after the file loop, so its stale outbound
+edges are never rewritten. A plain re-ingest over an otherwise-unchanged tree
+leaves every dangling edge exactly where it was.
+
+The second repair, `codebase prune-orphans`, drops the edges instead. It is
+destructive, so preview it first:
+
+```bash
+hades --db <name> codebase prune-orphans --dry-run   # a floor, not the set
+# read the report and its notes, then:
 hades --db <name> codebase prune-orphans
 ```
 
-It sweeps orphaned symbols, chunks, embeddings, and dangling edges. Deleting an
-edge is deleting a recorded relationship, so never run it unreviewed.
+Read `--dry-run` as a **lower bound, not the deletion set**. The sweep is
+cascade-ordered: a real run deletes orphan symbols first, which strands the edges
+pointing at them, and those get deleted too. A dry-run deletes nothing, so those
+edges still resolve and are not counted. The tool says so itself, in
+`dangling_edges_note` and `orphan_embeddings_note` on the dry-run JSON. Expect a
+real run to remove at least what the preview showed, and possibly more. Deleting
+an edge is deleting a recorded relationship, so never run it unreviewed.
 
 ### Build a new graph database
 
@@ -266,12 +309,18 @@ The flow is create, declare schema, ingest, verify.
 
 ```bash
 set -o pipefail
-hades --db _system db create-database mygraph
+hades --db <any-reachable-db> db create-database mygraph
 hades --db mygraph schema apply schema.yaml --dry-run   # review the plan
 hades --db mygraph schema apply schema.yaml             # no -y on a new database
 hades --db mygraph codebase ingest /path/to/repo
 hades --db mygraph codebase validate
 ```
+
+`db create-database` overrides whatever `--db` names and connects to `_system`
+internally, since that is the only context ArangoDB accepts database creation
+from. Passing `--db _system` yourself does nothing. What the command does need is
+a `_system` grant on the connecting user, and no `--db` value substitutes for
+one: a 401 or 403 here is a permissions answer, not a wrong flag.
 
 The schema YAML declares `collections`, `edge_definitions`, `named_graphs`, and
 optionally `relation_order` plus `feature_dim` and `model_type` for structural

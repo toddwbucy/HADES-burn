@@ -575,7 +575,9 @@ pub async fn run(
         warn!(
             edges = dangling_inbound,
             "inbound edges now point at symbols this run removed; re-ingest the \
-             dependent files, or run `hades codebase prune-orphans` to drop them"
+             dependent files with `codebase ingest --force <path>` (a plain \
+             re-ingest skips them, since their own symbol_hash is unchanged), \
+             or run `hades codebase prune-orphans` to drop them"
         );
     }
 

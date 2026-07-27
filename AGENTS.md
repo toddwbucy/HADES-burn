@@ -180,25 +180,30 @@ This is the honest health check. The JSON reports:
 
 `unverifiable` blocks `clean` on purpose. A file nobody compared is not a file
 known to be current, and reporting a clean sweep over uncompared files is exactly
-the false green this command exists to remove. If an older graph reports
-`clean: false` with a large `unverifiable`, re-ingest to give those nodes a
-content hash and the number goes to zero.
+the false green this command exists to remove.
+
+Any graph built before `content_hash` existed reports `clean: false` with a large
+`unverifiable`. The remedy is `codebase ingest --force <path>`, and the `--force`
+is load-bearing: a plain re-ingest skips every file whose `symbol_hash` still
+matches and returns before it writes the file document that carries
+`content_hash`, so the count does not move. The exception is a file counted as
+unverifiable because it no longer reads as text. Re-ingest cannot read it either,
+so that one stays counted until the file is readable again or its node is retired.
 
 `unhandled` does **not** block `clean`, because every repository contains a
 README. Read the bucket and judge for yourself whether the gap matters.
 
 `changed` is worth understanding. Incremental re-ingest keys on the file node's
 `symbol_hash` field, which covers symbol **names** only, so an edit to a body, a
-signature, or
-a comment leaves it unchanged and an ordinary `codebase ingest` will skip the
-file. Drift compares a full-content hash and will still report it as `changed`.
-The remedy is `codebase ingest --force <path>`.
+signature, or a comment leaves it unchanged and an ordinary `codebase ingest`
+will skip the file. Drift compares a full-content hash and will still report it
+as `changed`. The remedy is `codebase ingest --force <path>`.
 
-One caveat on that remedy: `--force` still refuses to replace a richer stored
-analysis with a poorer one. If the file was originally analyzed by a tool that is
-not available now (rust-analyzer, gopls), the forced run reports the file as
-skipped and drift keeps reporting `changed`. Add `--allow-analysis-downgrade`
-when that is what you want.
+One caveat on `--force`, in both of the cases above: it still refuses to replace
+a richer stored analysis with a poorer one. If the file was originally analyzed
+by a tool that is not available now (rust-analyzer, gopls), the forced run
+reports the file as skipped and drift keeps reporting it. Add
+`--allow-analysis-downgrade` when that is what you want.
 
 ### Verify graph integrity
 

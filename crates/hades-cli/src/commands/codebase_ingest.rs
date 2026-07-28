@@ -283,30 +283,18 @@ pub async fn run(
         // gate protects and the set the phases process cannot diverge — a
         // divergence here is exactly how `--language rust` on non-.rs files
         // would skip the preflight and silently lose enrichment (#164).
-        let is_rust_target = is_semantic_target(
+        if is_semantic_target(
             file_path,
             lang_override,
             &unparsed_set,
             Language::Rust,
             "rs",
-        );
-        if is_rust_target {
+        ) {
             rust_abs_paths.push(file_path.clone());
         }
-        let is_go_target =
-            is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go");
-        if is_go_target {
+        if is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go") {
             go_abs_paths.push(file_path.clone());
         }
-
-        // A post-loop LSP phase will re-supply this file's semantic symbols and
-        // edges after the per-file write, so the fidelity guard must not block
-        // the rewrite: the purge it is protecting is undone within this same
-        // run. Without this, Go — which has no per-file semantic analyzer and so
-        // can only ever offer `Structural` — was pinned against re-ingest
-        // forever once the gopls phase had stamped the node (#193).
-        let reenriched_this_run = (is_rust_target && rust_analyzer_cmd.is_some())
-            || (is_go_target && gopls_cmd.is_some());
 
         let result = if is_unparsed {
             ingest_unparsed_file(
@@ -319,7 +307,6 @@ pub async fn run(
                 "no registered language or grammar",
                 force,
                 allow_analysis_downgrade,
-                reenriched_this_run,
             )
             .await
         } else {
@@ -334,7 +321,7 @@ pub async fn run(
                 compile_commands,
                 force,
                 allow_analysis_downgrade,
-                reenriched_this_run,
+                gopls_cmd.is_some(),
             )
             .await
         };
@@ -1061,7 +1048,7 @@ async fn ingest_file(
     compile_commands: Option<&Path>,
     force: bool,
     allow_analysis_downgrade: bool,
-    reenriched_this_run: bool,
+    gopls_scheduled: bool,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -1071,6 +1058,23 @@ async fn ingest_file(
     let lang = lang_override
         .or_else(|| Language::from_path(rel_path))
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
+
+    // Go alone gets the fidelity-guard escape hatch, and only when the gopls
+    // phase will actually run this pass. Go has no per-file semantic analyzer,
+    // so this function can never reproduce a stored `Semantic` on its own and
+    // the guard would pin the node forever (#193).
+    //
+    // Rust is deliberately NOT in this set. `rust_ast` produces `Semantic` per
+    // file and rust-analyzer only augments it, so a stored `Semantic` is
+    // something this function normally reproduces. Releasing the guard there
+    // would let a file `syn` cannot parse — a mid-edit save, or syntax newer
+    // than the pinned `syn` — fall to tree-sitter and silently overwrite good
+    // semantic artifacts that nothing would restore.
+    //
+    // Deriving this from the resolved language rather than from the discovery
+    // predicate also keeps `--language go` from turning the guard off for files
+    // that are not Go.
+    let reenriched_this_run = gopls_scheduled && lang == Language::Go;
 
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
@@ -1098,7 +1102,6 @@ async fn ingest_file(
                     &reason,
                     force,
                     allow_analysis_downgrade,
-                    reenriched_this_run,
                 )
                 .await;
             }
@@ -1523,7 +1526,6 @@ async fn ingest_unparsed_file(
     fallback_reason: &str,
     force: bool,
     allow_analysis_downgrade: bool,
-    reenriched_this_run: bool,
 ) -> Result<FileResult> {
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("failed to read {}", file_path.display()))?;
@@ -1535,7 +1537,7 @@ async fn ingest_unparsed_file(
         &fkey,
         AnalysisTier::Text,
         allow_analysis_downgrade,
-        reenriched_this_run,
+        false,
     )
     .await?
     {
@@ -1902,14 +1904,23 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 /// afterwards, in this same run. Blocking the rewrite there protects nothing —
 /// the purge is immediately followed by re-enrichment — while permanently
 /// pinning every `.go` node against re-ingest (#193). C++ and Python have no
-/// such phase, so a genuine downgrade there is permanent and still blocked.
+/// such phase, so a genuine downgrade there is permanent and still blocked, and
+/// neither does Rust: `rust_ast` produces `Semantic` per file and
+/// rust-analyzer only augments it, so the caller must not set this for Rust.
+///
+/// The hatch never applies to an incoming `Text`. That tier is only reached
+/// when every parser failed, and a file that defeated tree-sitter defeats the
+/// LSP phase too, so nothing re-supplies what the purge would drop. Enforced
+/// here rather than left to callers, because it is the one case where being
+/// wrong costs a silent, permanent loss of structure.
 fn should_preserve_tier(
     stored: Option<AnalysisTier>,
     incoming: AnalysisTier,
     allow_downgrade: bool,
     reenriched_this_run: bool,
 ) -> bool {
-    !allow_downgrade && !reenriched_this_run && stored.is_some_and(|tier| tier > incoming)
+    let hatch = reenriched_this_run && incoming > AnalysisTier::Text;
+    !allow_downgrade && !hatch && stored.is_some_and(|tier| tier > incoming)
 }
 
 /// Enforce monotonic analyzer fidelity before any destructive per-file write.
@@ -2766,6 +2777,138 @@ mod tests {
         .await;
     }
 
+    /// #193 end to end: a `.go` node stamped `semantic` by the old gopls patch
+    /// must be re-ingestable, and must still be protected when nothing will
+    /// re-enrich it.
+    ///
+    /// The regression this pins is a property of a real write-read-write cycle,
+    /// not of `should_preserve_tier`'s truth table: the guard returned early at
+    /// `preserve_higher_fidelity`, ahead of the `!force` check, so every `.go`
+    /// file reported `skipped` on every run after the first with `--force`
+    /// included. A unit test on a pure function cannot observe that.
+    ///
+    /// Both directions are asserted, because the fix is only correct if it
+    /// releases the guard *and* leaves it in force where nothing restores the
+    /// purged data.
+    ///
+    /// Requires ArangoDB (skips if the socket is absent, per the integration
+    /// test convention). PID-suffixed fixture keys, cleaned up either way.
+    #[tokio::test]
+    async fn test_stamped_go_node_is_reingestable_but_still_guarded() {
+        let Some(pool) = test_pool() else { return };
+        if !codebase_collections_present(&pool).await {
+            eprintln!("skipping: target database has no codebase collections");
+            return;
+        }
+        let config = HadesConfig::default();
+        let pid = std::process::id();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("stamped.go");
+        let rel_path = format!("__hades_test193_{pid}/stamped.go");
+        let fkey = keys::file_key(&rel_path);
+        cleanup_fixture(&pool, &fkey).await;
+
+        fs::write(
+            &path,
+            "package fixture\n\nfunc Stamped(input uint64) uint64 { return input + 1 }\n",
+        )
+        .unwrap();
+
+        // First ingest: Go has no per-file semantic analyzer, so this lands at
+        // `structural` with a tree-sitter serialized digest.
+        let mut imports = ImportContext::default();
+        let first = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("first ingest failed");
+        assert!(
+            first.skipped.is_none_or(|s| !s),
+            "first ingest must not skip (error: {:?})",
+            first.error
+        );
+
+        // Reproduce the pre-fix state: the old `store_lsp_extractions` stamped
+        // the file node `semantic` while leaving `symbol_hash` tree-sitter's.
+        upsert_merge_file_node(
+            &pool,
+            &fkey,
+            json!({ "analysis_tier": "semantic", "analyzer": "gopls" }),
+        )
+        .await
+        .expect("failed to stamp fixture node");
+
+        // The bug: with gopls scheduled, this returned skipped regardless of
+        // `--force`, because the guard runs ahead of the force check.
+        let mut imports = ImportContext::default();
+        let released = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            true,
+            false,
+            true,
+        )
+        .await
+        .expect("re-ingest with gopls scheduled failed");
+        assert!(
+            released.skipped.is_none_or(|s| !s),
+            "a stamped .go node must be re-ingestable when the gopls phase will \
+             re-enrich it (error: {:?})",
+            released.error
+        );
+
+        // And the guard must still hold when nothing will restore the purge —
+        // re-stamp, then re-ingest with no gopls phase scheduled.
+        upsert_merge_file_node(
+            &pool,
+            &fkey,
+            json!({ "analysis_tier": "semantic", "analyzer": "gopls" }),
+        )
+        .await
+        .expect("failed to re-stamp fixture node");
+        let mut imports = ImportContext::default();
+        let preserved = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            true,
+            false,
+            false,
+        )
+        .await
+        .expect("re-ingest without gopls failed");
+        assert_eq!(
+            preserved.skipped,
+            Some(true),
+            "with no re-enrichment scheduled the fidelity guard must still \
+             preserve (error: {:?})",
+            preserved.error
+        );
+
+        cleanup_fixture(&pool, &fkey).await;
+    }
+
     /// Connect to the integration-test database, or `None` to skip.
     fn test_pool() -> Option<ArangoPool> {
         let socket = std::path::PathBuf::from(
@@ -2789,8 +2932,14 @@ mod tests {
             eprintln!("skipping: ARANGO_PASSWORD not set");
             return None;
         };
-        let client =
-            hades_core::db::ArangoClient::with_socket(socket, "bident_burn", "root", &password);
+        // Target database and user are overridable so these tests can be
+        // pointed at a dedicated throwaway graph. The `bident_burn` default has
+        // no codebase collections, so without an override the live tests here
+        // skip rather than run — which is silent, and makes it easy to believe
+        // a regression is covered when nothing executed.
+        let database = std::env::var("HADES_TEST_DB").unwrap_or_else(|_| "bident_burn".to_string());
+        let user = std::env::var("HADES_TEST_USER").unwrap_or_else(|_| "root".to_string());
+        let client = hades_core::db::ArangoClient::with_socket(socket, &database, &user, &password);
         Some(ArangoPool::new(client.clone(), client))
     }
 
@@ -3025,6 +3174,55 @@ mod tests {
             false,
             false
         ));
+    }
+
+    /// The hatch must never release a raw-text write, whatever the caller says.
+    ///
+    /// `Text` is only reached when the semantic analyzer *and* tree-sitter both
+    /// failed, and a file that defeated tree-sitter defeats the LSP phase too —
+    /// so the premise the hatch rests on ("re-enrichment undoes the purge") is
+    /// false exactly there. Left to the caller, this cost a silent, permanent
+    /// loss of structure for a partially-written `.go` file.
+    #[test]
+    fn test_hatch_never_releases_a_raw_text_downgrade() {
+        for stored in [AnalysisTier::Semantic, AnalysisTier::Structural] {
+            assert!(
+                should_preserve_tier(Some(stored), AnalysisTier::Text, false, true),
+                "incoming Text must be preserved against stored {stored:?} even with \
+                 re-enrichment scheduled"
+            );
+        }
+
+        // An explicit downgrade is still the operator's call to make.
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Text,
+            true,
+            true
+        ));
+    }
+
+    /// The hatch is Go-only, and `ingest_file` derives it from the *resolved*
+    /// language rather than from the discovery predicate.
+    ///
+    /// Rust must never get it: `rust_ast` produces `Semantic` per file and
+    /// rust-analyzer only augments, so releasing the guard would let a source
+    /// file `syn` cannot parse fall to tree-sitter and overwrite good semantic
+    /// artifacts nothing would restore. Deriving from the language also stops
+    /// `--language go` from disabling the guard for files that are not Go.
+    #[test]
+    fn test_reenrichment_hatch_is_go_only() {
+        let hatch_for =
+            |lang: Language, gopls_scheduled: bool| gopls_scheduled && lang == Language::Go;
+
+        assert!(hatch_for(Language::Go, true));
+        assert!(!hatch_for(Language::Go, false));
+        for lang in [Language::Rust, Language::Python, Language::Cpp] {
+            assert!(
+                !hatch_for(lang, true),
+                "{lang:?} has a per-file semantic analyzer and must keep the guard"
+            );
+        }
     }
 
     #[test]

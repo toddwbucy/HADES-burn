@@ -197,7 +197,7 @@ hades --db <name> codebase drift /path/to/repo
 
 This is the honest health check. The JSON reports:
 
-- `stale.count`: graph nodes whose source file no longer exists
+- `stale.count`: graph nodes with no counterpart under this root
 - `uningested.count`: source files with no node
 - `changed.count`: matched files whose content differs from what was ingested
 - `changed.unverifiable`: matched files that could **not** be compared, because
@@ -207,6 +207,15 @@ This is the honest health check. The JSON reports:
   `reason`
 - `clean`: true only when `stale`, `uningested`, `changed` **and**
   `changed.unverifiable` are all zero
+
+Read `stale` literally, as "no counterpart under this root", not as "the source
+file was deleted". The graph side of that comparison is the whole
+`codebase_files` collection with no filter by ingest root, so in a database
+holding two ingested trees, drift against one reports every node of the other as
+stale while those source files are present and untouched (#192). This is worth
+knowing before acting on it: `--full` exists to feed `codebase retire`, which
+deletes each target's node, chunks, embeddings, symbols and incident edges. Check
+that the keys belong to the tree you meant.
 
 `unverifiable` blocks `clean` on purpose. A file nobody compared is not a file
 known to be current, and reporting a clean sweep over uncompared files is exactly
@@ -249,6 +258,12 @@ semantic symbols and edges afterwards, and those are recorded on the node under
 their own keys (`gopls_analyzed`, `gopls_symbol_count`) rather than by restating
 the file's tier.
 
+On a graph built by an older HADES, `.go` nodes still read `semantic` from a
+stamp that version wrote, even though their digest is tree-sitter's. Treat those
+as `structural`. A plain re-ingest will not clear the stamp, because the
+unchanged-digest skip fires before the node is rewritten;
+`codebase ingest --force <the original ingest root>` does.
+
 Read the tier off the node rather than guessing from the extension. `--force` is
 the broadest remedy: it rebuilds symbols, chunks and embeddings for every file
 under the ingest root.
@@ -275,10 +290,16 @@ it. This guard runs *before* the `--force` check and is gated on
 
 The case to expect is a semantic analyzer that was available at first ingest and
 is not now: C++ ingested without the compilation database it had before, so
-libclang loses to the stored `semantic`. Rust and Go do not hit this, because
-their semantic artifacts come from a phase that re-runs later in the same ingest,
-and the guard yields when that is scheduled. `--allow-analysis-downgrade` is the
-way through when you do want the poorer analysis stored.
+libclang loses to the stored `semantic`. The same holds for a Rust file `syn`
+can no longer parse, since Rust's `semantic` tier comes from `syn` per file and
+rust-analyzer only augments it. `--allow-analysis-downgrade` is the way through
+when you do want the poorer analysis stored.
+
+Go is the one language the guard steps aside for, and only because its semantic
+artifacts come from the gopls phase rather than from a per-file analyzer, so the
+purge is undone later in the same run. That never applies to a file every parser
+failed on: an incoming raw-text tier is always preserved, because nothing would
+re-supply the structure it would drop.
 
 ### Verify graph integrity
 

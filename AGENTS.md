@@ -214,13 +214,16 @@ This is the honest health check. The JSON reports:
   you passed is usually a mis-rooted ingest of this same tree, not a second
   graph
 - `uningested.count`: source files with no node
+- `collisions`: source files whose key is already held by a node from a
+  different ingest root, listed with `held_by`. **Not** uningested, and the
+  remedy is not `codebase ingest` -- see below
 - `changed.count`: matched files whose content differs from what was ingested
 - `changed.unverifiable`: matched files that could **not** be compared, because
   they were ingested before HADES recorded a content hash, or are no longer
   readable as text. Note it is nested under `changed`, not top level.
 - `unhandled.count`: files under the root ingest has no handler for, each with a
   `reason`
-- `clean`: true only when `stale`, `uningested`, `changed` **and**
+- `clean`: true only when `stale`, `uningested`, `collisions`, `changed` **and**
   `changed.unverifiable` are all zero
 
 Read `stale` literally, as "no counterpart under this root", not as "the source
@@ -237,6 +240,15 @@ Re-ingesting a root attributes every node whose file still exists. One whose fil
 is already gone is never rediscovered, so no re-ingest attributes it. On a graph
 built before attribution, expect a residue there that only a reviewed retire
 clears; it does not grow.
+
+`collisions` is the one bucket where the obvious remedy is wrong. A node key is
+the file's path relative to its ingest root, and nothing in it identifies the
+root -- so `src/main.py` in two different repositories derives the same key, and
+only one document can exist. Re-ingesting a colliding file does not create a
+node for your tree, it overwrites the other tree's, and that tree's next drift
+run then reports the same file as colliding against you. The two roots trade one
+document back and forth for as long as you keep "fixing" it. Keep colliding trees
+in separate databases (#196).
 
 `unverifiable` blocks `clean` on purpose. A file nobody compared is not a file
 known to be current, and reporting a clean sweep over uncompared files is exactly

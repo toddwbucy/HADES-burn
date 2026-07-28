@@ -157,6 +157,13 @@ pub enum CodebaseCmd {
     /// than a second graph: `codebase ingest` on a single file bases its keys at
     /// that file's parent.
     ///
+    /// `collisions` is reported separately from `uningested` because the two
+    /// want opposite responses. `file_key` is purely root-relative, so two trees
+    /// sharing a relative path derive the same key and only one document can
+    /// exist. Re-ingesting a colliding file does not add a node, it takes the
+    /// other tree's — and that tree's next drift then reports the same file
+    /// missing. Keep colliding trees in separate databases (#196).
+    ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total
     /// drift in both directions rather than a small honest number.

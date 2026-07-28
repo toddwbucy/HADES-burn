@@ -371,6 +371,31 @@ pub async fn run(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    // Warn before claiming keys that another ingest root already owns (#196).
+    // `file_key` is purely root-relative, so two trees sharing a relative path
+    // derive the same key and only one document can exist: this run has just
+    // overwritten the other tree's node for each of these. Deliberately a warning
+    // and not a refusal — the same signature is produced by a repository that
+    // simply moved on disk, which is legitimate and common, and this command
+    // cannot tell the two apart from keys alone.
+    match cross_root_keys(&db, &base, &discovered_keys).await {
+        Ok(taken) if !taken.is_empty() => {
+            let mut roots: Vec<&str> = taken.iter().map(|(_, r)| r.as_str()).collect();
+            roots.sort_unstable();
+            roots.dedup();
+            warn!(
+                files = taken.len(),
+                other_roots = roots.join(", "),
+                "these file keys were previously owned by a different ingest root; \
+                 if that root is this same tree at its old location this is just a \
+                 move, but if it is a separate tree its nodes have now been \
+                 overwritten -- keep colliding trees in separate databases (#196)"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "failed to check for cross-root key collisions"),
+    }
+
     match stamp_ingest_root(&db, &base, &discovered_keys).await {
         Ok(0) => {}
         Ok(n) => info!(nodes = n, root = %base.display(), "recorded ingest root"),
@@ -935,6 +960,43 @@ pub(crate) fn parse_language_arg(language: Option<&str>) -> Result<Option<Langua
 /// that look alike and a root-blind comparison reports each tree's nodes as
 /// stale for the other (#192).
 pub(crate) const INGEST_ROOT_FIELD: &str = "ingest_root";
+
+/// File keys among `keys` whose stored node belongs to a *different* ingest root.
+///
+/// Returns `(key, that other root)`. Used to warn that this run has taken over
+/// nodes another tree owned: `file_key` is root-relative, so colliding trees
+/// share one document and the later ingest silently wins (#196).
+async fn cross_root_keys(
+    db: &ArangoPool,
+    base: &Path,
+    keys: &[String],
+) -> Result<Vec<(String, String)>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = base.display().to_string();
+    let aql = format!(
+        "FOR k IN @keys \
+           LET f = DOCUMENT(@@files, k) \
+           FILTER f != null AND f.{INGEST_ROOT_FIELD} != null \
+              AND f.{INGEST_ROOT_FIELD} != @root \
+           RETURN {{ key: f._key, root: f.{INGEST_ROOT_FIELD} }}"
+    );
+    let bind = json!({ "@files": CODEBASE.files, "keys": keys, "root": root });
+    let rows =
+        hades_core::db::query::query(db, &aql, Some(&bind), None, false, ExecutionTarget::Reader)
+            .await?;
+    Ok(rows
+        .results
+        .iter()
+        .filter_map(|v| {
+            Some((
+                v.get("key")?.as_str()?.to_string(),
+                v.get("root")?.as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
 
 /// Stamp `ingest_root` on every existing node in `keys` that does not already
 /// carry this root.

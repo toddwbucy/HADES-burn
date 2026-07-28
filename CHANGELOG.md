@@ -113,7 +113,7 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   `higher-fidelity stored analysis preserved`, `--force` included, leaving
   `codebase drift` reporting the same counts forever. The LSP phases no longer
   overwrite the file node's `analysis_tier`/`analyzer` (the enrichment is
-  already recorded under `gopls_analyzed` / `rust_analyzer_analyzed` and their
+  already recorded under `gopls_analyzed` / `ra_analyzed` and their
   companions, and the symbols and edges it writes carry their own tier), and
   the fidelity guard now yields when the gopls phase is scheduled to re-enrich
   the file later in the same run. Existing graphs recover without

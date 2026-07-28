@@ -39,9 +39,14 @@ codebase or corpus that outlives any one context window.
    Mutating AQL is rejected. Use the structured `db` operations for writes. The
    restriction is the guardrail, not an inconvenience to route around.
 
-4. **Always name the database.** `hades --db <name> <command>`. There is no
-   implicit default. A command without `--db` is a bug waiting to hit the wrong
-   store.
+4. **Always name the database.** `hades --db <name> <command>`. A command
+   without `--db` is a bug waiting to hit the wrong store, and the failure is
+   quieter than you would like: there is no *compiled-in* default, but
+   `HADES_DATABASE` in the environment and `database.name` in `hades.yaml` both
+   supply one. If either is set, a `--db`-less command does not error. It
+   succeeds against whatever they name and prints ordinary JSON, so nothing in
+   the output tells you it read or wrote the wrong store. Run `hades status` if
+   you are unsure which database you are actually talking to.
 
 5. **Know what stderr is for before you silence it.** Output is JSON on stdout,
    logs and errors on stderr. They are separate streams, so a pipe to `jq` gets
@@ -412,7 +417,7 @@ and only then re-run with `-y`.
 |---|---|
 | Silent empty output | The command failed and you suppressed stderr. Re-run without `2>/dev/null` and check the exit code |
 | A pipeline "succeeds" but produces nothing | No `set -o pipefail`, so a failed `hades` exited 1 and the pipeline reported the last command's 0 |
-| JSON parse error | Your harness merged stderr into stdout. Not caused by omitting `2>/dev/null`, which never affects a pipe. Omitting `--db` cannot produce this: it errors on stderr and leaves stdout empty, which is row 1 |
+| JSON parse error | Your harness merged stderr into stdout. Not caused by omitting `2>/dev/null`, which never affects a pipe. Omitting `--db` cannot produce this: it either errors on stderr leaving stdout empty (row 1), or silently uses `HADES_DATABASE`/`hades.yaml` and succeeds |
 | Search returns nothing on a populated DB | Wrong profile. Run `db stats` and pass `-c` |
 | `404 collection embeddings` | Same. Wrong profile, not a broken index |
 | Drift reports near-total drift both ways | Wrong ingest root. Keys are relative to it |

@@ -194,7 +194,8 @@ pub async fn run_drift(
     let mut err = std::io::stderr().lock();
     let _ = writeln!(
         err,
-        "Drift vs {}: {} matched, {} stale (file deleted), {} uningested (no node), \
+        "Drift vs {}: {} matched, {} stale (no counterpart under this root), \
+         {} uningested (no node), \
          {} changed (content differs), {} unhandled (no ingest handler)",
         base.display(),
         matched,

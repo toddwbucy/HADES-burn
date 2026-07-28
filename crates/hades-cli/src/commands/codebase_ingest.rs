@@ -1059,22 +1059,7 @@ async fn ingest_file(
         .or_else(|| Language::from_path(rel_path))
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
 
-    // Go alone gets the fidelity-guard escape hatch, and only when the gopls
-    // phase will actually run this pass. Go has no per-file semantic analyzer,
-    // so this function can never reproduce a stored `Semantic` on its own and
-    // the guard would pin the node forever (#193).
-    //
-    // Rust is deliberately NOT in this set. `rust_ast` produces `Semantic` per
-    // file and rust-analyzer only augments it, so a stored `Semantic` is
-    // something this function normally reproduces. Releasing the guard there
-    // would let a file `syn` cannot parse — a mid-edit save, or syntax newer
-    // than the pinned `syn` — fall to tree-sitter and silently overwrite good
-    // semantic artifacts that nothing would restore.
-    //
-    // Deriving this from the resolved language rather than from the discovery
-    // predicate also keeps `--language go` from turning the guard off for files
-    // that are not Go.
-    let reenriched_this_run = gopls_scheduled && lang == Language::Go;
+    let reenriched_this_run = reenrichment_hatch(rel_path, gopls_scheduled);
 
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
@@ -1895,6 +1880,30 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 
 // ── Incremental check ───────────────────────────────────────────────────
 
+/// May the fidelity guard stand aside for this file, because a post-loop LSP
+/// phase will re-supply what the rewrite drops?
+///
+/// True for Go alone, and only when the gopls phase will actually run. Go has no
+/// per-file semantic analyzer, so `ingest_file` can never reproduce a stored
+/// `Semantic` on its own and the guard would pin the node forever (#193).
+///
+/// Rust is deliberately NOT in this set. `rust_ast` produces `Semantic` per file
+/// and rust-analyzer only augments it, so a stored `Semantic` is something
+/// `ingest_file` normally reproduces. Releasing the guard there would let a file
+/// `syn` cannot parse — a mid-edit save, or syntax newer than the pinned `syn` —
+/// fall to tree-sitter and silently overwrite semantic artifacts nothing would
+/// restore.
+///
+/// Keyed on the path's own extension rather than on `ingest_file`'s resolved
+/// language, because the resolved language *is* `--language` when that flag is
+/// given: `--language go` makes every file in the tree resolve to Go, which
+/// would hand the hatch to `.rs`, `.py` and `.h` files whose stored `Semantic`
+/// gopls cannot rebuild. The override can force how a file is parsed; it cannot
+/// make gopls able to re-enrich it.
+fn reenrichment_hatch(rel_path: &str, gopls_scheduled: bool) -> bool {
+    gopls_scheduled && Language::from_path(rel_path) == Some(Language::Go)
+}
+
 /// Return true when replacing the stored artifacts would lower fidelity.
 ///
 /// `reenriched_this_run` is the escape hatch for languages whose semantic
@@ -2684,8 +2693,14 @@ mod tests {
     }
 
     /// Remove every trace of a test fixture file from the codebase graph.
-    /// Shared prefix for every fixture this test writes, across all PIDs.
-    const FIXTURE_PREFIX: &str = "__hades_test159_";
+    /// Shared prefix for every fixture the live tests in this module write,
+    /// across all PIDs and all tests.
+    ///
+    /// Deliberately broader than any one test's `__hades_test<issue>_` tag: the
+    /// sweep is the only thing that reclaims docs leaked by an assertion that
+    /// unwound past its own cleanup, and a per-test prefix silently stops
+    /// covering the next test somebody adds.
+    const FIXTURE_PREFIX: &str = "__hades_test";
 
     /// Do the codebase collections this test writes to actually exist?
     ///
@@ -2792,7 +2807,9 @@ mod tests {
     /// purged data.
     ///
     /// Requires ArangoDB (skips if the socket is absent, per the integration
-    /// test convention). PID-suffixed fixture keys, cleaned up either way.
+    /// test convention). PID-suffixed fixture keys. A failing assertion unwinds
+    /// past the trailing cleanup, so the leading `cleanup_fixture_prefix` sweep
+    /// is what actually keeps this leak-free across runs.
     #[tokio::test]
     async fn test_stamped_go_node_is_reingestable_but_still_guarded() {
         let Some(pool) = test_pool() else { return };
@@ -2800,6 +2817,9 @@ mod tests {
             eprintln!("skipping: target database has no codebase collections");
             return;
         }
+        // Reclaim anything a previously failed run leaked (any PID, any test).
+        cleanup_fixture_prefix(&pool).await;
+
         let config = HadesConfig::default();
         let pid = std::process::id();
         let dir = TempDir::new().unwrap();
@@ -3202,27 +3222,52 @@ mod tests {
         ));
     }
 
-    /// The hatch is Go-only, and `ingest_file` derives it from the *resolved*
-    /// language rather than from the discovery predicate.
+    /// The hatch is Go-only, keyed on the file's own extension.
     ///
     /// Rust must never get it: `rust_ast` produces `Semantic` per file and
     /// rust-analyzer only augments, so releasing the guard would let a source
     /// file `syn` cannot parse fall to tree-sitter and overwrite good semantic
-    /// artifacts nothing would restore. Deriving from the language also stops
-    /// `--language go` from disabling the guard for files that are not Go.
+    /// artifacts nothing would restore.
+    ///
+    /// Calls the production predicate rather than restating it, so changing the
+    /// rule breaks this test instead of leaving it asserting a private copy.
     #[test]
     fn test_reenrichment_hatch_is_go_only() {
-        let hatch_for =
-            |lang: Language, gopls_scheduled: bool| gopls_scheduled && lang == Language::Go;
+        assert!(reenrichment_hatch("internal/server/handler.go", true));
+        assert!(
+            !reenrichment_hatch("internal/server/handler.go", false),
+            "no gopls phase scheduled means nothing will re-supply the purge"
+        );
 
-        assert!(hatch_for(Language::Go, true));
-        assert!(!hatch_for(Language::Go, false));
-        for lang in [Language::Rust, Language::Python, Language::Cpp] {
+        for path in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp", "src/util.h"] {
             assert!(
-                !hatch_for(lang, true),
-                "{lang:?} has a per-file semantic analyzer and must keep the guard"
+                !reenrichment_hatch(path, true),
+                "{path} has a per-file semantic analyzer and must keep the guard"
             );
         }
+    }
+
+    /// `--language go` must not hand the hatch to the whole tree.
+    ///
+    /// The flag forces how a file is *parsed*; it cannot make gopls able to
+    /// re-enrich a `.rs` or `.py` file. Keying the hatch on `ingest_file`'s
+    /// resolved language got this backwards, because that value IS the override
+    /// -- every file resolved to Go and every file lost the guard, with only the
+    /// Go grammar's recovery heuristic standing between that and a silent
+    /// overwrite of semantic artifacts gopls cannot rebuild.
+    #[test]
+    fn test_language_override_cannot_widen_the_hatch() {
+        // The predicate never sees the override, so there is nothing to widen.
+        for path in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp"] {
+            assert!(
+                !reenrichment_hatch(path, true),
+                "{path} must keep the guard even on a `--language go` run"
+            );
+        }
+        assert!(
+            reenrichment_hatch("cmd/main.go", true),
+            "a real Go file still gets the hatch"
+        );
     }
 
     #[test]

@@ -40,6 +40,13 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   README's step ordering required the `hades` group before
   `systemd-sysusers` had created it. (#96)
 
+- `AGENTS.md` — a self-contained onboarding guide for an agent that has
+  never seen HADES, usable as a Codex `AGENTS.md` entry point or as a
+  pasted system prompt. It covers what `--help` cannot say: that `db query`
+  searches a collection profile rather than "the database", how the drift
+  buckets relate to what ingest actually skips, and which remedies are safe
+  to narrow. (#186)
+
 ### Changed
 
 - **Breaking (daemon/MCP):** `db.query` rejects `limit: 0` and `limit` above
@@ -96,16 +103,55 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   and MCP, and the catch-all is gone so a future command cannot reach the
   protocol surface without a handler. (#187)
 
+- Go files were permanently pinned against re-ingest. Go has no per-file
+  semantic analyzer, so ingest can only produce `analysis_tier: "structural"`,
+  but the post-loop gopls phase then stamped the **file node** `"semantic"`
+  without rewriting `symbol_hash` — which it cannot, since that digest belongs
+  to the per-file analysis. `preserve_higher_fidelity` compares against exactly
+  that field and runs ahead of the `--force` check, so from the second run
+  onward every `.go` file lost the comparison and returned skipped with
+  `higher-fidelity stored analysis preserved`, `--force` included, leaving
+  `codebase drift` reporting the same counts forever. The LSP phases no longer
+  overwrite the file node's `analysis_tier`/`analyzer` (the enrichment is
+  already recorded under `gopls_analyzed` / `ra_analyzed` and their
+  companions, and the symbols and edges it writes carry their own tier), and
+  the fidelity guard now yields when the gopls phase is scheduled to re-enrich
+  the file later in the same run. Existing graphs recover without
+  `--allow-analysis-downgrade`, but they do need
+  `codebase ingest --force <the original ingest root>`: once the guard yields,
+  the unchanged-digest skip fires next, and gopls never rewrote `symbol_hash`,
+  so a plain re-ingest still returns early and leaves the old stamp in place.
+  The guard is unchanged where it is still load-bearing — it stays in force for
+  Rust, whose `semantic` tier comes from `syn` per file rather than from the
+  LSP phase, for an incoming raw-text tier, where nothing re-supplies what the
+  purge drops, and for a C++ tree re-ingested without its compilation
+  database. (#193)
+
+- Operator-facing help text that contradicted the implementation. `db query
+  --rerank` advertised itself as "Enable re-ranking of results" while the
+  flag exits non-zero without searching, and now says so. `codebase drift`
+  still described the pre-#183 output, and now documents `changed`,
+  `unhandled`, `changed.unverifiable` and `clean`, including the fact that
+  what `symbol_hash` covers depends on the node's `analysis_tier`. The
+  `codebase ingest --force` help and the runtime dangling-edge warning both
+  told operators to "re-ingest the dependent files", which either no-ops
+  (the dependents' own `symbol_hash` is unchanged, so they are skipped) or
+  writes duplicate nodes under re-based keys (a narrower path re-bases every
+  key beneath it); both now name `--force` and the original ingest root.
+  (#186)
 
 - `codebase drift` reported a clean sweep over partially-covered trees.
   Files with no ingest handler fell outside drift's notion of source
   entirely — neither ingested nor reportable — so `stale=0 uningested=0`
   was returned for a tree ingest had only partly read. Drift now reports
   an `unhandled` bucket with a per-file reason, and a `clean` flag that
-  is false whenever anything is unhandled or changed. (#183)
+  is false whenever anything is stale, uningested, changed or
+  unverifiable. `unhandled` deliberately does not gate `clean`, since
+  every repository contains files no analyzer handles. (#183)
 - `codebase drift` could not see content staleness at all. `symbol_hash`
-  is deliberately name-only (a rewritten body, changed signature, or
-  edited comment leaves it identical), and drift compared only file
+  is name-only for Python and Rust at tier `semantic` (a rewritten body,
+  changed signature, or edited comment leaves it identical), and drift
+  compared only file
   existence, so an edited file reported clean while its stored chunks and
   embeddings were stale. Ingest now records a full-source `content_hash`
   alongside it and drift reports a `changed` bucket. Files ingested before

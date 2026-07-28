@@ -321,6 +321,7 @@ pub async fn run(
                 compile_commands,
                 force,
                 allow_analysis_downgrade,
+                gopls_cmd.is_some(),
             )
             .await
         };
@@ -530,34 +531,98 @@ pub async fn run(
         SemanticLspStats::default()
     };
 
+    // Enrichment failures are recorded rather than raised here, and returned
+    // after the summary JSON is printed. `codebase ingest` writes the graph
+    // before these checks run, so unwinding early exits non-zero having done
+    // the work and printed nothing on stdout — which reads as "ingest failed,
+    // nothing written" to anything parsing the output (#194 review). The
+    // existing `CodebaseIngestFailure` at the end of this function already
+    // follows print-then-fail; these now match it.
+    let mut enrichment_failure: Option<String> = None;
+
     // Same store-vs-analysis attribution as the rust-analyzer path (#180):
     // gopls analyzed its modules but the results never reached ArangoDB, so
     // exiting 0 would silently lose the Go calls/implements layer.
     if gopls_stats.store_failed && !allow_analysis_downgrade {
-        anyhow::bail!(
-            "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
+        enrichment_failure.get_or_insert_with(|| {
+            format!(
+                "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
              failed (see the store warnings above for the database error). The \
              graph keeps Tree-sitter symbols but loses calls/implements edges. \
              Fix the store error and re-run, or pass --allow-analysis-downgrade \
              to accept the loss explicitly.",
-            gopls_stats.workspaces
-        );
+                gopls_stats.workspaces
+            )
+        });
     }
 
-    // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
-    // files ingested and zero modules analyzed is silent semantic loss, not
-    // success.
-    if !go_abs_paths.is_empty()
-        && gopls_cmd.is_some()
-        && gopls_stats.workspaces == 0
-        && !allow_analysis_downgrade
-    {
-        anyhow::bail!(
-            "gopls enrichment produced nothing across {} Go file(s) despite a \
-             passing preflight. Investigate the session logs above, or pass \
-             --allow-analysis-downgrade to accept the loss explicitly.",
-            go_abs_paths.len()
-        );
+    // Same loud-zero rule as rust-analyzer (#164), widened to partial failure.
+    //
+    // A passing preflight with Go files ingested and zero modules analyzed is
+    // silent semantic loss. So is *some* modules analyzed — but only when this
+    // run actually rewrote files in a module that failed. The fidelity guard
+    // stands aside for `.go` files whenever the phase is scheduled (#193), so a
+    // failed module means the files it owns were purged and rebuilt at
+    // `structural` with nothing restoring their semantic layer.
+    //
+    // Gated on real loss, not on the failure alone: `go_abs_paths` comes from
+    // discovery and includes files this run skipped as unchanged. Those were
+    // never purged, so the previous run's gopls symbols and edges are still in
+    // the graph and there is nothing to report. Bailing there would assert a
+    // loss that did not happen, on the common case of re-running ingest over an
+    // unchanged tree with one perpetually-unhappy module.
+    let rewritten_go_under_failed_module: Vec<&str> = if gopls_stats.failed_workspaces.is_empty() {
+        Vec::new()
+    } else {
+        results
+            .iter()
+            .filter(|r| !r.skipped.unwrap_or(false) && r.success && r.path.ends_with(".go"))
+            .filter(|r| {
+                let absolute = base.join(&r.path);
+                gopls_stats
+                    .failed_workspaces
+                    .iter()
+                    .any(|root| absolute.starts_with(root))
+            })
+            .map(|r| r.path.as_str())
+            .collect()
+    };
+
+    if !go_abs_paths.is_empty() && gopls_cmd.is_some() && !allow_analysis_downgrade {
+        if gopls_stats.workspaces == 0 {
+            enrichment_failure.get_or_insert_with(|| {
+                format!(
+                    "gopls enrichment produced nothing across {} Go file(s) despite a \
+                 passing preflight. Investigate the session logs above, or pass \
+                 --allow-analysis-downgrade to accept the loss explicitly.",
+                    go_abs_paths.len()
+                )
+            });
+        } else if !rewritten_go_under_failed_module.is_empty() {
+            enrichment_failure.get_or_insert_with(|| {
+                format!(
+                    "gopls analyzed {} of {} Go module(s); {} failed to start a session \
+                 (see the warnings above). {} file(s) under the failed module(s) were \
+                 re-ingested this run, so their gopls symbols and calls/implements \
+                 edges are gone — the fidelity guard stands aside for Go on the \
+                 expectation that this phase re-supplies them. Fix the failing \
+                 module(s) and re-run, or pass --allow-analysis-downgrade to accept \
+                 the loss explicitly.",
+                    gopls_stats.workspaces,
+                    gopls_stats.workspaces_attempted,
+                    gopls_stats.failed_workspaces.len(),
+                    rewritten_go_under_failed_module.len()
+                )
+            });
+        } else if !gopls_stats.failed_workspaces.is_empty() {
+            warn!(
+                analyzed = gopls_stats.workspaces,
+                attempted = gopls_stats.workspaces_attempted,
+                failed = gopls_stats.failed_workspaces.len(),
+                "gopls could not start a session for some module(s); no file under \
+                 them was rewritten this run, so nothing was lost"
+            );
+        }
     }
 
     // Report inbound edges left dangling by this run's rebuilds.
@@ -574,8 +639,12 @@ pub async fn run(
     if dangling_inbound > 0 {
         warn!(
             edges = dangling_inbound,
-            "inbound edges now point at symbols this run removed; re-ingest the \
-             dependent files, or run `hades codebase prune-orphans` to drop them"
+            "inbound edges now point at symbols this run removed; re-run \
+             `codebase ingest --force <the same ingest root>` to re-resolve \
+             them (--force because the dependents' own symbol_hash is \
+             unchanged, and the original root because keys are relative to it \
+             -- a narrower path re-bases them and writes duplicate nodes), or \
+             run `hades codebase prune-orphans` to drop them"
         );
     }
 
@@ -647,6 +716,12 @@ pub async fn run(
     });
 
     output::print_output("codebase.ingest", result_data, &OutputFormat::Json);
+
+    // Deferred so the summary above is always written, even when enrichment
+    // loss makes this run a failure.
+    if let Some(message) = enrichment_failure {
+        anyhow::bail!("{message}");
+    }
 
     if failed > 0 {
         return Err(CodebaseIngestFailure { total, failed }.into());
@@ -1043,6 +1118,7 @@ async fn ingest_file(
     compile_commands: Option<&Path>,
     force: bool,
     allow_analysis_downgrade: bool,
+    gopls_scheduled: bool,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -1052,6 +1128,8 @@ async fn ingest_file(
     let lang = lang_override
         .or_else(|| Language::from_path(rel_path))
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
+
+    let reenriched_this_run = reenrichment_hatch(file_path, rel_path, gopls_scheduled);
 
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
@@ -1098,7 +1176,14 @@ async fn ingest_file(
     // touches only this file's own symbols and outbound edges, so inbound
     // authored bridge edges are preserved (unlike a cascading `db purge`).
     let fkey = keys::file_key(rel_path);
-    if preserve_higher_fidelity(db, &fkey, analysis.analysis_tier, allow_analysis_downgrade).await?
+    if preserve_higher_fidelity(
+        db,
+        &fkey,
+        analysis.analysis_tier,
+        allow_analysis_downgrade,
+        reenriched_this_run,
+    )
+    .await?
     {
         warn!(
             path = rel_path,
@@ -1502,7 +1587,15 @@ async fn ingest_unparsed_file(
     let fkey = keys::file_key(rel_path);
     let lang_label = language_label.unwrap_or_else(|| unparsed_language_label(rel_path));
 
-    if preserve_higher_fidelity(db, &fkey, AnalysisTier::Text, allow_analysis_downgrade).await? {
+    if preserve_higher_fidelity(
+        db,
+        &fkey,
+        AnalysisTier::Text,
+        allow_analysis_downgrade,
+        false,
+    )
+    .await?
+    {
         warn!(
             path = rel_path,
             fallback_reason, "raw fallback skipped to preserve higher-fidelity stored analysis"
@@ -1857,26 +1950,99 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 
 // ── Incremental check ───────────────────────────────────────────────────
 
+/// May the fidelity guard stand aside for this file, because a post-loop LSP
+/// phase will re-supply what the rewrite drops?
+///
+/// True for Go alone, and only when the gopls phase will actually run. Go has no
+/// per-file semantic analyzer, so `ingest_file` can never reproduce a stored
+/// `Semantic` on its own and the guard would pin the node forever (#193).
+///
+/// Rust is deliberately NOT in this set. `rust_ast` produces `Semantic` per file
+/// and rust-analyzer only augments it, so a stored `Semantic` is something
+/// `ingest_file` normally reproduces. Releasing the guard there would let a file
+/// `syn` cannot parse — a mid-edit save, or syntax newer than the pinned `syn` —
+/// fall to tree-sitter and silently overwrite semantic artifacts nothing would
+/// restore.
+///
+/// Keyed on the path's own extension rather than on `ingest_file`'s resolved
+/// language, because the resolved language *is* `--language` when that flag is
+/// given: `--language go` makes every file in the tree resolve to Go, which
+/// would hand the hatch to `.rs`, `.py` and `.h` files whose stored `Semantic`
+/// gopls cannot rebuild. The override can force how a file is parsed; it cannot
+/// make gopls able to re-enrich it.
+///
+/// Note what `gopls_scheduled` does and does not promise. It means the preflight
+/// found a runnable binary, so the phase will run — not that it will succeed for
+/// this file's module. Releasing the guard is therefore a bet that re-enrichment
+/// follows the purge, and the bet is covered in two places.
+///
+/// A module resolution is required here, not just a `.go` extension.
+/// `group_files_by_go_module` silently drops any path with no `go.mod`/`go.work`
+/// ancestor, so a module-less `.go` file is one gopls will never be handed: it
+/// would land in neither `workspaces` nor `workspaces_attempted`, leaving the
+/// caller's partial-failure check blind to it while the guard had already been
+/// released. Requiring the same resolution the grouping uses keeps the hatch a
+/// strict subset of what the phase will actually attempt.
+///
+/// The remaining case — a module gopls is handed but cannot start a session on —
+/// is caught by `run_ingest`, which compares `workspaces` against
+/// `workspaces_attempted` and refuses to exit 0 over files it purged and could
+/// not rebuild.
+fn reenrichment_hatch(file_path: &Path, rel_path: &str, gopls_scheduled: bool) -> bool {
+    gopls_scheduled
+        && Language::from_path(rel_path) == Some(Language::Go)
+        && hades_core::code::lsp::gopls::find_go_module_root(file_path).is_some()
+}
+
 /// Return true when replacing the stored artifacts would lower fidelity.
+///
+/// `reenriched_this_run` is the escape hatch for languages whose semantic
+/// artifacts come from a post-loop LSP phase rather than from the per-file
+/// analyzer. Go has no semantic analyzer, so `ingest_file` can only ever offer
+/// `Structural`; the gopls phase supplies the semantic symbols and edges
+/// afterwards, in this same run. Blocking the rewrite there protects nothing —
+/// the purge is immediately followed by re-enrichment — while permanently
+/// pinning every `.go` node against re-ingest (#193). C++ and Python have no
+/// such phase, so a genuine downgrade there is permanent and still blocked, and
+/// neither does Rust: `rust_ast` produces `Semantic` per file and
+/// rust-analyzer only augments it, so the caller must not set this for Rust.
+///
+/// The hatch never applies to an incoming `Text`. That tier is only reached
+/// when every parser failed, and a file that defeated tree-sitter defeats the
+/// LSP phase too, so nothing re-supplies what the purge would drop. Enforced
+/// here rather than left to callers, because it is the one case where being
+/// wrong costs a silent, permanent loss of structure.
 fn should_preserve_tier(
     stored: Option<AnalysisTier>,
     incoming: AnalysisTier,
     allow_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> bool {
-    !allow_downgrade && stored.is_some_and(|tier| tier > incoming)
+    let hatch = reenriched_this_run && incoming > AnalysisTier::Text;
+    !allow_downgrade && !hatch && stored.is_some_and(|tier| tier > incoming)
 }
 
 /// Enforce monotonic analyzer fidelity before any destructive per-file write.
+///
+/// Compares against the stored file node's `analysis_tier`, which records the
+/// analysis that produced that node's `symbol_hash` and chunks — the LSP phases
+/// deliberately leave it alone (see `store_lsp_extractions`).
 async fn preserve_higher_fidelity(
     db: &ArangoPool,
     file_key: &str,
     incoming: AnalysisTier,
     allow_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> Result<bool> {
     match crud::get_document(db, CODEBASE.files, file_key).await {
         Ok(doc) => {
             let stored = doc["analysis_tier"].as_str().and_then(AnalysisTier::parse);
-            Ok(should_preserve_tier(stored, incoming, allow_downgrade))
+            Ok(should_preserve_tier(
+                stored,
+                incoming,
+                allow_downgrade,
+                reenriched_this_run,
+            ))
         }
         Err(e) if e.is_not_found() => Ok(false),
         Err(e) => Err(e.into()),
@@ -1945,12 +2111,27 @@ struct SemanticLspStats {
     edges: usize,
     /// Crates (rust-analyzer) or modules (gopls) successfully analyzed.
     workspaces: usize,
+    /// Crates/modules the phase *attempted*. Greater than `workspaces` means
+    /// some were skipped after their language-server session failed to start,
+    /// which the caller must treat as loss rather than success (#194 review).
+    ///
+    /// Supplied by the phase rather than derived inside `store_lsp_extractions`:
+    /// that function has four exits, and deriving it there let them disagree
+    /// (two returned `Default`, i.e. zero, while `workspaces` was non-zero).
+    /// A `saturating_sub` against a zero placeholder never fires, so the check
+    /// this field exists for would have been silently dead on the second phase
+    /// to adopt it.
+    workspaces_attempted: usize,
     /// Documents ArangoDB rejected individually (illegal key, bad body).
     /// Non-zero means degraded-but-usable enrichment.
     store_errors: usize,
     /// The store stage failed wholesale (request-level error). Analysis
     /// results exist but none of them reached the database.
     store_failed: bool,
+    /// Workspace roots whose language-server session failed to start. Their
+    /// files were handed to the phase but never enriched, so the caller needs
+    /// them to decide whether this run destroyed anything (#194 review).
+    failed_workspaces: Vec<PathBuf>,
 }
 
 /// Run rust-analyzer over ingested Rust files to produce rich symbols and edges.
@@ -2032,7 +2213,15 @@ async fn run_rust_analyzer_phase(
         }
     }
 
-    store_lsp_extractions(db, all_extractions, crates_analyzed, "rust-analyzer", "ra").await
+    store_lsp_extractions(
+        db,
+        all_extractions,
+        crates_analyzed,
+        groups.len(),
+        "rust-analyzer",
+        "ra",
+    )
+    .await
 }
 
 /// Run gopls over each discovered Go module. Tree-sitter artifacts remain in
@@ -2055,6 +2244,7 @@ async fn run_gopls_phase(
     );
     let mut all_extractions = HashMap::new();
     let mut modules_analyzed = 0;
+    let mut failed_modules: Vec<PathBuf> = Vec::new();
     for (module_root, module_files) in &groups {
         let session = match GoplsSession::start_with_options(
             module_root,
@@ -2070,6 +2260,7 @@ async fn run_gopls_phase(
                     %error,
                     "gopls unavailable for module; Tree-sitter data retained"
                 );
+                failed_modules.push(module_root.clone());
                 continue;
             }
         };
@@ -2089,7 +2280,17 @@ async fn run_gopls_phase(
             debug!(%error, "gopls shutdown warning (non-fatal)");
         }
     }
-    store_lsp_extractions(db, all_extractions, modules_analyzed, "gopls", "gopls").await
+    let mut stats = store_lsp_extractions(
+        db,
+        all_extractions,
+        modules_analyzed,
+        groups.len(),
+        "gopls",
+        "gopls",
+    )
+    .await?;
+    stats.failed_workspaces = failed_modules;
+    Ok(stats)
 }
 
 /// Persist language-neutral LSP symbol documents and semantic edges.
@@ -2097,12 +2298,14 @@ async fn store_lsp_extractions(
     db: &ArangoPool,
     all_extractions: HashMap<String, FileExtraction>,
     workspaces: usize,
+    workspaces_attempted: usize,
     analyzer: &'static str,
     metadata_prefix: &'static str,
 ) -> Result<SemanticLspStats> {
     if all_extractions.is_empty() {
         return Ok(SemanticLspStats {
             workspaces,
+            workspaces_attempted,
             ..Default::default()
         });
     }
@@ -2231,8 +2434,11 @@ async fn store_lsp_extractions(
                             symbols: stored_symbols,
                             edges: stored_edges,
                             workspaces,
+                            workspaces_attempted,
                             store_errors,
                             store_failed: true,
+                            // Filled in by the phase, which knows which failed.
+                            failed_workspaces: Vec::new(),
                         });
                     }
                 }
@@ -2245,10 +2451,16 @@ async fn store_lsp_extractions(
     let mut patched_count = 0;
     for (rel_path, sym_count, analyzed_at) in &file_patches {
         let fkey = keys::file_key(rel_path);
-        let mut patch = json!({
-            "analysis_tier": "semantic",
-            "analyzer": analyzer,
-        });
+        // Deliberately does NOT touch `analysis_tier`/`analyzer`. Those describe
+        // the analysis that produced this node's `symbol_hash` and chunks, and
+        // enrichment rewrites neither. Stamping the file `semantic` here made a
+        // Go node advertise a fidelity its own digest did not have, and — because
+        // `preserve_higher_fidelity` compares against exactly this field — meant
+        // every later run offered `structural`, lost, and skipped the file
+        // permanently, `--force` included (#193). The enrichment is recorded
+        // under the prefixed keys below, and the symbols and edges it writes
+        // carry `analysis_tier: "semantic"` on themselves.
+        let mut patch = json!({});
         if let Value::Object(fields) = &mut patch {
             fields.insert(format!("{metadata_prefix}_analyzed"), json!(true));
             fields.insert(format!("{metadata_prefix}_symbol_count"), json!(sym_count));
@@ -2315,8 +2527,11 @@ async fn store_lsp_extractions(
         symbols: stored_symbols,
         edges: stored_edges,
         workspaces,
+        workspaces_attempted,
         store_errors,
         store_failed: false,
+        // Filled in by the phase, which knows which failed.
+        failed_workspaces: Vec::new(),
     })
 }
 
@@ -2611,8 +2826,19 @@ mod tests {
     }
 
     /// Remove every trace of a test fixture file from the codebase graph.
-    /// Shared prefix for every fixture this test writes, across all PIDs.
-    const FIXTURE_PREFIX: &str = "__hades_test159_";
+    /// Sweep tag for the #159 live test's fixtures, across all PIDs.
+    const FIXTURE_PREFIX_159: &str = "__hades_test159_";
+
+    /// Sweep tag for the #193 live test's fixtures, across all PIDs.
+    ///
+    /// Each live test owns its own tag and sweeps only that. A single shared
+    /// prefix would reclaim leaks from any test, which is tempting, but libtest
+    /// runs these `#[tokio::test]`s concurrently in one binary and the sweep is
+    /// a `REMOVE`: one test entering cleanup mid-run would delete the other's
+    /// live fixtures and fail it for reasons unrelated to what it tests. A tag
+    /// per test still reclaims that test's own leaks from every previous PID,
+    /// which is what the sweep is for.
+    const FIXTURE_PREFIX_193: &str = "__hades_test193_";
 
     /// Do the codebase collections this test writes to actually exist?
     ///
@@ -2646,10 +2872,10 @@ mod tests {
     /// leaks its PID-keyed docs permanently — the next run uses a new PID and
     /// would never reclaim them. Sweeping the shared prefix keeps the test
     /// leak-free in the project-management DB even across failures.
-    async fn cleanup_fixture_prefix(pool: &ArangoPool) {
+    async fn cleanup_fixture_prefix(pool: &ArangoPool, prefix: &str) {
         let stale = {
             let aql = "FOR f IN @@files FILTER STARTS_WITH(f._key, @prefix) RETURN f._key";
-            let bind = json!({ "@files": CODEBASE.files, "prefix": FIXTURE_PREFIX });
+            let bind = json!({ "@files": CODEBASE.files, "prefix": prefix });
             hades_core::db::query::query(
                 pool,
                 aql,
@@ -2674,7 +2900,7 @@ mod tests {
         // via the file-key sweep above, so clear them by their own prefix too.
         for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
             let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @prefix) REMOVE d IN @@col";
-            let bind = json!({ "@col": col, "prefix": FIXTURE_PREFIX });
+            let bind = json!({ "@col": col, "prefix": prefix });
             let _ = hades_core::db::query::query(
                 pool,
                 aql,
@@ -2704,6 +2930,147 @@ mod tests {
         .await;
     }
 
+    /// #193 end to end: a `.go` node stamped `semantic` by the old gopls patch
+    /// must be re-ingestable, and must still be protected when nothing will
+    /// re-enrich it.
+    ///
+    /// The regression this pins is a property of a real write-read-write cycle,
+    /// not of `should_preserve_tier`'s truth table: the guard returned early at
+    /// `preserve_higher_fidelity`, ahead of the `!force` check, so every `.go`
+    /// file reported `skipped` on every run after the first with `--force`
+    /// included. A unit test on a pure function cannot observe that.
+    ///
+    /// Both directions are asserted, because the fix is only correct if it
+    /// releases the guard *and* leaves it in force where nothing restores the
+    /// purged data.
+    ///
+    /// Requires ArangoDB (skips if the socket is absent, per the integration
+    /// test convention). PID-suffixed fixture keys. A failing assertion unwinds
+    /// past the trailing cleanup, so the leading `cleanup_fixture_prefix` sweep
+    /// is what actually keeps this leak-free across runs.
+    #[tokio::test]
+    async fn test_stamped_go_node_is_reingestable_but_still_guarded() {
+        let Some(pool) = test_pool() else { return };
+        if !codebase_collections_present(&pool).await {
+            eprintln!("skipping: target database has no codebase collections");
+            return;
+        }
+        // Reclaim anything a previously failed run of THIS test leaked (any PID).
+        cleanup_fixture_prefix(&pool, FIXTURE_PREFIX_193).await;
+
+        let config = HadesConfig::default();
+        let pid = std::process::id();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("stamped.go");
+        let rel_path = format!("__hades_test193_{pid}/stamped.go");
+        let fkey = keys::file_key(&rel_path);
+        cleanup_fixture(&pool, &fkey).await;
+
+        // A real Go module: `reenrichment_hatch` requires one, because
+        // `group_files_by_go_module` drops module-less files and gopls would
+        // never be handed this file otherwise.
+        fs::write(dir.path().join("go.mod"), "module example.com/fixture\n").unwrap();
+        fs::write(
+            &path,
+            "package fixture\n\nfunc Stamped(input uint64) uint64 { return input + 1 }\n",
+        )
+        .unwrap();
+
+        // First ingest: Go has no per-file semantic analyzer, so this lands at
+        // `structural` with a tree-sitter serialized digest.
+        let mut imports = ImportContext::default();
+        let first = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("first ingest failed");
+        assert!(
+            first.skipped.is_none_or(|s| !s),
+            "first ingest must not skip (error: {:?})",
+            first.error
+        );
+
+        // Reproduce the pre-fix state: the old `store_lsp_extractions` stamped
+        // the file node `semantic` while leaving `symbol_hash` tree-sitter's.
+        upsert_merge_file_node(
+            &pool,
+            &fkey,
+            json!({ "analysis_tier": "semantic", "analyzer": "gopls" }),
+        )
+        .await
+        .expect("failed to stamp fixture node");
+
+        // The bug: with gopls scheduled, this returned skipped regardless of
+        // `--force`, because the guard runs ahead of the force check.
+        let mut imports = ImportContext::default();
+        let released = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            true,
+            false,
+            true,
+        )
+        .await
+        .expect("re-ingest with gopls scheduled failed");
+        assert!(
+            released.skipped.is_none_or(|s| !s),
+            "a stamped .go node must be re-ingestable when the gopls phase will \
+             re-enrich it (error: {:?})",
+            released.error
+        );
+
+        // And the guard must still hold when nothing will restore the purge —
+        // re-stamp, then re-ingest with no gopls phase scheduled.
+        upsert_merge_file_node(
+            &pool,
+            &fkey,
+            json!({ "analysis_tier": "semantic", "analyzer": "gopls" }),
+        )
+        .await
+        .expect("failed to re-stamp fixture node");
+        let mut imports = ImportContext::default();
+        let preserved = ingest_file(
+            &pool,
+            None,
+            &config,
+            &path,
+            &rel_path,
+            None,
+            &mut imports,
+            None,
+            true,
+            false,
+            false,
+        )
+        .await
+        .expect("re-ingest without gopls failed");
+        assert_eq!(
+            preserved.skipped,
+            Some(true),
+            "with no re-enrichment scheduled the fidelity guard must still \
+             preserve (error: {:?})",
+            preserved.error
+        );
+
+        cleanup_fixture(&pool, &fkey).await;
+    }
+
     /// Connect to the integration-test database, or `None` to skip.
     fn test_pool() -> Option<ArangoPool> {
         let socket = std::path::PathBuf::from(
@@ -2727,8 +3094,14 @@ mod tests {
             eprintln!("skipping: ARANGO_PASSWORD not set");
             return None;
         };
-        let client =
-            hades_core::db::ArangoClient::with_socket(socket, "bident_burn", "root", &password);
+        // Target database and user are overridable so these tests can be
+        // pointed at a dedicated throwaway graph. The `bident_burn` default has
+        // no codebase collections, so without an override the live tests here
+        // skip rather than run — which is silent, and makes it easy to believe
+        // a regression is covered when nothing executed.
+        let database = std::env::var("HADES_TEST_DB").unwrap_or_else(|_| "bident_burn".to_string());
+        let user = std::env::var("HADES_TEST_USER").unwrap_or_else(|_| "root".to_string());
+        let client = hades_core::db::ArangoClient::with_socket(socket, &database, &user, &password);
         Some(ArangoPool::new(client.clone(), client))
     }
 
@@ -2754,8 +3127,8 @@ mod tests {
             eprintln!("skipping: target database has no codebase collections");
             return;
         }
-        // Reclaim anything a previously failed run leaked (any PID).
-        cleanup_fixture_prefix(&pool).await;
+        // Reclaim anything a previously failed run of THIS test leaked (any PID).
+        cleanup_fixture_prefix(&pool, FIXTURE_PREFIX_159).await;
 
         let config = HadesConfig::default();
         let pid = std::process::id();
@@ -2820,6 +3193,7 @@ mod tests {
                 None,
                 false,
                 false,
+                false,
             )
             .await
             .unwrap_or_else(|e| panic!("first ingest failed for .{ext}: {e}"));
@@ -2847,6 +3221,7 @@ mod tests {
                 &mut imports,
                 None,
                 true,
+                false,
                 false,
             )
             .await
@@ -2913,23 +3288,168 @@ mod tests {
         assert!(should_preserve_tier(
             Some(AnalysisTier::Semantic),
             AnalysisTier::Structural,
+            false,
             false
         ));
         assert!(should_preserve_tier(
             Some(AnalysisTier::Structural),
             AnalysisTier::Text,
+            false,
             false
         ));
         assert!(!should_preserve_tier(
             Some(AnalysisTier::Semantic),
             AnalysisTier::Structural,
-            true
+            true,
+            false
         ));
         assert!(!should_preserve_tier(
             Some(AnalysisTier::Structural),
             AnalysisTier::Semantic,
+            false,
             false
         ));
+    }
+
+    /// #193: a language whose semantic artifacts come from a post-loop LSP phase
+    /// must not be pinned against re-ingest by its own enrichment.
+    ///
+    /// Go can only ever offer `Structural` from `ingest_file`, so once a node was
+    /// stamped `Semantic` the guard fired on every subsequent run and skipped the
+    /// file permanently — `--force` included, since the guard runs ahead of it.
+    /// When the gopls phase will re-enrich in this same run, the purge it was
+    /// protecting is undone immediately, so preserving buys nothing.
+    #[test]
+    fn test_pending_lsp_reenrichment_releases_the_fidelity_guard() {
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            false,
+            true
+        ));
+
+        // Without a scheduled phase the guard still holds: a C++ node whose
+        // libclang analysis is gone has nothing to restore it this run.
+        assert!(should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            false,
+            false
+        ));
+    }
+
+    /// The hatch must never release a raw-text write, whatever the caller says.
+    ///
+    /// `Text` is only reached when the semantic analyzer *and* tree-sitter both
+    /// failed, and a file that defeated tree-sitter defeats the LSP phase too —
+    /// so the premise the hatch rests on ("re-enrichment undoes the purge") is
+    /// false exactly there. Left to the caller, this cost a silent, permanent
+    /// loss of structure for a partially-written `.go` file.
+    #[test]
+    fn test_hatch_never_releases_a_raw_text_downgrade() {
+        for stored in [AnalysisTier::Semantic, AnalysisTier::Structural] {
+            assert!(
+                should_preserve_tier(Some(stored), AnalysisTier::Text, false, true),
+                "incoming Text must be preserved against stored {stored:?} even with \
+                 re-enrichment scheduled"
+            );
+        }
+
+        // An explicit downgrade is still the operator's call to make.
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Text,
+            true,
+            true
+        ));
+    }
+
+    /// The hatch is Go-only, keyed on the file's own extension.
+    ///
+    /// Rust must never get it: `rust_ast` produces `Semantic` per file and
+    /// rust-analyzer only augments, so releasing the guard would let a source
+    /// file `syn` cannot parse fall to tree-sitter and overwrite good semantic
+    /// artifacts nothing would restore.
+    ///
+    /// Calls the production predicate rather than restating it, so changing the
+    /// rule breaks this test instead of leaving it asserting a private copy.
+    #[test]
+    fn test_reenrichment_hatch_is_go_only() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+        let go = dir.path().join("handler.go");
+        fs::write(&go, "package x\n").unwrap();
+
+        assert!(reenrichment_hatch(&go, "internal/server/handler.go", true));
+        assert!(
+            !reenrichment_hatch(&go, "internal/server/handler.go", false),
+            "no gopls phase scheduled means nothing will re-supply the purge"
+        );
+
+        for rel in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp", "src/util.h"] {
+            let other = dir.path().join(rel.rsplit('/').next().unwrap());
+            fs::write(&other, "x\n").unwrap();
+            assert!(
+                !reenrichment_hatch(&other, rel, true),
+                "{rel} has a per-file semantic analyzer and must keep the guard"
+            );
+        }
+    }
+
+    /// A `.go` file in no Go module must NOT get the hatch (#194 review).
+    ///
+    /// `group_files_by_go_module` silently drops paths with no `go.mod`/`go.work`
+    /// ancestor, so gopls is never handed them. They land in neither
+    /// `workspaces` nor `workspaces_attempted`, which means the caller's
+    /// partial-failure check cannot see them either — releasing the guard would
+    /// purge their stored enrichment with nothing to restore it and nothing to
+    /// report it.
+    #[test]
+    fn test_hatch_requires_a_resolvable_go_module() {
+        let dir = TempDir::new().unwrap();
+        let orphan = dir.path().join("stray.go");
+        fs::write(&orphan, "package x\n").unwrap();
+        assert!(
+            !reenrichment_hatch(&orphan, "stray.go", true),
+            "a .go file gopls will never be handed must keep the guard"
+        );
+
+        // Same file, once the module it belongs to exists.
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+        assert!(
+            reenrichment_hatch(&orphan, "stray.go", true),
+            "with a module root present the phase will attempt it"
+        );
+    }
+
+    /// `--language go` must not hand the hatch to the whole tree.
+    ///
+    /// The flag forces how a file is *parsed*; it cannot make gopls able to
+    /// re-enrich a `.rs` or `.py` file. Keying the hatch on `ingest_file`'s
+    /// resolved language got this backwards, because that value IS the override
+    /// -- every file resolved to Go and every file lost the guard, with only the
+    /// Go grammar's recovery heuristic standing between that and a silent
+    /// overwrite of semantic artifacts gopls cannot rebuild.
+    #[test]
+    fn test_language_override_cannot_widen_the_hatch() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+
+        // The predicate never sees the override, so there is nothing to widen.
+        for rel in ["lib.rs", "mod.py", "engine.cpp"] {
+            let p = dir.path().join(rel);
+            fs::write(&p, "x\n").unwrap();
+            assert!(
+                !reenrichment_hatch(&p, rel, true),
+                "{rel} must keep the guard even on a `--language go` run"
+            );
+        }
+        let go = dir.path().join("main.go");
+        fs::write(&go, "package main\n").unwrap();
+        assert!(
+            reenrichment_hatch(&go, "cmd/main.go", true),
+            "a real Go file still gets the hatch"
+        );
     }
 
     #[test]

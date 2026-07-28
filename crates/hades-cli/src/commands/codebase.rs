@@ -39,20 +39,35 @@ pub enum CodebaseCmd {
         /// authored bridge edges survive (unlike `db purge`). Use it to refresh
         /// a node whose stored view has drifted from the source — in particular
         /// after an edit that touched only bodies, signatures, or comments,
-        /// which the name-keyed `symbol_hash` cannot see and which
-        /// `codebase drift` reports as `changed`.
+        /// which a name-keyed `symbol_hash` cannot see and which
+        /// `codebase drift` reports as `changed`. What `symbol_hash` covers
+        /// depends on the node's `analysis_tier` — see `codebase drift --help`;
+        /// the name-only case is Python and Rust at tier `semantic`.
+        ///
+        /// Pass the ORIGINAL ingest root, not a narrower path. Keys are
+        /// derived relative to the path given (a file bases at its parent), so
+        /// re-ingesting a single file or subdirectory writes duplicate nodes
+        /// under re-based keys, purges nothing, and repairs nothing.
         ///
         /// If a rebuild drops a symbol that another file points at, those
         /// inbound edges are reported as `dangling_inbound_edges` — not
-        /// deleted, since each records a real dependency. Re-ingest the
-        /// dependent files to re-resolve them, or run
-        /// `hades codebase prune-orphans` to drop them; until then
-        /// `codebase validate` will flag them.
+        /// deleted, since each records a real dependency. Re-resolve them by
+        /// re-running `codebase ingest --force <the same ingest root>` (plain
+        /// re-ingest skips the dependents, whose own `symbol_hash` did not
+        /// change), or run `hades codebase prune-orphans` to drop them; until
+        /// then `codebase validate` will flag them.
         ///
         /// This never permits an analyzer-fidelity downgrade by itself, so a
         /// file whose stored analysis came from a richer analyzer than the one
         /// available now is still skipped — pass `--allow-analysis-downgrade`
         /// as well to refresh it.
+        ///
+        /// One exception, and it is the recovery path for #193: a `.go` node
+        /// whose stored `semantic` tier came from the old gopls stamp IS
+        /// rewritten to `structural`, without `--allow-analysis-downgrade`.
+        /// Go has no per-file semantic analyzer, so that stamp described a
+        /// fidelity the node's own digest never had, and the gopls phase
+        /// re-supplies the semantic symbols and edges later in the same run.
         #[arg(short = 'f', long = "force", alias = "no-skip")]
         force: bool,
 
@@ -87,9 +102,51 @@ pub enum CodebaseCmd {
 
     /// Compare the graph against the source tree it describes (read-only).
     ///
-    /// Reports file nodes whose source file no longer exists ("stale") and
-    /// source files with no node ("uningested"). `codebase validate` checks
-    /// only internal consistency and cannot see either.
+    /// `codebase validate` checks only internal consistency and cannot see any
+    /// of this.
+    ///
+    /// Buckets: `stale` (a file node with no counterpart under this root),
+    /// `uningested` (a source file with no node), `changed` (a matched file
+    /// whose content differs from what was ingested), and `unhandled` (files
+    /// under the root ingest has no handler for, with a reason for each).
+    ///
+    /// `changed.unverifiable` counts matched files that could not be compared at
+    /// all, because they were ingested before `content_hash` existed or are no
+    /// longer readable as text.
+    ///
+    /// `clean` is true only when stale, uningested, changed and
+    /// `changed.unverifiable` are all zero. `unhandled` does not gate it, since
+    /// every repository contains files no analyzer handles.
+    ///
+    /// `changed` exists because drift compares full content while incremental
+    /// ingest compares `symbol_hash`, whose meaning depends on the node's
+    /// `analysis_tier`. At tier `semantic`, Python and Rust hash symbol *names*
+    /// only, so an edited body, signature or comment leaves it identical and a
+    /// plain `codebase ingest` skips the file while its stored chunks go stale.
+    /// Refresh those with `codebase ingest --force`.
+    ///
+    /// The other tiers are stricter and mostly self-correct: tier `structural`
+    /// and C++ at tier `semantic` hash the serialized symbol list (line spans
+    /// and metadata included), and tier `text` hashes full content. Check the
+    /// tier rather than the extension. Go is in the `structural` group: it has
+    /// no per-file semantic analyzer, and the semantic symbols and edges gopls
+    /// contributes are recorded under their own keys rather than by restating
+    /// the file's tier.
+    ///
+    /// One exception on graphs built before that changed: `.go` nodes ingested
+    /// by an older HADES still read `semantic` even though their digest is
+    /// tree-sitter's, and a plain re-ingest will not clear the stamp because
+    /// the unchanged-digest skip fires first. `codebase ingest --force <the
+    /// original ingest root>` rewrites them; until then, treat a `.go` node
+    /// reading `semantic` as `structural`.
+    ///
+    /// `stale` is NOT "the source file was deleted". It is every node in
+    /// `codebase_files` with no counterpart under the root you passed, and the
+    /// graph side is unfiltered — so in a database holding more than one
+    /// ingested tree, every node of the other tree lands in `stale` while its
+    /// source file exists and is untouched (#192). Read `--full` output with
+    /// that in mind before feeding it to `codebase retire`, which deletes each
+    /// target's node, chunks, embeddings, symbols and incident edges.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

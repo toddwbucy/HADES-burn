@@ -98,7 +98,7 @@ pub enum CodebaseCmd {
     /// `codebase validate` checks only internal consistency and cannot see any
     /// of this.
     ///
-    /// Buckets: `stale` (a file node whose source file no longer exists),
+    /// Buckets: `stale` (a file node with no counterpart under this root),
     /// `uningested` (a source file with no node), `changed` (a matched file
     /// whose content differs from what was ingested), and `unhandled` (files
     /// under the root ingest has no handler for, with a reason for each).
@@ -125,6 +125,21 @@ pub enum CodebaseCmd {
     /// no per-file semantic analyzer, and the semantic symbols and edges gopls
     /// contributes are recorded under their own keys rather than by restating
     /// the file's tier.
+    ///
+    /// One exception on graphs built before that changed: `.go` nodes ingested
+    /// by an older HADES still read `semantic` even though their digest is
+    /// tree-sitter's, and a plain re-ingest will not clear the stamp because
+    /// the unchanged-digest skip fires first. `codebase ingest --force <the
+    /// original ingest root>` rewrites them; until then, treat a `.go` node
+    /// reading `semantic` as `structural`.
+    ///
+    /// `stale` is NOT "the source file was deleted". It is every node in
+    /// `codebase_files` with no counterpart under the root you passed, and the
+    /// graph side is unfiltered — so in a database holding more than one
+    /// ingested tree, every node of the other tree lands in `stale` while its
+    /// source file exists and is untouched (#192). Read `--full` output with
+    /// that in mind before feeding it to `codebase retire`, which deletes each
+    /// target's node, chunks, embeddings, symbols and incident edges.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

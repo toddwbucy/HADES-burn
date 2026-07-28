@@ -17,6 +17,43 @@ use crate::db::{ArangoError, ArangoPool};
 /// Maximum value accepted for `limit` parameters in dispatch handlers.
 const MAX_LIMIT: u32 = 1000;
 
+/// Validate `db.query`'s `limit`, rejecting rather than clamping.
+///
+/// `0` is rejected because `0.min(MAX_LIMIT)` is `0`: the search returned
+/// `{"success": true, "result_count": 0}`, which an agent cannot tell apart from
+/// "nothing matched", so it retries with new phrasings against a limit that can
+/// never return anything. That is the turn-burning ambiguity #187 exists to
+/// remove, arriving through a different door.
+///
+/// Above `MAX_LIMIT` is rejected rather than clamped because the pre-#187 CLI
+/// honoured whatever `-n` was passed. Clamping would silently return exactly
+/// 1000 rows with nothing in the JSON envelope or on stderr saying the result
+/// had been truncated, which is the same class of quiet misreport.
+fn validated_query_limit(limit: Option<u32>) -> Result<u32, HandlerError> {
+    let limit = limit.unwrap_or(10);
+    if limit == 0 || limit > MAX_LIMIT {
+        return Err(HandlerError::InvalidLimit {
+            limit,
+            max: MAX_LIMIT,
+        });
+    }
+    Ok(limit)
+}
+
+/// Largest embeddings collection `db.query` will scan.
+///
+/// The search has no vector index, so it loads every stored vector into memory
+/// to score it. As a CLI that was the operator's own machine and their own
+/// patience; the same handler now runs inside the daemon and the MCP server,
+/// where the allocation is charged to a shared long-lived process and two
+/// concurrent callers can exhaust it for everyone. Bounded here so an oversized
+/// collection is a clear, immediate error rather than a 60s `REQUEST_TIMEOUT`
+/// that also leaks the ArangoDB cursor.
+///
+/// 100K vectors at ~2048 dimensions is roughly 4 GB materialized as JSON before
+/// the `Vec<f32>` copy, which is already generous for a shared process.
+const MAX_SCANNED_EMBEDDINGS: u64 = 100_000;
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -1214,18 +1251,21 @@ pub async fn dispatch(
             hybrid,
             rerank,
             structural,
-        } => handlers::db_query(
-            pool,
-            config,
-            &text,
-            limit.unwrap_or(10).min(MAX_LIMIT),
-            collection.as_deref(),
-            hybrid,
-            rerank,
-            structural,
-        )
-        .await
-        .map_err(DispatchError::Handler),
+        } => {
+            let limit = validated_query_limit(limit).map_err(DispatchError::Handler)?;
+            handlers::db_query(
+                pool,
+                config,
+                &text,
+                limit,
+                collection.as_deref(),
+                hybrid,
+                rerank,
+                structural,
+            )
+            .await
+            .map_err(DispatchError::Handler)
+        }
 
         // ── Embedding ─────────────────────────────────────────────────
         DaemonCommand::EmbedText { text } => handlers::embed_text(config, &text)
@@ -1276,7 +1316,7 @@ pub async fn dispatch(
 mod handlers {
     use serde_json::{Value, json};
 
-    use super::HandlerError;
+    use super::{HandlerError, MAX_SCANNED_EMBEDDINGS};
     use crate::db::ArangoPool;
     use crate::db::collections::CollectionProfile;
     use crate::db::crud::{self, CollectionInfo, count_collection, list_collections};
@@ -4469,11 +4509,27 @@ mod handlers {
     /// 4. Batch-fetch chunk text + metadata for the top-K only.
     /// 5. Optional hybrid keyword rerank, then optional structural fusion.
     ///
-    /// Efficient up to roughly 100K embeddings per collection. Beyond that
-    /// an `APPROX_NEAR_COSINE` vector index would be needed.
+    /// Step 2 is a full scan of the embeddings collection, fully materialized:
+    /// every vector becomes a `serde_json::Value::Array` before the `Vec<f32>`
+    /// copy, on the order of 40 KB per document. That was a defensible cost for
+    /// a one-shot CLI process the operator was watching. This handler now also
+    /// runs inside the daemon and the MCP server, where the same allocation is
+    /// charged to a long-lived process shared by every session and every
+    /// database in `--mcp-dbs`, and two concurrent callers against a large
+    /// collection can take the whole endpoint down rather than one command.
+    ///
+    /// So the scan is bounded by [`MAX_SCANNED_EMBEDDINGS`] and refuses past it
+    /// with a clear error instead of running into the daemon's 60s
+    /// `REQUEST_TIMEOUT`. A timeout would be the worse failure twice over: the
+    /// caller cannot tell it from a hung embedder, and dropping the future mid
+    /// `paginate` skips the `DELETE cursor/{id}` cleanup, leaving a server-side
+    /// cursor to expire on its own. `APPROX_NEAR_COSINE` is the real fix and is
+    /// tracked separately; this is the bound that makes the current
+    /// implementation safe to host.
     ///
     /// Shared by `hades db query` and the MCP `db_query` tool so the two
-    /// surfaces cannot drift apart.
+    /// surfaces cannot drift apart in scoring. Note they can still differ in
+    /// *reachability*: only the daemon and MCP paths impose `REQUEST_TIMEOUT`.
     #[allow(clippy::too_many_arguments)]
     pub async fn db_query(
         pool: &ArangoPool,
@@ -4497,10 +4553,15 @@ mod handlers {
         }
 
         // 1. Resolve the collection profile.
-        let (profile_name, profile) = resolve_query_profile(
-            collection,
-            std::env::var("HADES_DEFAULT_COLLECTION").ok().as_deref(),
-        )?;
+        //
+        // Deliberately does NOT read `HADES_DEFAULT_COLLECTION`. This handler is
+        // shared with the daemon and the MCP server, where a process-wide
+        // environment variable would apply one operator's shell setting to every
+        // database and every agent: a `db_query` against a document database
+        // would silently search `codebase_*` collections that do not exist there
+        // and return `result_count: 0` as a success. The CLI resolves the
+        // variable before dispatching, which is the only surface it belongs to.
+        let (profile_name, profile) = resolve_query_profile(collection, None)?;
 
         // 2. Embed the query text. `retrieval.query` is deliberate: the
         //    embedder is asymmetric, and embedding a query as a passage
@@ -4528,6 +4589,37 @@ mod handlers {
 
         // 3. Phase 1 — fetch embedding vectors with their keys.
         let fk = profile.foreign_key;
+
+        // Refuse before scanning rather than after. Counting is a cheap indexed
+        // operation; the scan is not, and the daemon would otherwise pay the
+        // full allocation and then hit REQUEST_TIMEOUT with a cursor left open.
+        let count_aql = "RETURN LENGTH(@@embeddings)";
+        let count_bind = json!({ "@embeddings": profile.embeddings });
+        let embedding_count =
+            query::query_single(pool, count_aql, Some(&count_bind), ExecutionTarget::Reader)
+                .await
+                .map_err(|e| HandlerError::Query {
+                    context: format!(
+                        "failed to size embeddings collection '{}' before vector search",
+                        profile.embeddings
+                    ),
+                    source: e,
+                })?
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+        if embedding_count > MAX_SCANNED_EMBEDDINGS {
+            return Err(HandlerError::InvalidParameter {
+                name: "collection".into(),
+                reason: format!(
+                    "profile '{profile_name}' holds {embedding_count} embeddings, over the \
+                     {MAX_SCANNED_EMBEDDINGS} this search can scan. It has no vector index, \
+                     so every query would load the whole collection into memory. Narrow the \
+                     search with a smaller profile, or wait for APPROX_NEAR_COSINE support."
+                ),
+            });
+        }
+
         let fetch_aql = format!(
             "FOR emb IN @@embeddings \
                  FILTER emb.chunk_key != null AND emb.{fk} != null AND emb.{fk} != '' \
@@ -5878,6 +5970,7 @@ mod handlers {
     #[cfg(test)]
     mod search_tests {
         use super::*;
+        use crate::dispatch::{MAX_LIMIT, validated_query_limit};
 
         #[test]
         fn tokenize_lowercases_and_splits() {
@@ -5988,6 +6081,45 @@ mod handlers {
             let err = resolve_query_profile(Some("nope"), None).unwrap_err();
             assert!(matches!(err, HandlerError::InvalidParameter { .. }));
             assert!(err.to_string().contains("unknown profile 'nope'"));
+        }
+
+        /// `limit: 0` must be an error, not an empty success (#187 review).
+        ///
+        /// `0.min(MAX_LIMIT)` is `0`, so the old expression truncated the
+        /// candidate list to nothing and returned `success` with
+        /// `result_count: 0` — indistinguishable from "your query matched
+        /// nothing", which is exactly the ambiguity that made `db.query`'s
+        /// previous NOT_IMPLEMENTED behaviour expensive to debug.
+        #[test]
+        fn zero_limit_is_rejected_not_silently_emptied() {
+            let err = validated_query_limit(Some(0)).unwrap_err();
+            assert!(
+                matches!(err, HandlerError::InvalidLimit { limit: 0, max } if max == MAX_LIMIT),
+                "expected InvalidLimit for 0, got {err:?}"
+            );
+        }
+
+        /// Over-max is rejected rather than clamped.
+        ///
+        /// The pre-#187 CLI honoured any `-n`, so silently returning MAX_LIMIT
+        /// rows would truncate without saying so in the envelope or on stderr.
+        #[test]
+        fn over_max_limit_is_rejected_not_clamped() {
+            let err = validated_query_limit(Some(MAX_LIMIT + 1)).unwrap_err();
+            assert!(matches!(err, HandlerError::InvalidLimit { .. }));
+            assert_eq!(
+                validated_query_limit(Some(MAX_LIMIT)).unwrap(),
+                MAX_LIMIT,
+                "the boundary itself stays valid"
+            );
+        }
+
+        /// The documented default survives, and ordinary values pass through.
+        #[test]
+        fn absent_limit_defaults_to_ten() {
+            assert_eq!(validated_query_limit(None).unwrap(), 10);
+            assert_eq!(validated_query_limit(Some(1)).unwrap(), 1);
+            assert_eq!(validated_query_limit(Some(50)).unwrap(), 50);
         }
 
         /// A typo in HADES_DEFAULT_COLLECTION must error rather than silently

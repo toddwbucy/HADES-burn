@@ -285,16 +285,30 @@ struct DbQueryArgs {
     db: Option<String>,
     #[schemars(description = "Natural-language query text to search for")]
     text: String,
-    #[schemars(description = "Collection to search; omit to search the default chunk collection")]
+    #[schemars(
+        description = "Collection *profile* to search (`default`, `codebase`) — not an \
+                       arbitrary collection name. Omit for `default`."
+    )]
     collection: Option<String>,
     #[schemars(description = "Maximum results to return (default 10)")]
     limit: Option<u32>,
-    #[schemars(description = "Combine vector similarity with keyword matching (BM25 hybrid)")]
+    #[schemars(
+        description = "Blend vector similarity with keyword term-coverage (the \
+                       fraction of distinct query terms present; not BM25 — no term \
+                       frequency, IDF, or length normalization)"
+    )]
     hybrid: Option<bool>,
-    // No `rerank` field. The cross-encoder it needs does not ship, so the
-    // shared handler rejects it — advertising it would hand an agent a
-    // schema-legal argument that always errors. The CLI likewise rejects
-    // `--rerank` at the argument boundary.
+    // Accepted but not advertised. The cross-encoder it needs does not ship, so
+    // the shared handler rejects it and putting it in the schema would hand an
+    // agent a schema-legal argument that always errors. Dropping it silently is
+    // worse still: a client written against `docs/daemon-protocol.md`, or one
+    // holding a schema cached across a daemon upgrade, would send `rerank: true`
+    // and get `success` with results it believes were reranked. Passing it
+    // through lets the handler answer with its own "use hybrid and/or
+    // structural instead" guidance, which is what the CLI does at the argument
+    // boundary.
+    #[schemars(skip)]
+    rerank: Option<bool>,
     #[schemars(description = "Blend in structural (graph-topology) embedding similarity")]
     structural: Option<bool>,
 }
@@ -501,7 +515,7 @@ impl HadesMcpServer {
     }
 
     #[tool(
-        description = "Semantic search over a HADES knowledge graph. Embeds the query text and returns the closest chunks/nodes, optionally blended with keyword (BM25 hybrid) or structural graph similarity. `collection` names a profile (default, codebase), not an arbitrary collection."
+        description = "Semantic search over a HADES knowledge graph. Embeds the query text and returns the closest chunks/nodes, optionally blended with keyword term-coverage (not BM25) or structural graph similarity. `collection` names a profile (default, codebase), not an arbitrary collection."
     )]
     async fn db_query(
         &self,
@@ -514,8 +528,9 @@ impl HadesMcpServer {
                 limit: a.limit,
                 collection: a.collection,
                 hybrid: a.hybrid.unwrap_or(false),
-                // Never set from MCP: the tool does not advertise rerank.
-                rerank: false,
+                // Forwarded, not forced: an unadvertised `rerank: true` must
+                // reach the handler's guard and be refused out loud.
+                rerank: a.rerank.unwrap_or(false),
                 structural: a.structural.unwrap_or(false),
             },
         )

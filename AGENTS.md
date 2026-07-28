@@ -217,13 +217,16 @@ This is the honest health check. The JSON reports:
   `changed.unverifiable` are all zero
 
 Read `stale` literally, as "no counterpart under this root", not as "the source
-file was deleted". The graph side of that comparison is the whole
-`codebase_files` collection with no filter by ingest root, so in a database
-holding two ingested trees, drift against one reports every node of the other as
-stale while those source files are present and untouched (#192). This is worth
-knowing before acting on it: `--full` exists to feed `codebase retire`, which
-deletes each target's node, chunks, embeddings, symbols and incident edges. Check
-that the keys belong to the tree you meant.
+file was deleted". Ingest records which root each node came from, and drift
+compares only its own, so a database holding several trees reports the others
+under `other_roots` rather than calling them stale (#192).
+
+One case escapes that: nodes ingested before HADES recorded the root cannot be
+attributed either way. They are still compared, and the stale ones among them
+are counted in `stale.unattributed`. Check it before acting, because `--full`
+exists to feed `codebase retire`, which deletes each target's node, chunks,
+embeddings, symbols and incident edges. One re-ingest per root drives it to
+zero.
 
 `unverifiable` blocks `clean` on purpose. A file nobody compared is not a file
 known to be current, and reporting a clean sweep over uncompared files is exactly

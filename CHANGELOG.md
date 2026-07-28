@@ -95,6 +95,28 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Fixed
 
+- `codebase drift` reported one tree's file nodes as `stale` for another,
+  on a delete path. File keys are relative to the ingest root, so they
+  carry no evidence of which tree produced them, and the graph side of
+  the comparison read the whole `codebase_files` collection unfiltered.
+  In a database holding two ingested trees, `codebase drift /repo-a`
+  therefore listed every node of repo B as stale while those source files
+  sat untouched — and `--full` exists to feed exactly that output to
+  `codebase retire`, which removes each target's file node, chunks,
+  embeddings, symbols and incident edges. The documented pipeline deleted
+  the other tree.
+
+  Ingest now records an `ingest_root` on each file node, for every file
+  discovered under the root rather than only the ones a run rewrote, so a
+  re-ingest attributes an existing graph even where it skips unchanged
+  files. Drift compares only nodes carrying its own root and reports the
+  rest as `other_roots`. Nodes predating attribution are still compared —
+  dropping them would report an entire existing graph as `uningested` —
+  but the stale ones among them are counted in `stale.unattributed` and
+  called out on stderr, since those are the keys `--full` would hand to
+  `retire` without being able to prove they belong to this tree. One
+  re-ingest per root clears it. (#192)
+
 - `db.query` was advertised over the daemon and MCP but never implemented.
   Dispatch fell through a catch-all arm to `NOT_IMPLEMENTED`, so the MCP
   `db_query` tool — one of the twelve curated agent-tier tools — failed on
@@ -139,7 +161,6 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   writes duplicate nodes under re-based keys (a narrower path re-bases every
   key beneath it); both now name `--force` and the original ingest root.
   (#186)
-
 - `codebase drift` reported a clean sweep over partially-covered trees.
   Files with no ingest handler fell outside drift's notion of source
   entirely — neither ingested nor reportable — so `stale=0 uningested=0`

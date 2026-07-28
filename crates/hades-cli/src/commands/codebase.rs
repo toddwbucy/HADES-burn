@@ -140,13 +140,18 @@ pub enum CodebaseCmd {
     /// original ingest root>` rewrites them; until then, treat a `.go` node
     /// reading `semantic` as `structural`.
     ///
-    /// `stale` is NOT "the source file was deleted". It is every node in
-    /// `codebase_files` with no counterpart under the root you passed, and the
-    /// graph side is unfiltered — so in a database holding more than one
-    /// ingested tree, every node of the other tree lands in `stale` while its
-    /// source file exists and is untouched (#192). Read `--full` output with
-    /// that in mind before feeding it to `codebase retire`, which deletes each
-    /// target's node, chunks, embeddings, symbols and incident edges.
+    /// `stale` is NOT "the source file was deleted". It is every node with no
+    /// counterpart under the root you passed. Nodes belonging to another
+    /// ingest root are excluded and counted separately as `other_roots`, so a
+    /// database holding several trees no longer reports one tree's nodes as
+    /// stale for another (#192).
+    ///
+    /// The exception is nodes ingested before HADES recorded `ingest_root`.
+    /// Those cannot be attributed either way, so they are still compared and
+    /// the stale ones among them are counted in `stale.unattributed`. Check
+    /// that before feeding `--full` output to `codebase retire`, which deletes
+    /// each target's node, chunks, embeddings, symbols and incident edges. One
+    /// re-ingest per root drives it to zero.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total
@@ -166,6 +171,12 @@ pub enum CodebaseCmd {
 
         /// List every key instead of truncating. Use this to feed
         /// `codebase retire --from -`.
+        ///
+        /// Check `stale.unattributed` before you do. It counts stale keys on
+        /// nodes ingested before HADES recorded which root they came from, so
+        /// they cannot be confirmed to belong to this tree — and `retire`
+        /// deletes each target's node, chunks, embeddings, symbols and incident
+        /// edges. Re-ingesting each root once stamps them and drops it to zero.
         #[arg(long)]
         full: bool,
     },

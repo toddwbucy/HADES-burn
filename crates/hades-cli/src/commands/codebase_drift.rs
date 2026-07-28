@@ -13,6 +13,17 @@
 //! - **changed** — a matched file whose content differs from what was ingested
 //! - **unhandled** — a file under the root that ingest has no handler for
 //!
+//! "Under this root" is load-bearing. File keys are relative to the ingest root,
+//! so they carry no evidence of which tree produced them; a comparison that read
+//! the whole `codebase_files` collection reported every node of a second tree as
+//! stale while those files sat untouched on disk (#192). Ingest now records an
+//! `ingest_root` on each node and this command compares only its own. Nodes
+//! belonging to another root are excluded and counted under `other_roots`;
+//! nodes predating attribution are kept (dropping them would report an entire
+//! existing graph as uningested) and counted under `stale.unattributed`, since
+//! those are the ones a `--full` run would hand to `codebase retire` without
+//! being able to prove they belong here.
+//!
 //! The last two exist because their absence made a clean report a false green
 //! (#183). A file ingest cannot handle used to fall outside drift's notion of
 //! source entirely — neither ingested nor reportable — so a tree that was only
@@ -25,10 +36,9 @@
 //!
 //! It is strictly read-only. Acting on the result is [`super::codebase_retire`]
 //! (for stale nodes) and `codebase ingest` (uningested, and `--force` for
-//! changed). Read `stale` before retiring from it: the graph side of the
-//! comparison is the whole `codebase_files` collection with no root filter, so
-//! in a database holding two ingested trees every node of the other tree lands
-//! in `stale` with its source file present and untouched (#192).
+//! changed). Read `stale` before retiring from it: nodes predating `ingest_root`
+//! cannot be attributed to this tree, and `stale.unattributed` counts exactly
+//! those. One re-ingest per root drives it to zero.
 //!
 //! Discovery uses the same `discover_files` walk and the same key derivation as
 //! ingest, so a file counts as "present" exactly when ingest would have picked
@@ -58,8 +68,8 @@ use hades_core::db::{ArangoError, ArangoPool};
 use hades_core::code::compute_content_hash;
 
 use super::codebase_ingest::{
-    discover_files_detailed, file_key_for, ingest_base_path, normalize_unparsed_ext,
-    parse_language_arg,
+    INGEST_ROOT_FIELD, discover_files_detailed, file_key_for, ingest_base_path,
+    normalize_unparsed_ext, parse_language_arg,
 };
 use super::output::{self, OutputFormat};
 
@@ -96,11 +106,19 @@ pub async fn run_drift(
     let files = discovery.files;
     let disk: BTreeSet<String> = files.iter().map(|f| file_key_for(&base, f)).collect();
 
-    // Graph side: key -> stored content digest (absent for pre-#183 ingests).
-    let graph_hashes = graph_file_hashes(&pool).await?;
+    // Graph side, restricted to nodes belonging to this ingest root (#192).
+    let graph_side = graph_file_side(&pool, &base).await?;
+    let graph_hashes = graph_side.in_scope;
     let graph: BTreeSet<String> = graph_hashes.keys().cloned().collect();
 
     let stale: Vec<&String> = graph.difference(&disk).collect();
+    // Of the nodes we are about to call stale, how many could not be attributed
+    // to this root? Those are the ones that might belong to another tree, and
+    // they are exactly the ones `retire` would delete on a `--full` run.
+    let stale_unattributed = stale
+        .iter()
+        .filter(|k| graph_side.unattributed.contains(**k))
+        .count();
     let uningested: Vec<&String> = disk.difference(&graph).collect();
     let matched = graph.intersection(&disk).count();
 
@@ -139,12 +157,21 @@ pub async fn run_drift(
     let mut report = json!({
         "root": base.display().to_string(),
         "graph_nodes": graph.len(),
+        // File nodes in this database that belong to a different ingest root.
+        // Excluded from every bucket above — they are another tree's, and their
+        // source files exist. Non-zero means this database holds more than one
+        // code graph, which is worth knowing before acting on `stale`.
+        "other_roots": graph_side.other_roots,
         "source_files": disk.len(),
         "matched": matched,
         "stale": {
             "count": stale.len(),
             "keys": sample(&stale),
             "truncated": stale.len() > limit,
+            // Stale keys on nodes with no recorded ingest root. They predate
+            // attribution, so they cannot be confirmed to belong to this tree —
+            // re-ingest stamps them and the number drops to zero.
+            "unattributed": stale_unattributed,
         },
         "uningested": {
             "count": uningested.len(),
@@ -209,6 +236,24 @@ pub async fn run_drift(
         changed.len(),
         unhandled.len(),
     );
+    if graph_side.other_roots > 0 {
+        let _ = writeln!(
+            err,
+            "note: {} file node(s) belong to a different ingest root and were \
+             excluded — this database holds more than one code graph",
+            graph_side.other_roots,
+        );
+    }
+    if stale_unattributed > 0 {
+        let _ = writeln!(
+            err,
+            "warning: {stale_unattributed} of {} stale key(s) sit on nodes with no \
+             recorded ingest root, so they cannot be confirmed to belong to this \
+             tree — re-ingest each root once to attribute them before feeding \
+             `--full` output to `codebase retire`",
+            stale.len(),
+        );
+    }
     if unverifiable > 0 {
         let _ = writeln!(
             err,
@@ -232,14 +277,97 @@ pub async fn run_drift(
     Ok(())
 }
 
-/// Every `_key` in `codebase_files` with its stored content digest.
+/// The `codebase_files` nodes that belong to this ingest root.
 ///
-/// The digest is `None` for nodes written before `content_hash` existed, which
-/// the caller reports as unverifiable rather than assuming either way. A missing
-/// collection is an empty graph.
-async fn graph_file_hashes(pool: &ArangoPool) -> Result<BTreeMap<String, Option<String>>> {
-    let aql = "FOR f IN @@files RETURN { key: f._key, hash: f.content_hash }";
-    let bind = json!({ "@files": CODEBASE.files });
+/// Splitting the collection by root is what keeps a second tree in the same
+/// database out of this one's `stale` bucket (#192). File keys are relative to
+/// the ingest root, so they carry no evidence of which tree produced them —
+/// without the stored `ingest_root` a comparison against one root reports every
+/// node of the other as stale, while those files sit untouched on disk. That
+/// matters more than a wrong count because `--full` exists to feed
+/// `codebase retire`, which deletes.
+///
+/// Three groups come back, because "not this root" and "root unknown" are
+/// different answers and only one of them is safe to act on:
+///
+/// - `in_scope`: nodes stamped with this root, plus nodes with no stamp at all.
+///   The unstamped ones predate `ingest_root` and cannot be attributed either
+///   way, so they are kept rather than silently dropped — excluding them would
+///   report a whole existing graph as uningested.
+/// - `unattributed`: which of those carry no stamp, so the caller can say how
+///   much of its answer rests on an assumption.
+/// - `other_roots`: how many nodes were excluded as belonging elsewhere.
+struct GraphSide {
+    /// key -> stored content digest (`None` for pre-`content_hash` ingests).
+    in_scope: BTreeMap<String, Option<String>>,
+    /// Keys in `in_scope` with no `ingest_root` recorded.
+    unattributed: BTreeSet<String>,
+    /// Nodes excluded because they carry a different `ingest_root`.
+    other_roots: usize,
+}
+
+async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<GraphSide> {
+    let root = base.display().to_string();
+    let aql = format!(
+        "FOR f IN @@files \
+           FILTER f.{field} == null OR f.{field} == @root \
+           RETURN {{ key: f._key, hash: f.content_hash, attributed: f.{field} != null }}",
+        field = INGEST_ROOT_FIELD
+    );
+    let bind = json!({ "@files": CODEBASE.files, "root": root });
+    let counted = count_other_roots(pool, &root).await?;
+    let entries = graph_file_hashes(pool, &aql, &bind).await?;
+    Ok(classify(entries, counted))
+}
+
+/// Split fetched rows into the in-scope map and the unattributed key set.
+///
+/// Separated from the query so the classification — the part that decides what
+/// a `--full` run will hand to `codebase retire` — is testable without a
+/// database.
+fn classify(entries: Vec<(String, Option<String>, bool)>, other_roots: usize) -> GraphSide {
+    let mut in_scope = BTreeMap::new();
+    let mut unattributed = BTreeSet::new();
+    for (key, hash, attributed) in entries {
+        if !attributed {
+            unattributed.insert(key.clone());
+        }
+        in_scope.insert(key, hash);
+    }
+    GraphSide {
+        in_scope,
+        unattributed,
+        other_roots,
+    }
+}
+
+/// How many file nodes carry a different `ingest_root` than this one.
+///
+/// Reported rather than merely skipped: an operator who expected one tree and
+/// finds several should learn it from drift, not from a surprising `retire`.
+async fn count_other_roots(pool: &ArangoPool, root: &str) -> Result<usize> {
+    let aql = format!(
+        "RETURN LENGTH(FOR f IN @@files \
+           FILTER f.{field} != null AND f.{field} != @root RETURN 1)",
+        field = INGEST_ROOT_FIELD
+    );
+    let bind = json!({ "@files": CODEBASE.files, "root": root });
+    match query::query_single(pool, &aql, Some(&bind), ExecutionTarget::Reader).await {
+        Ok(v) => Ok(v.and_then(|v| v.as_u64()).unwrap_or(0) as usize),
+        Err(e) if is_missing_collection(&e) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Run the prepared query and flatten it to `(key, digest, attributed)`.
+///
+/// A missing collection is an empty graph.
+async fn graph_file_hashes(
+    pool: &ArangoPool,
+    aql: &str,
+    bind: &serde_json::Value,
+) -> Result<Vec<(String, Option<String>, bool)>> {
+    let bind = bind.clone();
     match query::query(pool, aql, Some(&bind), None, false, ExecutionTarget::Reader).await {
         Ok(rows) => Ok(rows
             .results
@@ -247,12 +375,89 @@ async fn graph_file_hashes(pool: &ArangoPool) -> Result<BTreeMap<String, Option<
             .filter_map(|v| {
                 let key = v.get("key")?.as_str()?.to_string();
                 let hash = v.get("hash").and_then(|h| h.as_str()).map(str::to_string);
-                Some((key, hash))
+                let attributed = v
+                    .get("attributed")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                Some((key, hash, attributed))
             })
             .collect()),
-        Err(ArangoError::Api {
-            error_num: 1203, ..
-        }) => Ok(BTreeMap::new()),
+        Err(e) if is_missing_collection(&e) => Ok(Vec::new()),
         Err(e) => Err(e).context("failed to read codebase_files keys"),
+    }
+}
+
+/// ArangoDB's "collection or view not found". A database with no code graph is
+/// an empty graph, not an error.
+fn is_missing_collection(e: &ArangoError) -> bool {
+    matches!(
+        e,
+        ArangoError::Api {
+            error_num: 1203,
+            ..
+        }
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(key: &str, attributed: bool) -> (String, Option<String>, bool) {
+        (key.to_string(), Some("digest".to_string()), attributed)
+    }
+
+    /// Nodes with no recorded root are kept in scope, not dropped (#192).
+    ///
+    /// Dropping them would be the safer-looking choice and is the wrong one: on
+    /// a graph built before attribution existed, *every* node is unattributed,
+    /// so excluding them would report the whole tree as `uningested` and invite
+    /// a full re-ingest of a graph that was fine.
+    #[test]
+    fn unattributed_nodes_stay_in_scope_and_are_flagged() {
+        let side = classify(vec![row("a_rs", true), row("b_rs", false)], 0);
+
+        assert_eq!(side.in_scope.len(), 2, "both nodes must be comparable");
+        assert!(side.in_scope.contains_key("b_rs"));
+        assert_eq!(
+            side.unattributed.len(),
+            1,
+            "only the unstamped node is unattributed"
+        );
+        assert!(side.unattributed.contains("b_rs"));
+        assert!(!side.unattributed.contains("a_rs"));
+    }
+
+    /// The `other_roots` count is carried through untouched — it is reported so
+    /// an operator learns this database holds more than one code graph from
+    /// drift rather than from a surprising `retire`.
+    #[test]
+    fn other_roots_count_is_reported() {
+        let side = classify(vec![row("a_rs", true)], 7);
+        assert_eq!(side.other_roots, 7);
+        assert_eq!(
+            side.in_scope.len(),
+            1,
+            "nodes from other roots never reach the comparison"
+        );
+    }
+
+    /// A fully-attributed graph reports nothing unattributed, so the warning
+    /// that gates `--full` into `codebase retire` stays quiet once every root
+    /// has been ingested once by a version that records attribution.
+    #[test]
+    fn a_fully_attributed_graph_has_nothing_unverifiable_by_root() {
+        let side = classify(vec![row("a_rs", true), row("b_rs", true)], 0);
+        assert!(side.unattributed.is_empty());
+    }
+
+    /// Pre-`content_hash` digests survive classification as `None` rather than
+    /// being confused with "no node" — `changed`/`unverifiable` still depends on
+    /// telling those apart.
+    #[test]
+    fn missing_digest_is_preserved_distinctly_from_a_missing_node() {
+        let side = classify(vec![("a_rs".to_string(), None, true)], 0);
+        assert_eq!(side.in_scope.get("a_rs"), Some(&None));
+        assert!(side.in_scope.contains_key("a_rs"));
     }
 }

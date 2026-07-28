@@ -531,55 +531,96 @@ pub async fn run(
         SemanticLspStats::default()
     };
 
+    // Enrichment failures are recorded rather than raised here, and returned
+    // after the summary JSON is printed. `codebase ingest` writes the graph
+    // before these checks run, so unwinding early exits non-zero having done
+    // the work and printed nothing on stdout — which reads as "ingest failed,
+    // nothing written" to anything parsing the output (#194 review). The
+    // existing `CodebaseIngestFailure` at the end of this function already
+    // follows print-then-fail; these now match it.
+    let mut enrichment_failure: Option<String> = None;
+
     // Same store-vs-analysis attribution as the rust-analyzer path (#180):
     // gopls analyzed its modules but the results never reached ArangoDB, so
     // exiting 0 would silently lose the Go calls/implements layer.
     if gopls_stats.store_failed && !allow_analysis_downgrade {
-        anyhow::bail!(
-            "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
+        enrichment_failure.get_or_insert_with(|| {
+            format!(
+                "gopls analyzed {} module(s) but storing the enrichment to ArangoDB \
              failed (see the store warnings above for the database error). The \
              graph keeps Tree-sitter symbols but loses calls/implements edges. \
              Fix the store error and re-run, or pass --allow-analysis-downgrade \
              to accept the loss explicitly.",
-            gopls_stats.workspaces
-        );
+                gopls_stats.workspaces
+            )
+        });
     }
 
     // Same loud-zero rule as rust-analyzer (#164), widened to partial failure.
     //
     // A passing preflight with Go files ingested and zero modules analyzed is
-    // silent semantic loss. So is *some* modules analyzed, and that case is the
-    // more dangerous one now that the fidelity guard stands aside for `.go`
-    // files whenever the phase is merely scheduled (#193). Releasing the guard
-    // is a bet that re-enrichment follows the purge; when a module's gopls
-    // session fails to start, `run_gopls_phase` warns and moves on, so every
-    // `.go` file in that module was purged and rebuilt at `structural` with
-    // nothing restoring the semantic layer. Exiting 0 there would report success
-    // over data this run destroyed (#194 review).
-    let modules_missing = gopls_stats
-        .workspaces_attempted
-        .saturating_sub(gopls_stats.workspaces);
+    // silent semantic loss. So is *some* modules analyzed — but only when this
+    // run actually rewrote files in a module that failed. The fidelity guard
+    // stands aside for `.go` files whenever the phase is scheduled (#193), so a
+    // failed module means the files it owns were purged and rebuilt at
+    // `structural` with nothing restoring their semantic layer.
+    //
+    // Gated on real loss, not on the failure alone: `go_abs_paths` comes from
+    // discovery and includes files this run skipped as unchanged. Those were
+    // never purged, so the previous run's gopls symbols and edges are still in
+    // the graph and there is nothing to report. Bailing there would assert a
+    // loss that did not happen, on the common case of re-running ingest over an
+    // unchanged tree with one perpetually-unhappy module.
+    let rewritten_go_under_failed_module: Vec<&str> = if gopls_stats.failed_workspaces.is_empty() {
+        Vec::new()
+    } else {
+        results
+            .iter()
+            .filter(|r| !r.skipped.unwrap_or(false) && r.success && r.path.ends_with(".go"))
+            .filter(|r| {
+                let absolute = base.join(&r.path);
+                gopls_stats
+                    .failed_workspaces
+                    .iter()
+                    .any(|root| absolute.starts_with(root))
+            })
+            .map(|r| r.path.as_str())
+            .collect()
+    };
+
     if !go_abs_paths.is_empty() && gopls_cmd.is_some() && !allow_analysis_downgrade {
         if gopls_stats.workspaces == 0 {
-            anyhow::bail!(
-                "gopls enrichment produced nothing across {} Go file(s) despite a \
+            enrichment_failure.get_or_insert_with(|| {
+                format!(
+                    "gopls enrichment produced nothing across {} Go file(s) despite a \
                  passing preflight. Investigate the session logs above, or pass \
                  --allow-analysis-downgrade to accept the loss explicitly.",
-                go_abs_paths.len()
-            );
-        }
-        if modules_missing > 0 {
-            anyhow::bail!(
-                "gopls analyzed {} of {} Go module(s); {} failed to start a session \
-                 (see the warnings above). Those modules' files were re-ingested at \
-                 the Tree-sitter tier and their gopls symbols and calls/implements \
-                 edges are gone, because the fidelity guard stands aside for Go on \
-                 the expectation that this phase re-supplies them. Fix the failing \
+                    go_abs_paths.len()
+                )
+            });
+        } else if !rewritten_go_under_failed_module.is_empty() {
+            enrichment_failure.get_or_insert_with(|| {
+                format!(
+                    "gopls analyzed {} of {} Go module(s); {} failed to start a session \
+                 (see the warnings above). {} file(s) under the failed module(s) were \
+                 re-ingested this run, so their gopls symbols and calls/implements \
+                 edges are gone — the fidelity guard stands aside for Go on the \
+                 expectation that this phase re-supplies them. Fix the failing \
                  module(s) and re-run, or pass --allow-analysis-downgrade to accept \
                  the loss explicitly.",
-                gopls_stats.workspaces,
-                gopls_stats.workspaces_attempted,
-                modules_missing
+                    gopls_stats.workspaces,
+                    gopls_stats.workspaces_attempted,
+                    gopls_stats.failed_workspaces.len(),
+                    rewritten_go_under_failed_module.len()
+                )
+            });
+        } else if !gopls_stats.failed_workspaces.is_empty() {
+            warn!(
+                analyzed = gopls_stats.workspaces,
+                attempted = gopls_stats.workspaces_attempted,
+                failed = gopls_stats.failed_workspaces.len(),
+                "gopls could not start a session for some module(s); no file under \
+                 them was rewritten this run, so nothing was lost"
             );
         }
     }
@@ -675,6 +716,12 @@ pub async fn run(
     });
 
     output::print_output("codebase.ingest", result_data, &OutputFormat::Json);
+
+    // Deferred so the summary above is always written, even when enrichment
+    // loss makes this run a failure.
+    if let Some(message) = enrichment_failure {
+        anyhow::bail!("{message}");
+    }
 
     if failed > 0 {
         return Err(CodebaseIngestFailure { total, failed }.into());
@@ -1082,7 +1129,7 @@ async fn ingest_file(
         .or_else(|| Language::from_path(rel_path))
         .ok_or_else(|| anyhow::anyhow!("cannot detect language for {rel_path}"))?;
 
-    let reenriched_this_run = reenrichment_hatch(rel_path, gopls_scheduled);
+    let reenriched_this_run = reenrichment_hatch(file_path, rel_path, gopls_scheduled);
 
     // Analyze.
     // Pass the absolute path to the analyzer so libclang resolves C/C++ includes
@@ -1927,11 +1974,24 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 /// Note what `gopls_scheduled` does and does not promise. It means the preflight
 /// found a runnable binary, so the phase will run — not that it will succeed for
 /// this file's module. Releasing the guard is therefore a bet that re-enrichment
-/// follows the purge. `run_ingest` covers the bet: a module whose gopls session
-/// fails to start leaves `workspaces < workspaces_attempted`, and the caller
-/// bails rather than exiting 0 over files it purged and could not rebuild.
-fn reenrichment_hatch(rel_path: &str, gopls_scheduled: bool) -> bool {
-    gopls_scheduled && Language::from_path(rel_path) == Some(Language::Go)
+/// follows the purge, and the bet is covered in two places.
+///
+/// A module resolution is required here, not just a `.go` extension.
+/// `group_files_by_go_module` silently drops any path with no `go.mod`/`go.work`
+/// ancestor, so a module-less `.go` file is one gopls will never be handed: it
+/// would land in neither `workspaces` nor `workspaces_attempted`, leaving the
+/// caller's partial-failure check blind to it while the guard had already been
+/// released. Requiring the same resolution the grouping uses keeps the hatch a
+/// strict subset of what the phase will actually attempt.
+///
+/// The remaining case — a module gopls is handed but cannot start a session on —
+/// is caught by `run_ingest`, which compares `workspaces` against
+/// `workspaces_attempted` and refuses to exit 0 over files it purged and could
+/// not rebuild.
+fn reenrichment_hatch(file_path: &Path, rel_path: &str, gopls_scheduled: bool) -> bool {
+    gopls_scheduled
+        && Language::from_path(rel_path) == Some(Language::Go)
+        && hades_core::code::lsp::gopls::find_go_module_root(file_path).is_some()
 }
 
 /// Return true when replacing the stored artifacts would lower fidelity.
@@ -2054,6 +2114,13 @@ struct SemanticLspStats {
     /// Crates/modules the phase *attempted*. Greater than `workspaces` means
     /// some were skipped after their language-server session failed to start,
     /// which the caller must treat as loss rather than success (#194 review).
+    ///
+    /// Supplied by the phase rather than derived inside `store_lsp_extractions`:
+    /// that function has four exits, and deriving it there let them disagree
+    /// (two returned `Default`, i.e. zero, while `workspaces` was non-zero).
+    /// A `saturating_sub` against a zero placeholder never fires, so the check
+    /// this field exists for would have been silently dead on the second phase
+    /// to adopt it.
     workspaces_attempted: usize,
     /// Documents ArangoDB rejected individually (illegal key, bad body).
     /// Non-zero means degraded-but-usable enrichment.
@@ -2061,6 +2128,10 @@ struct SemanticLspStats {
     /// The store stage failed wholesale (request-level error). Analysis
     /// results exist but none of them reached the database.
     store_failed: bool,
+    /// Workspace roots whose language-server session failed to start. Their
+    /// files were handed to the phase but never enriched, so the caller needs
+    /// them to decide whether this run destroyed anything (#194 review).
+    failed_workspaces: Vec<PathBuf>,
 }
 
 /// Run rust-analyzer over ingested Rust files to produce rich symbols and edges.
@@ -2142,7 +2213,15 @@ async fn run_rust_analyzer_phase(
         }
     }
 
-    store_lsp_extractions(db, all_extractions, crates_analyzed, "rust-analyzer", "ra").await
+    store_lsp_extractions(
+        db,
+        all_extractions,
+        crates_analyzed,
+        groups.len(),
+        "rust-analyzer",
+        "ra",
+    )
+    .await
 }
 
 /// Run gopls over each discovered Go module. Tree-sitter artifacts remain in
@@ -2165,6 +2244,7 @@ async fn run_gopls_phase(
     );
     let mut all_extractions = HashMap::new();
     let mut modules_analyzed = 0;
+    let mut failed_modules: Vec<PathBuf> = Vec::new();
     for (module_root, module_files) in &groups {
         let session = match GoplsSession::start_with_options(
             module_root,
@@ -2180,6 +2260,7 @@ async fn run_gopls_phase(
                     %error,
                     "gopls unavailable for module; Tree-sitter data retained"
                 );
+                failed_modules.push(module_root.clone());
                 continue;
             }
         };
@@ -2199,9 +2280,16 @@ async fn run_gopls_phase(
             debug!(%error, "gopls shutdown warning (non-fatal)");
         }
     }
-    let mut stats =
-        store_lsp_extractions(db, all_extractions, modules_analyzed, "gopls", "gopls").await?;
-    stats.workspaces_attempted = groups.len();
+    let mut stats = store_lsp_extractions(
+        db,
+        all_extractions,
+        modules_analyzed,
+        groups.len(),
+        "gopls",
+        "gopls",
+    )
+    .await?;
+    stats.failed_workspaces = failed_modules;
     Ok(stats)
 }
 
@@ -2210,12 +2298,14 @@ async fn store_lsp_extractions(
     db: &ArangoPool,
     all_extractions: HashMap<String, FileExtraction>,
     workspaces: usize,
+    workspaces_attempted: usize,
     analyzer: &'static str,
     metadata_prefix: &'static str,
 ) -> Result<SemanticLspStats> {
     if all_extractions.is_empty() {
         return Ok(SemanticLspStats {
             workspaces,
+            workspaces_attempted,
             ..Default::default()
         });
     }
@@ -2344,10 +2434,11 @@ async fn store_lsp_extractions(
                             symbols: stored_symbols,
                             edges: stored_edges,
                             workspaces,
-                            // Set by the caller, which knows how many it tried.
-                            workspaces_attempted: workspaces,
+                            workspaces_attempted,
                             store_errors,
                             store_failed: true,
+                            // Filled in by the phase, which knows which failed.
+                            failed_workspaces: Vec::new(),
                         });
                     }
                 }
@@ -2436,10 +2527,11 @@ async fn store_lsp_extractions(
         symbols: stored_symbols,
         edges: stored_edges,
         workspaces,
-        // Set by the caller, which knows how many it tried.
-        workspaces_attempted: workspaces,
+        workspaces_attempted,
         store_errors,
         store_failed: false,
+        // Filled in by the phase, which knows which failed.
+        failed_workspaces: Vec::new(),
     })
 }
 
@@ -2874,6 +2966,10 @@ mod tests {
         let fkey = keys::file_key(&rel_path);
         cleanup_fixture(&pool, &fkey).await;
 
+        // A real Go module: `reenrichment_hatch` requires one, because
+        // `group_files_by_go_module` drops module-less files and gopls would
+        // never be handed this file otherwise.
+        fs::write(dir.path().join("go.mod"), "module example.com/fixture\n").unwrap();
         fs::write(
             &path,
             "package fixture\n\nfunc Stamped(input uint64) uint64 { return input + 1 }\n",
@@ -3279,18 +3375,51 @@ mod tests {
     /// rule breaks this test instead of leaving it asserting a private copy.
     #[test]
     fn test_reenrichment_hatch_is_go_only() {
-        assert!(reenrichment_hatch("internal/server/handler.go", true));
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+        let go = dir.path().join("handler.go");
+        fs::write(&go, "package x\n").unwrap();
+
+        assert!(reenrichment_hatch(&go, "internal/server/handler.go", true));
         assert!(
-            !reenrichment_hatch("internal/server/handler.go", false),
+            !reenrichment_hatch(&go, "internal/server/handler.go", false),
             "no gopls phase scheduled means nothing will re-supply the purge"
         );
 
-        for path in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp", "src/util.h"] {
+        for rel in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp", "src/util.h"] {
+            let other = dir.path().join(rel.rsplit('/').next().unwrap());
+            fs::write(&other, "x\n").unwrap();
             assert!(
-                !reenrichment_hatch(path, true),
-                "{path} has a per-file semantic analyzer and must keep the guard"
+                !reenrichment_hatch(&other, rel, true),
+                "{rel} has a per-file semantic analyzer and must keep the guard"
             );
         }
+    }
+
+    /// A `.go` file in no Go module must NOT get the hatch (#194 review).
+    ///
+    /// `group_files_by_go_module` silently drops paths with no `go.mod`/`go.work`
+    /// ancestor, so gopls is never handed them. They land in neither
+    /// `workspaces` nor `workspaces_attempted`, which means the caller's
+    /// partial-failure check cannot see them either — releasing the guard would
+    /// purge their stored enrichment with nothing to restore it and nothing to
+    /// report it.
+    #[test]
+    fn test_hatch_requires_a_resolvable_go_module() {
+        let dir = TempDir::new().unwrap();
+        let orphan = dir.path().join("stray.go");
+        fs::write(&orphan, "package x\n").unwrap();
+        assert!(
+            !reenrichment_hatch(&orphan, "stray.go", true),
+            "a .go file gopls will never be handed must keep the guard"
+        );
+
+        // Same file, once the module it belongs to exists.
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+        assert!(
+            reenrichment_hatch(&orphan, "stray.go", true),
+            "with a module root present the phase will attempt it"
+        );
     }
 
     /// `--language go` must not hand the hatch to the whole tree.
@@ -3303,15 +3432,22 @@ mod tests {
     /// overwrite of semantic artifacts gopls cannot rebuild.
     #[test]
     fn test_language_override_cannot_widen_the_hatch() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("go.mod"), "module example.com/x\n").unwrap();
+
         // The predicate never sees the override, so there is nothing to widen.
-        for path in ["src/lib.rs", "pkg/mod.py", "src/engine.cpp"] {
+        for rel in ["lib.rs", "mod.py", "engine.cpp"] {
+            let p = dir.path().join(rel);
+            fs::write(&p, "x\n").unwrap();
             assert!(
-                !reenrichment_hatch(path, true),
-                "{path} must keep the guard even on a `--language go` run"
+                !reenrichment_hatch(&p, rel, true),
+                "{rel} must keep the guard even on a `--language go` run"
             );
         }
+        let go = dir.path().join("main.go");
+        fs::write(&go, "package main\n").unwrap();
         assert!(
-            reenrichment_hatch("cmd/main.go", true),
+            reenrichment_hatch(&go, "cmd/main.go", true),
             "a real Go file still gets the hatch"
         );
     }

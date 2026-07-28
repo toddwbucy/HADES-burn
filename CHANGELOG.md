@@ -40,6 +40,13 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   README's step ordering required the `hades` group before
   `systemd-sysusers` had created it. (#96)
 
+- `AGENTS.md` — a self-contained onboarding guide for an agent that has
+  never seen HADES, usable as a Codex `AGENTS.md` entry point or as a
+  pasted system prompt. It covers what `--help` cannot say: that `db query`
+  searches a collection profile rather than "the database", how the drift
+  buckets relate to what ingest actually skips, and which remedies are safe
+  to narrow. (#186)
+
 ### Changed
 
 - **Breaking (CLI):** `-g` is no longer an alias for `--graph` on
@@ -61,6 +68,19 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   stale chunk record from a deleted file pre-fix; AC for #98 satisfied.
 
 ### Fixed
+
+- Operator-facing help text that contradicted the implementation. `db query
+  --rerank` advertised itself as "Enable re-ranking of results" while the
+  flag exits non-zero without searching, and now says so. `codebase drift`
+  still described the pre-#183 output, and now documents `changed`,
+  `unhandled`, `changed.unverifiable` and `clean`, including the fact that
+  what `symbol_hash` covers depends on the node's `analysis_tier`. The
+  `codebase ingest --force` help and the runtime dangling-edge warning both
+  told operators to "re-ingest the dependent files", which either no-ops
+  (the dependents' own `symbol_hash` is unchanged, so they are skipped) or
+  writes duplicate nodes under re-based keys (a narrower path re-bases every
+  key beneath it); both now name `--force` and the original ingest root.
+  (#186)
 
 - `codebase drift` reported a clean sweep over partially-covered trees.
   Files with no ingest handler fell outside drift's notion of source

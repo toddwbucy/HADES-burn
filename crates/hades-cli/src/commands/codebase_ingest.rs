@@ -13,7 +13,7 @@
 //! - Rust and Go semantic enrichment through language servers
 //! - Per-file error isolation in batch mode
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -356,6 +356,27 @@ pub async fn run(
                 });
             }
         }
+    }
+
+    // Record which ingest root these nodes belong to, for every file discovered
+    // under it — not just the ones this run rewrote. A re-ingest skips unchanged
+    // files, so stamping only rewritten nodes would leave most of an existing
+    // graph unattributed and `codebase drift` unable to tell one tree from
+    // another (#192).
+    //
+    // Runs after the file loop so nodes created by this run are already present.
+    let discovered_keys: Vec<String> = files
+        .iter()
+        .map(|f| file_key_for(&base, f))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    match stamp_ingest_root(&db, &base, &discovered_keys).await {
+        Ok(0) => {}
+        Ok(n) => info!(nodes = n, root = %base.display(), "recorded ingest root"),
+        // Attribution is metadata: losing it degrades drift's precision but must
+        // not fail an otherwise good ingest.
+        Err(e) => warn!(error = %e, "failed to record ingest root on file nodes"),
     }
 
     // Resolve Python import graph edges (file→symbol where possible, file→file fallback).
@@ -905,6 +926,44 @@ pub(crate) fn parse_language_arg(language: Option<&str>) -> Result<Option<Langua
         }
     };
     Ok(Some(lang))
+}
+
+/// Field on a `codebase_files` node naming the ingest root it was built from.
+///
+/// Read by `codebase drift`, which cannot otherwise tell one tree from another:
+/// keys are relative to the root, so two trees in one database produce keys
+/// that look alike and a root-blind comparison reports each tree's nodes as
+/// stale for the other (#192).
+pub(crate) const INGEST_ROOT_FIELD: &str = "ingest_root";
+
+/// Stamp `ingest_root` on every existing node in `keys` that does not already
+/// carry this root.
+///
+/// Returns how many nodes were updated. Nodes are matched by `_key` and missing
+/// ones are skipped, so this is safe to call with keys whose documents failed to
+/// write.
+///
+/// The value is overwritten rather than only filled when absent: a repository
+/// that moved on disk keeps its keys (they are root-relative) but changes root,
+/// and leaving the old value would exclude the whole tree from its own drift
+/// report. Last ingest wins, which is what the field claims to record.
+async fn stamp_ingest_root(db: &ArangoPool, base: &Path, keys: &[String]) -> Result<usize> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let root = base.display().to_string();
+    let aql = format!(
+        "FOR k IN @keys \
+           LET f = DOCUMENT(@@files, k) \
+           FILTER f != null AND f.{INGEST_ROOT_FIELD} != @root \
+           UPDATE f WITH {{ {INGEST_ROOT_FIELD}: @root }} IN @@files \
+           RETURN 1"
+    );
+    let bind = json!({ "@files": CODEBASE.files, "keys": keys, "root": root });
+    let rows =
+        hades_core::db::query::query(db, &aql, Some(&bind), None, false, ExecutionTarget::Writer)
+            .await?;
+    Ok(rows.results.len())
 }
 
 /// The base directory that ingest strips to form a file node's `rel_path`.

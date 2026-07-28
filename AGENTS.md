@@ -205,7 +205,14 @@ hades --db <name> codebase drift /path/to/repo
 
 This is the honest health check. The JSON reports:
 
-- `stale.count`: graph nodes with no counterpart under this root
+- `stale.count`: graph nodes with no counterpart under this root.
+  `stale.keys` lists only the ones attributed to this ingest root, so it is
+  what `codebase retire` should be fed. `stale.unattributed_keys` lists the
+  rest, held out for review
+- `other_roots`: `{count, roots}` for nodes belonging to a different ingest
+  root, excluded from every bucket here. Read `roots`: one *under* the root
+  you passed is usually a mis-rooted ingest of this same tree, not a second
+  graph
 - `uningested.count`: source files with no node
 - `changed.count`: matched files whose content differs from what was ingested
 - `changed.unverifiable`: matched files that could **not** be compared, because
@@ -217,13 +224,19 @@ This is the honest health check. The JSON reports:
   `changed.unverifiable` are all zero
 
 Read `stale` literally, as "no counterpart under this root", not as "the source
-file was deleted". The graph side of that comparison is the whole
-`codebase_files` collection with no filter by ingest root, so in a database
-holding two ingested trees, drift against one reports every node of the other as
-stale while those source files are present and untouched (#192). This is worth
-knowing before acting on it: `--full` exists to feed `codebase retire`, which
-deletes each target's node, chunks, embeddings, symbols and incident edges. Check
-that the keys belong to the tree you meant.
+file was deleted". Ingest records which root each node came from, and drift
+compares only its own, so a database holding several trees reports the others
+under `other_roots` rather than calling them stale (#192).
+
+One case escapes that: nodes ingested before HADES recorded the root cannot be
+attributed either way. They are still compared, and the stale ones are listed as
+`stale.unattributed_keys` rather than mixed into `stale.keys`, so the documented
+`--full` pipe into `codebase retire` cannot delete them unreviewed.
+
+Re-ingesting a root attributes every node whose file still exists. One whose file
+is already gone is never rediscovered, so no re-ingest attributes it. On a graph
+built before attribution, expect a residue there that only a reviewed retire
+clears; it does not grow.
 
 `unverifiable` blocks `clean` on purpose. A file nobody compared is not a file
 known to be current, and reporting a clean sweep over uncompared files is exactly
@@ -357,10 +370,11 @@ a correct edge sitting beside each one.
 repairing. Keys are derived relative to whatever path you pass: a directory bases
 at itself, and a *file* bases at its parent. So re-ingesting one file writes a
 node keyed `main_rs` instead of `crates_hades-cli_src_main_rs`. That purges
-nothing, leaves the dangling edges in place, and adds a duplicate node that drift
-then reports as one extra `stale` key. Note what it does **not** do: the real
-file's node is still there and still matches the tree, so it stays `matched` and
-`uningested` stays empty. A zero there is not confirmation the repair worked.
+nothing, leaves the dangling edges in place, and adds a duplicate node under that
+narrower root. Drift against the real root reports it under `other_roots` rather
+than `stale`, since it carries a root of its own -- so it is not in `stale.keys`
+and the `--full` pipe into `retire` will not clean it up. Read the `roots` list:
+a root *under* the one you passed is this mistake, not a second repository.
 This is the same rule as ingesting
 at the repository root, and it means the narrow-looking repair is in fact a
 whole-tree rebuild. Budget for it.

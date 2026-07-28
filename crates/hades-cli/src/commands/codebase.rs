@@ -140,13 +140,22 @@ pub enum CodebaseCmd {
     /// original ingest root>` rewrites them; until then, treat a `.go` node
     /// reading `semantic` as `structural`.
     ///
-    /// `stale` is NOT "the source file was deleted". It is every node in
-    /// `codebase_files` with no counterpart under the root you passed, and the
-    /// graph side is unfiltered — so in a database holding more than one
-    /// ingested tree, every node of the other tree lands in `stale` while its
-    /// source file exists and is untouched (#192). Read `--full` output with
-    /// that in mind before feeding it to `codebase retire`, which deletes each
-    /// target's node, chunks, embeddings, symbols and incident edges.
+    /// `stale` is NOT "the source file was deleted". It is every node with no
+    /// counterpart under the root you passed. Nodes belonging to another
+    /// ingest root are excluded and counted separately as `other_roots`, so a
+    /// database holding several trees no longer reports one tree's nodes as
+    /// stale for another (#192).
+    ///
+    /// The exception is nodes ingested before HADES recorded `ingest_root`.
+    /// Those cannot be attributed either way, so they are still compared and the
+    /// stale ones are listed separately as `stale.unattributed_keys`, held out
+    /// of `stale.keys` so a `--full` pipe into `codebase retire` cannot delete
+    /// them unreviewed.
+    ///
+    /// `other_roots` reports the roots as well as the count, because a root
+    /// *under* this one is usually a mis-rooted ingest of this same tree rather
+    /// than a second graph: `codebase ingest` on a single file bases its keys at
+    /// that file's parent.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total
@@ -166,6 +175,18 @@ pub enum CodebaseCmd {
 
         /// List every key instead of truncating. Use this to feed
         /// `codebase retire --from -`.
+        ///
+        /// `stale.keys` holds only nodes attributed to this ingest root, so it
+        /// is what `retire` should be fed. Keys that could not be attributed are
+        /// held out, in `stale.unattributed_keys`, for review — `retire` deletes
+        /// each target's node, chunks, embeddings, symbols and incident edges,
+        /// and those keys predate the attribution that would prove they belong
+        /// to this tree.
+        ///
+        /// Re-ingesting a root attributes every node whose file still exists. A
+        /// node whose file is already gone is never rediscovered, so no re-ingest
+        /// can attribute it; that residue is pre-attribution backlog and only a
+        /// reviewed retire clears it.
         #[arg(long)]
         full: bool,
     },

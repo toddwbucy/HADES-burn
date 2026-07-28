@@ -49,6 +49,18 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Changed
 
+- `codebase ingest` starts one rust-analyzer session per Cargo *workspace*
+  rather than per member crate. Grouping keyed on the nearest `Cargo.toml`,
+  but rust-analyzer runs `cargo metadata` on startup, which from any member
+  directory resolves the whole workspace and returns every member package.
+  Each session therefore loaded the entire workspace anyway, with its own
+  cold salsa database, and the phase paid that N times sequentially -- five
+  times on this repository. Grouping now walks up to the manifest declaring
+  `[workspace]`, matching Cargo's own resolution, including a nested crate
+  that opts out with an empty `[workspace]` table and a standalone crate
+  belonging to no workspace.
+
+
 - **Breaking (daemon/MCP):** `db.query` rejects `limit: 0` and `limit` above
   1000 with `INVALID_PARAMS` instead of returning an empty success or
   silently clamping. Zero previously produced `{"success": true,

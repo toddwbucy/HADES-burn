@@ -48,8 +48,56 @@ impl LanguageServer for RustAnalyzer {
 
 pub type RustAnalyzerSession = LspSession<RustAnalyzer>;
 
+/// The directory rust-analyzer should be pointed at for `file_path`.
+///
+/// This is the *Cargo workspace* root, not the nearest `Cargo.toml`. The
+/// difference is the single biggest cost in the enrichment phase: rust-analyzer
+/// runs `cargo metadata` on startup, which from any member directory resolves
+/// the whole workspace and returns every member package. Pointing a session at a
+/// member crate therefore indexes the entire workspace anyway — so grouping by
+/// nearest `Cargo.toml` started one full-workspace session per member and
+/// indexed the same code N times, sequentially. On this repository that was five
+/// indexes where one would do.
+///
+/// Walks up looking for the first `Cargo.toml` declaring a `[workspace]` table,
+/// which matches Cargo's own resolution: a member's manifest does not declare
+/// one, and a nested crate that opts out of its parent workspace does so by
+/// declaring an empty `[workspace]` — in which case it really is its own root
+/// and the walk stops there, correctly.
+///
+/// Falls back to the nearest `Cargo.toml` for a standalone crate that belongs to
+/// no workspace.
 pub fn find_crate_root(file_path: &Path) -> Option<PathBuf> {
-    find_workspace_root(file_path, &["Cargo.toml"])
+    let nearest = find_workspace_root(file_path, &["Cargo.toml"])?;
+
+    let mut dir = nearest.clone();
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.is_file()
+            && std::fs::read_to_string(&manifest).is_ok_and(|text| declares_workspace_table(&text))
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return Some(nearest);
+        }
+    }
+}
+
+/// Does this manifest text declare a `[workspace]` table?
+///
+/// Matches `[workspace]` and its sub-tables (`[workspace.dependencies]`,
+/// `[workspace.package]`, `[workspace.lints]`), all of which only appear in a
+/// workspace root. Deliberately not a TOML parse: this runs while walking
+/// ancestors of every discovered `.rs` file, and the question is coarse enough
+/// that scanning table headers answers it. A `workspace = true` key inside
+/// `[package]` is a *member* marker and must not match, which is why this looks
+/// for the bracketed header rather than the bare word.
+fn declares_workspace_table(manifest: &str) -> bool {
+    manifest.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("[workspace]") || line.starts_with("[workspace.")
+    })
 }
 
 pub fn group_files_by_crate(rs_files: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
@@ -118,5 +166,100 @@ mod tests {
         let groups = group_files_by_crate(&files);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups.values().next().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod workspace_root_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Files in different members of one workspace must group to ONE root.
+    ///
+    /// Grouping by nearest `Cargo.toml` produced one rust-analyzer session per
+    /// member, and each session's `cargo metadata` resolves the whole workspace
+    /// regardless — so the same code was indexed once per member, sequentially.
+    #[test]
+    fn members_of_one_workspace_share_a_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        )
+        .unwrap();
+        for member in ["a", "b"] {
+            let src = root.join("crates").join(member).join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(
+                root.join("crates").join(member).join("Cargo.toml"),
+                format!("[package]\nname = \"{member}\"\n"),
+            )
+            .unwrap();
+            fs::write(src.join("lib.rs"), "pub fn f() {}\n").unwrap();
+        }
+
+        let files = vec![
+            root.join("crates/a/src/lib.rs"),
+            root.join("crates/b/src/lib.rs"),
+        ];
+        let groups = group_files_by_crate(&files);
+
+        assert_eq!(
+            groups.len(),
+            1,
+            "one workspace must yield one session, got {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        let (grouped_root, grouped_files) = groups.into_iter().next().unwrap();
+        assert_eq!(grouped_root, root.canonicalize().unwrap_or(root.into()));
+        assert_eq!(grouped_files.len(), 2);
+    }
+
+    /// A standalone crate with no workspace still resolves to its own manifest.
+    #[test]
+    fn a_standalone_crate_is_its_own_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"solo\"\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+
+        let found = find_crate_root(&root.join("src/lib.rs")).unwrap();
+        assert_eq!(found, root);
+    }
+
+    /// A nested crate that opts out of its parent workspace — an empty
+    /// `[workspace]` table — is genuinely its own root, and the walk must stop
+    /// there rather than climbing to the parent.
+    #[test]
+    fn a_crate_opting_out_of_its_parent_workspace_is_its_own_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let nested = root.join("vendor").join("thing");
+        fs::create_dir_all(nested.join("src")).unwrap();
+        fs::write(
+            nested.join("Cargo.toml"),
+            "[workspace]\n\n[package]\nname = \"thing\"\n",
+        )
+        .unwrap();
+        fs::write(nested.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+
+        let found = find_crate_root(&nested.join("src/lib.rs")).unwrap();
+        assert_eq!(found, nested, "the opt-out crate is its own workspace");
+    }
+
+    /// `workspace = true` under `[package]` is a *member* marker, not a root.
+    #[test]
+    fn inherited_keys_do_not_make_a_member_look_like_a_root() {
+        assert!(!declares_workspace_table(
+            "[package]\nname = \"m\"\nversion.workspace = true\nedition.workspace = true\n"
+        ));
+        assert!(declares_workspace_table("[workspace]\nmembers = []\n"));
+        assert!(declares_workspace_table(
+            "[workspace.dependencies]\nserde = \"1\"\n"
+        ));
     }
 }

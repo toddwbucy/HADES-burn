@@ -42,6 +42,32 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Changed
 
+- **Breaking (daemon/MCP):** `db.query` rejects `limit: 0` and `limit` above
+  1000 with `INVALID_PARAMS` instead of returning an empty success or
+  silently clamping. Zero previously produced `{"success": true,
+  "result_count": 0}`, which an agent cannot distinguish from "nothing
+  matched"; the clamp silently truncated a CLI `-n` that the pre-#187
+  implementation honoured. (#187)
+
+- **Breaking (MCP):** the `db_query` tool no longer accepts `rerank`. It is
+  absent from the advertised schema and a client that still sends it gets
+  `INVALID_PARAMS` naming `hybrid`/`structural` as the alternatives, rather
+  than a success whose results were never reranked. (#187)
+
+- `db.query`'s vector search refuses collections holding more than 100,000
+  embeddings. The search has no vector index and materializes every stored
+  vector to score it, which was the operator's own cost as a one-shot CLI
+  and is a shared long-lived process's cost now that the daemon and MCP host
+  the same handler. An oversized collection is a clear error rather than a
+  60s request timeout that also leaks the ArangoDB cursor. (#187)
+
+- `HADES_DEFAULT_COLLECTION` is read only by the CLI, never by the shared
+  handler. Inside the daemon it is a process-wide global spanning every
+  database and agent, so an operator's unit-file setting would silently
+  redirect an unrelated database's search to collections that do not exist
+  there and return zero results as a success. (#187)
+
+
 - **Breaking (CLI):** `-g` is no longer an alias for `--graph` on
   `db graph traverse`, `db graph shortest-path`, and `db graph neighbors`.
   It collided with the global `--gpu -g`, which made clap's uniqueness
@@ -61,6 +87,15 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   stale chunk record from a deleted file pre-fix; AC for #98 satisfied.
 
 ### Fixed
+
+- `db.query` was advertised over the daemon and MCP but never implemented.
+  Dispatch fell through a catch-all arm to `NOT_IMPLEMENTED`, so the MCP
+  `db_query` tool — one of the twelve curated agent-tier tools — failed on
+  every call while appearing in the tool list. The search pipeline now lives
+  in `dispatch::handlers::db_query`, shared by `hades db query`, the daemon
+  and MCP, and the catch-all is gone so a future command cannot reach the
+  protocol surface without a handler. (#187)
+
 
 - `codebase drift` reported a clean sweep over partially-covered trees.
   Files with no ingest handler fell outside drift's notion of source

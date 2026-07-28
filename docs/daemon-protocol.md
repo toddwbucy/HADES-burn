@@ -167,10 +167,10 @@ Semantic search over documents (vector similarity + optional hybrid).
 | Param        | Type     | Default | Description                        |
 |--------------|----------|---------|------------------------------------|
 | `text`       | `string` | required | Search query text                 |
-| `limit`      | `int`    | 10      | Max results (max 1000)            |
+| `limit`      | `int`    | 10      | Max results. `0` or above 1000 returns `INVALID_PARAMS` rather than clamping |
 | `collection` | `string` | null    | Restrict to collection profile    |
-| `hybrid`     | `bool`   | false   | Enable hybrid BM25 + vector search|
-| `rerank`     | `bool`   | false   | Enable cross-encoder reranking    |
+| `hybrid`     | `bool`   | false   | Blend vector similarity with keyword term-coverage (not BM25) |
+| `rerank`     | `bool`   | false   | **Not available.** Sending `true` returns `INVALID_PARAMS`; the cross-encoder does not ship with HADES. Use `hybrid` and/or `structural` |
 | `structural` | `bool`   | false   | Include structural embeddings     |
 
 ### `db.get` (Agent)

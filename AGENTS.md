@@ -218,10 +218,12 @@ root>`. Both halves matter. Do not narrow the path to bound the cost: keys are
 derived relative to whatever path you pass, so a subdirectory re-bases every key
 under it, the `unverifiable` count does not drop, and the subtree is duplicated.
 The `--force` is load-bearing too: a plain re-ingest skips every file whose
-`symbol_hash` still
-matches and returns before it writes the file document that carries
-`content_hash`, so the count does not move. The exception is a file counted as
-unverifiable because it no longer reads as text. Re-ingest cannot read it either,
+`symbol_hash` still matches and returns before it writes the file document that
+carries `content_hash`, so the count does not move. The exceptions are a file
+counted as
+unverifiable because it no longer reads as text, and `.go` files, which the
+fidelity guard described below skips regardless of `--force`. Re-ingest cannot
+read an unreadable file either,
 so that one stays counted until the file is readable again or its node is retired.
 
 `unhandled` does **not** block `clean`, because every repository contains a
@@ -243,10 +245,16 @@ the bucket exists.
   identical will still be missed.
 - **Tier `text`**: `symbol_hash` is the full-content digest, so any edit at all
   changes it and a plain re-ingest always picks the file up.
+- **Go, at tier `semantic`**: a special case that matches none of the above. Go
+  has no semantic analyzer, so it is Tree-sitter-analyzed and gets the serialized
+  digest, but the gopls phase then patches the node's tier up to `semantic`
+  without rewriting `symbol_hash`. A `.go` node therefore advertises a tier whose
+  rule does not apply to it, and `--force` cannot refresh it at all (see below).
 
-Read the tier off the node rather than guessing from the extension. If you do not
-want to check, `--force` is always correct and never wrong, just expensive: it
-rebuilds symbols, chunks and embeddings for every file under the ingest root.
+Read the tier off the node rather than guessing from the extension. `--force` is
+the broadest remedy, but it is not a guarantee: it rebuilds every file under the
+ingest root that the fidelity guard lets through, and that guard ignores
+`--force` entirely.
 
 `--force` never permits an analyzer-fidelity downgrade on its own, and that shows
 up in two very different ways.
@@ -261,12 +269,21 @@ aborting after the purge would be too late. So on a host without rust-analyzer,
 at all. `--allow-analysis-downgrade` is not an afterthought here, it is the only
 thing that lets the command run.
 
-**Analyzer present but beaten on one file: that file alone is skipped.** When a
-lower-tier analysis would overwrite a richer stored one, that single file is
-returned as skipped with
+**Stored analysis outranks incoming: the file is skipped, and `--force` does not
+help.** When a lower-tier analysis would overwrite a richer stored one, the file
+is returned as skipped with
 `error: "higher-fidelity stored analysis preserved"` and drift keeps reporting
-it. The rest of the run proceeds normally. `--allow-analysis-downgrade` lets the
-poorer analysis win.
+it. This guard runs *before* the `--force` check and is gated on
+`--allow-analysis-downgrade` instead, so `--force` has no effect on it.
+
+Do not read that as a rare per-file oddity. It is permanent and whole-language
+wherever a stored tier was raised after the fact, and **Go is exactly that case**:
+gopls patches every `.go` node to `semantic`, later runs can only offer
+`structural`, and so every `.go` file is skipped on every run after the first.
+`codebase ingest --force /go-repo` reports each one as `skipped`, and drift
+reports the same counts afterwards as before. The same happens to any language
+whose semantic analyzer becomes unavailable between runs, such as C++ without a
+compilation database. `--allow-analysis-downgrade` is the only way through.
 
 ### Verify graph integrity
 
@@ -305,9 +322,12 @@ Both parts of that command are load-bearing, and each is easy to get wrong.
 `--force` is required. The dependent file is dependent precisely because the
 *other* file changed, so its own symbol set is untouched, its `symbol_hash` still
 matches, and a plain `codebase ingest` skips it. A skipped file is never
-re-purged and never feeds the import and call resolvers that run after the file
-loop, so its stale outbound edges are never rewritten. A plain re-ingest over an
-otherwise-unchanged tree leaves every dangling edge exactly where it was.
+**re-purged**, and the purge is what removes edges pointing at symbols that no
+longer exist. The rust-analyzer and gopls phases do still run over skipped files,
+because their file lists are built during discovery, but they only add fresh
+edges by deterministic key. Nothing deletes the dead ones. A plain re-ingest over
+an otherwise-unchanged tree leaves every dangling edge exactly where it was, with
+a correct edge sitting beside each one.
 
 **The path must be the original ingest root**, even though only a few files need
 repairing. Keys are derived relative to whatever path you pass: a directory bases
@@ -376,7 +396,7 @@ and only then re-run with `-y`.
 |---|---|
 | Silent empty output | The command failed and you suppressed stderr. Re-run without `2>/dev/null` and check the exit code |
 | A pipeline "succeeds" but produces nothing | No `set -o pipefail`, so a failed `hades` exited 1 and the pipeline reported the last command's 0 |
-| JSON parse error | You forgot `--db`, or your harness merged stderr into stdout. Not caused by omitting `2>/dev/null`, which never affects a pipe |
+| JSON parse error | Your harness merged stderr into stdout. Not caused by omitting `2>/dev/null`, which never affects a pipe. Omitting `--db` cannot produce this: it errors on stderr and leaves stdout empty, which is row 1 |
 | Search returns nothing on a populated DB | Wrong profile. Run `db stats` and pass `-c` |
 | `404 collection embeddings` | Same. Wrong profile, not a broken index |
 | Drift reports near-total drift both ways | Wrong ingest root. Keys are relative to it |

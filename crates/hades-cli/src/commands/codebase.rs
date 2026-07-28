@@ -121,8 +121,15 @@ pub enum CodebaseCmd {
     /// The other tiers are stricter and mostly self-correct: tier `structural`
     /// and C++ at tier `semantic` hash the serialized symbol list (line spans
     /// and metadata included), and tier `text` hashes full content. Check the
-    /// tier rather than the extension. `--force` is always correct, just
-    /// expensive: it rebuilds every file under the ingest root.
+    /// tier rather than the extension.
+    ///
+    /// Go is the exception to both rules. It has no semantic analyzer, so it is
+    /// Tree-sitter-analyzed with a serialized digest, but the gopls phase then
+    /// patches the node to `analysis_tier: "semantic"` without rewriting
+    /// `symbol_hash`. Every later run therefore offers `structural` against a
+    /// stored `semantic` and loses the fidelity guard, which runs BEFORE the
+    /// `--force` check. So `--force` does not refresh `.go` files at all; only
+    /// `--allow-analysis-downgrade` does.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

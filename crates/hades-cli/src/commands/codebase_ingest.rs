@@ -283,18 +283,30 @@ pub async fn run(
         // gate protects and the set the phases process cannot diverge — a
         // divergence here is exactly how `--language rust` on non-.rs files
         // would skip the preflight and silently lose enrichment (#164).
-        if is_semantic_target(
+        let is_rust_target = is_semantic_target(
             file_path,
             lang_override,
             &unparsed_set,
             Language::Rust,
             "rs",
-        ) {
+        );
+        if is_rust_target {
             rust_abs_paths.push(file_path.clone());
         }
-        if is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go") {
+        let is_go_target =
+            is_semantic_target(file_path, lang_override, &unparsed_set, Language::Go, "go");
+        if is_go_target {
             go_abs_paths.push(file_path.clone());
         }
+
+        // A post-loop LSP phase will re-supply this file's semantic symbols and
+        // edges after the per-file write, so the fidelity guard must not block
+        // the rewrite: the purge it is protecting is undone within this same
+        // run. Without this, Go — which has no per-file semantic analyzer and so
+        // can only ever offer `Structural` — was pinned against re-ingest
+        // forever once the gopls phase had stamped the node (#193).
+        let reenriched_this_run = (is_rust_target && rust_analyzer_cmd.is_some())
+            || (is_go_target && gopls_cmd.is_some());
 
         let result = if is_unparsed {
             ingest_unparsed_file(
@@ -307,6 +319,7 @@ pub async fn run(
                 "no registered language or grammar",
                 force,
                 allow_analysis_downgrade,
+                reenriched_this_run,
             )
             .await
         } else {
@@ -321,6 +334,7 @@ pub async fn run(
                 compile_commands,
                 force,
                 allow_analysis_downgrade,
+                reenriched_this_run,
             )
             .await
         };
@@ -1047,6 +1061,7 @@ async fn ingest_file(
     compile_commands: Option<&Path>,
     force: bool,
     allow_analysis_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> Result<FileResult> {
     // Read source.
     let source = std::fs::read_to_string(file_path)
@@ -1083,6 +1098,7 @@ async fn ingest_file(
                     &reason,
                     force,
                     allow_analysis_downgrade,
+                    reenriched_this_run,
                 )
                 .await;
             }
@@ -1102,7 +1118,14 @@ async fn ingest_file(
     // touches only this file's own symbols and outbound edges, so inbound
     // authored bridge edges are preserved (unlike a cascading `db purge`).
     let fkey = keys::file_key(rel_path);
-    if preserve_higher_fidelity(db, &fkey, analysis.analysis_tier, allow_analysis_downgrade).await?
+    if preserve_higher_fidelity(
+        db,
+        &fkey,
+        analysis.analysis_tier,
+        allow_analysis_downgrade,
+        reenriched_this_run,
+    )
+    .await?
     {
         warn!(
             path = rel_path,
@@ -1500,13 +1523,22 @@ async fn ingest_unparsed_file(
     fallback_reason: &str,
     force: bool,
     allow_analysis_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> Result<FileResult> {
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("failed to read {}", file_path.display()))?;
     let fkey = keys::file_key(rel_path);
     let lang_label = language_label.unwrap_or_else(|| unparsed_language_label(rel_path));
 
-    if preserve_higher_fidelity(db, &fkey, AnalysisTier::Text, allow_analysis_downgrade).await? {
+    if preserve_higher_fidelity(
+        db,
+        &fkey,
+        AnalysisTier::Text,
+        allow_analysis_downgrade,
+        reenriched_this_run,
+    )
+    .await?
+    {
         warn!(
             path = rel_path,
             fallback_reason, "raw fallback skipped to preserve higher-fidelity stored analysis"
@@ -1862,25 +1894,45 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 // ── Incremental check ───────────────────────────────────────────────────
 
 /// Return true when replacing the stored artifacts would lower fidelity.
+///
+/// `reenriched_this_run` is the escape hatch for languages whose semantic
+/// artifacts come from a post-loop LSP phase rather than from the per-file
+/// analyzer. Go has no semantic analyzer, so `ingest_file` can only ever offer
+/// `Structural`; the gopls phase supplies the semantic symbols and edges
+/// afterwards, in this same run. Blocking the rewrite there protects nothing —
+/// the purge is immediately followed by re-enrichment — while permanently
+/// pinning every `.go` node against re-ingest (#193). C++ and Python have no
+/// such phase, so a genuine downgrade there is permanent and still blocked.
 fn should_preserve_tier(
     stored: Option<AnalysisTier>,
     incoming: AnalysisTier,
     allow_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> bool {
-    !allow_downgrade && stored.is_some_and(|tier| tier > incoming)
+    !allow_downgrade && !reenriched_this_run && stored.is_some_and(|tier| tier > incoming)
 }
 
 /// Enforce monotonic analyzer fidelity before any destructive per-file write.
+///
+/// Compares against the stored file node's `analysis_tier`, which records the
+/// analysis that produced that node's `symbol_hash` and chunks — the LSP phases
+/// deliberately leave it alone (see `store_lsp_extractions`).
 async fn preserve_higher_fidelity(
     db: &ArangoPool,
     file_key: &str,
     incoming: AnalysisTier,
     allow_downgrade: bool,
+    reenriched_this_run: bool,
 ) -> Result<bool> {
     match crud::get_document(db, CODEBASE.files, file_key).await {
         Ok(doc) => {
             let stored = doc["analysis_tier"].as_str().and_then(AnalysisTier::parse);
-            Ok(should_preserve_tier(stored, incoming, allow_downgrade))
+            Ok(should_preserve_tier(
+                stored,
+                incoming,
+                allow_downgrade,
+                reenriched_this_run,
+            ))
         }
         Err(e) if e.is_not_found() => Ok(false),
         Err(e) => Err(e.into()),
@@ -2249,10 +2301,16 @@ async fn store_lsp_extractions(
     let mut patched_count = 0;
     for (rel_path, sym_count, analyzed_at) in &file_patches {
         let fkey = keys::file_key(rel_path);
-        let mut patch = json!({
-            "analysis_tier": "semantic",
-            "analyzer": analyzer,
-        });
+        // Deliberately does NOT touch `analysis_tier`/`analyzer`. Those describe
+        // the analysis that produced this node's `symbol_hash` and chunks, and
+        // enrichment rewrites neither. Stamping the file `semantic` here made a
+        // Go node advertise a fidelity its own digest did not have, and — because
+        // `preserve_higher_fidelity` compares against exactly this field — meant
+        // every later run offered `structural`, lost, and skipped the file
+        // permanently, `--force` included (#193). The enrichment is recorded
+        // under the prefixed keys below, and the symbols and edges it writes
+        // carry `analysis_tier: "semantic"` on themselves.
+        let mut patch = json!({});
         if let Value::Object(fields) = &mut patch {
             fields.insert(format!("{metadata_prefix}_analyzed"), json!(true));
             fields.insert(format!("{metadata_prefix}_symbol_count"), json!(sym_count));
@@ -2824,6 +2882,7 @@ mod tests {
                 None,
                 false,
                 false,
+                false,
             )
             .await
             .unwrap_or_else(|e| panic!("first ingest failed for .{ext}: {e}"));
@@ -2851,6 +2910,7 @@ mod tests {
                 &mut imports,
                 None,
                 true,
+                false,
                 false,
             )
             .await
@@ -2917,21 +2977,52 @@ mod tests {
         assert!(should_preserve_tier(
             Some(AnalysisTier::Semantic),
             AnalysisTier::Structural,
+            false,
             false
         ));
         assert!(should_preserve_tier(
             Some(AnalysisTier::Structural),
             AnalysisTier::Text,
+            false,
             false
         ));
         assert!(!should_preserve_tier(
             Some(AnalysisTier::Semantic),
             AnalysisTier::Structural,
-            true
+            true,
+            false
         ));
         assert!(!should_preserve_tier(
             Some(AnalysisTier::Structural),
             AnalysisTier::Semantic,
+            false,
+            false
+        ));
+    }
+
+    /// #193: a language whose semantic artifacts come from a post-loop LSP phase
+    /// must not be pinned against re-ingest by its own enrichment.
+    ///
+    /// Go can only ever offer `Structural` from `ingest_file`, so once a node was
+    /// stamped `Semantic` the guard fired on every subsequent run and skipped the
+    /// file permanently — `--force` included, since the guard runs ahead of it.
+    /// When the gopls phase will re-enrich in this same run, the purge it was
+    /// protecting is undone immediately, so preserving buys nothing.
+    #[test]
+    fn test_pending_lsp_reenrichment_releases_the_fidelity_guard() {
+        assert!(!should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            false,
+            true
+        ));
+
+        // Without a scheduled phase the guard still holds: a C++ node whose
+        // libclang analysis is gone has nothing to restore it this run.
+        assert!(should_preserve_tier(
+            Some(AnalysisTier::Semantic),
+            AnalysisTier::Structural,
+            false,
             false
         ));
     }

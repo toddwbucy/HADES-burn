@@ -69,6 +69,25 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Fixed
 
+- Go files were permanently pinned against re-ingest. Go has no per-file
+  semantic analyzer, so ingest can only produce `analysis_tier: "structural"`,
+  but the post-loop gopls phase then stamped the **file node** `"semantic"`
+  without rewriting `symbol_hash` — which it cannot, since that digest belongs
+  to the per-file analysis. `preserve_higher_fidelity` compares against exactly
+  that field and runs ahead of the `--force` check, so from the second run
+  onward every `.go` file lost the comparison and returned skipped with
+  `higher-fidelity stored analysis preserved`, `--force` included, leaving
+  `codebase drift` reporting the same counts forever. The LSP phases no longer
+  overwrite the file node's `analysis_tier`/`analyzer` (the enrichment is
+  already recorded under `gopls_analyzed` / `rust_analyzer_analyzed` and their
+  companions, and the symbols and edges it writes carry their own tier), and
+  the fidelity guard now yields when an LSP phase is scheduled to re-enrich the
+  file later in the same run — which is also what recovers graphs already
+  stamped by the old behavior, without requiring
+  `--allow-analysis-downgrade`. The guard is unchanged where it is still
+  load-bearing: a C++ tree re-ingested without its compilation database is
+  still preserved rather than silently downgraded. (#193)
+
 - Operator-facing help text that contradicted the implementation. `db query
   --rerank` advertised itself as "Enable re-ranking of results" while the
   flag exits non-zero without searching, and now says so. `codebase drift`

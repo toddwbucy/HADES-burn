@@ -112,10 +112,19 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   files. Drift compares only nodes carrying its own root and reports the
   rest as `other_roots`. Nodes predating attribution are still compared —
   dropping them would report an entire existing graph as `uningested` —
-  but the stale ones among them are counted in `stale.unattributed` and
-  called out on stderr, since those are the keys `--full` would hand to
-  `retire` without being able to prove they belong to this tree. One
-  re-ingest per root clears it. (#192)
+  but the stale ones among them are listed separately as
+  `stale.unattributed_keys` and held out of `stale.keys`, so the documented
+  `drift --full | codebase retire` pipeline cannot delete a node this
+  command could not prove belongs here. Re-ingesting a root attributes
+  every node whose file still exists; a node whose file is already gone is
+  never rediscovered and no re-ingest can attribute it, so a graph built
+  before this change keeps a residue that only a reviewed retire clears.
+
+  Scope: this makes drift stop mislabelling another tree's nodes. It does
+  not separate trees that share a relative path, because `file_key` is
+  still purely root-relative and `src/main.py` in two repositories is one
+  document. Non-overlapping trees in one database are handled; colliding
+  ones need the root folded into the key, which is a migration. (#192)
 
 - `db.query` was advertised over the daemon and MCP but never implemented.
   Dispatch fell through a catch-all arm to `NOT_IMPLEMENTED`, so the MCP

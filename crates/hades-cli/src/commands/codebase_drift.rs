@@ -17,12 +17,27 @@
 //! so they carry no evidence of which tree produced them; a comparison that read
 //! the whole `codebase_files` collection reported every node of a second tree as
 //! stale while those files sat untouched on disk (#192). Ingest now records an
-//! `ingest_root` on each node and this command compares only its own. Nodes
-//! belonging to another root are excluded and counted under `other_roots`;
+//! `ingest_root` on each node and this command compares only its own.
+//!
+//! That scopes the comparison, and it is all it scopes. `keys::file_key` is
+//! still purely root-relative, so two trees sharing a relative path (`src/main.py`
+//! in both) share one document, and the later ingest overwrites the earlier. Root
+//! attribution makes drift stop mislabelling the *other* tree's nodes; it cannot
+//! separate nodes that were never distinct. Non-overlapping trees are handled;
+//! colliding ones need the root folded into the key, which is a migration. Nodes
+//! belonging to another root are excluded and reported under `other_roots`;
 //! nodes predating attribution are kept (dropping them would report an entire
-//! existing graph as uningested) and counted under `stale.unattributed`, since
-//! those are the ones a `--full` run would hand to `codebase retire` without
-//! being able to prove they belong here.
+//! existing graph as uningested) and listed under `stale.unattributed_keys`,
+//! held out of `stale.keys` so a `--full` pipe into `codebase retire` cannot
+//! delete a node this command could not prove belongs here.
+//!
+//! Attribution is recorded over the files ingest *discovers*, so re-ingesting a
+//! root attributes every node whose file still exists. A node whose file is
+//! already gone is never discovered and can never be attributed by any number of
+//! re-ingests — which is precisely the population `stale` exists to surface. On
+//! a graph built before attribution, expect a residual `unattributed` count that
+//! only a reviewed `codebase retire` clears. It does not grow: everything
+//! ingested from now on carries its root.
 //!
 //! The last two exist because their absence made a clean report a false green
 //! (#183). A file ingest cannot handle used to fall outside drift's notion of
@@ -36,9 +51,8 @@
 //!
 //! It is strictly read-only. Acting on the result is [`super::codebase_retire`]
 //! (for stale nodes) and `codebase ingest` (uningested, and `--force` for
-//! changed). Read `stale` before retiring from it: nodes predating `ingest_root`
-//! cannot be attributed to this tree, and `stale.unattributed` counts exactly
-//! those. One re-ingest per root drives it to zero.
+//! changed). `stale.keys` is attributed and safe to feed `retire`;
+//! `stale.unattributed_keys` is the reviewed pile.
 //!
 //! Discovery uses the same `discover_files` walk and the same key derivation as
 //! ingest, so a file counts as "present" exactly when ingest would have picked
@@ -115,10 +129,16 @@ pub async fn run_drift(
     // Of the nodes we are about to call stale, how many could not be attributed
     // to this root? Those are the ones that might belong to another tree, and
     // they are exactly the ones `retire` would delete on a `--full` run.
-    let stale_unattributed = stale
+    // Split rather than counted. The documented pipeline is
+    // `drift --full | ... | codebase retire --from -`, so the keys that cannot
+    // be proven to belong to this tree travel on stdout straight into a delete
+    // while the only caveat went to stderr, which the pipe drops. Even a reader
+    // who saw "3 of 40 unattributed" had no way to tell which three. Listing
+    // them separately makes the warning actionable: pipe `stale.keys`, review
+    // `stale.unattributed_keys`.
+    let (stale_unattributed, stale_attributed): (Vec<&String>, Vec<&String>) = stale
         .iter()
-        .filter(|k| graph_side.unattributed.contains(**k))
-        .count();
+        .partition(|k| graph_side.unattributed.contains(**k));
     let uningested: Vec<&String> = disk.difference(&graph).collect();
     let matched = graph.intersection(&disk).count();
 
@@ -157,21 +177,30 @@ pub async fn run_drift(
     let mut report = json!({
         "root": base.display().to_string(),
         "graph_nodes": graph.len(),
-        // File nodes in this database that belong to a different ingest root.
-        // Excluded from every bucket above — they are another tree's, and their
-        // source files exist. Non-zero means this database holds more than one
-        // code graph, which is worth knowing before acting on `stale`.
-        "other_roots": graph_side.other_roots,
+        // File nodes belonging to a different ingest root, excluded from every
+        // bucket above. The roots are listed because the count alone cannot tell
+        // a second repository from a mis-rooted ingest of this one.
+        "other_roots": {
+            "count": graph_side.other_roots,
+            "roots": graph_side.other_root_paths,
+        },
         "source_files": disk.len(),
         "matched": matched,
         "stale": {
             "count": stale.len(),
-            "keys": sample(&stale),
-            "truncated": stale.len() > limit,
-            // Stale keys on nodes with no recorded ingest root. They predate
-            // attribution, so they cannot be confirmed to belong to this tree —
-            // re-ingest stamps them and the number drops to zero.
-            "unattributed": stale_unattributed,
+            // Attributed only: every key here is on a node this ingest root
+            // owns, so it is safe to hand to `codebase retire`.
+            "keys": sample(&stale_attributed),
+            "truncated": stale_attributed.len() > limit,
+            // Stale keys on nodes with no recorded ingest root, listed rather
+            // than counted so they can be reviewed instead of piped. They
+            // predate attribution and cannot be confirmed to belong to this
+            // tree. Re-ingest stamps any whose file still exists; one whose file
+            // is already gone can never be attributed by any re-ingest, and is
+            // pre-#192 backlog to clear with a reviewed `retire`.
+            "unattributed": stale_unattributed.len(),
+            "unattributed_keys": sample(&stale_unattributed),
+            "unattributed_truncated": stale_unattributed.len() > limit,
         },
         "uningested": {
             "count": uningested.len(),
@@ -240,17 +269,24 @@ pub async fn run_drift(
         let _ = writeln!(
             err,
             "note: {} file node(s) belong to a different ingest root and were \
-             excluded — this database holds more than one code graph",
+             excluded: {}. A root under this one is usually a mis-rooted ingest \
+             of this tree rather than a second graph — `codebase ingest` on a \
+             single file bases its keys at that file's parent.",
             graph_side.other_roots,
+            graph_side.other_root_paths.join(", "),
         );
     }
-    if stale_unattributed > 0 {
+    if !stale_unattributed.is_empty() {
         let _ = writeln!(
             err,
-            "warning: {stale_unattributed} of {} stale key(s) sit on nodes with no \
-             recorded ingest root, so they cannot be confirmed to belong to this \
-             tree — re-ingest each root once to attribute them before feeding \
-             `--full` output to `codebase retire`",
+            "warning: {} of {} stale key(s) sit on nodes with no recorded ingest \
+             root, so they cannot be confirmed to belong to this tree. They are \
+             listed separately as `stale.unattributed_keys` and are NOT in \
+             `stale.keys`, so a `--full` pipe into `codebase retire` will not \
+             touch them. Re-ingesting each root attributes any whose file still \
+             exists; one whose file is already gone can never be attributed, and \
+             is pre-attribution backlog to clear with a reviewed retire.",
+            stale_unattributed.len(),
             stale.len(),
         );
     }
@@ -296,7 +332,11 @@ pub async fn run_drift(
 ///   report a whole existing graph as uningested.
 /// - `unattributed`: which of those carry no stamp, so the caller can say how
 ///   much of its answer rests on an assumption.
-/// - `other_roots`: how many nodes were excluded as belonging elsewhere.
+/// - `other_roots`: nodes excluded as belonging elsewhere, with the roots they
+///   name. The roots matter as much as the count: a root that is a descendant of
+///   the drift root is usually not a second repository but a mis-rooted ingest of
+///   this one (`codebase ingest <a single file>` bases keys at the file's
+///   parent), and an operator can only tell the two apart by reading the paths.
 struct GraphSide {
     /// key -> stored content digest (`None` for pre-`content_hash` ingests).
     in_scope: BTreeMap<String, Option<String>>,
@@ -304,6 +344,8 @@ struct GraphSide {
     unattributed: BTreeSet<String>,
     /// Nodes excluded because they carry a different `ingest_root`.
     other_roots: usize,
+    /// The distinct roots those nodes name, sorted.
+    other_root_paths: Vec<String>,
 }
 
 async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<GraphSide> {
@@ -315,9 +357,9 @@ async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<Gr
         field = INGEST_ROOT_FIELD
     );
     let bind = json!({ "@files": CODEBASE.files, "root": root });
-    let counted = count_other_roots(pool, &root).await?;
+    let (counted, other_root_paths) = other_roots(pool, &root).await?;
     let entries = graph_file_hashes(pool, &aql, &bind).await?;
-    Ok(classify(entries, counted))
+    Ok(classify(entries, counted, other_root_paths))
 }
 
 /// Split fetched rows into the in-scope map and the unattributed key set.
@@ -325,7 +367,11 @@ async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<Gr
 /// Separated from the query so the classification — the part that decides what
 /// a `--full` run will hand to `codebase retire` — is testable without a
 /// database.
-fn classify(entries: Vec<(String, Option<String>, bool)>, other_roots: usize) -> GraphSide {
+fn classify(
+    entries: Vec<(String, Option<String>, bool)>,
+    other_roots: usize,
+    other_root_paths: Vec<String>,
+) -> GraphSide {
     let mut in_scope = BTreeMap::new();
     let mut unattributed = BTreeSet::new();
     for (key, hash, attributed) in entries {
@@ -338,24 +384,50 @@ fn classify(entries: Vec<(String, Option<String>, bool)>, other_roots: usize) ->
         in_scope,
         unattributed,
         other_roots,
+        other_root_paths,
     }
 }
 
-/// How many file nodes carry a different `ingest_root` than this one.
+/// File nodes carrying a different `ingest_root`, as a count and the distinct
+/// roots they name.
 ///
 /// Reported rather than merely skipped: an operator who expected one tree and
 /// finds several should learn it from drift, not from a surprising `retire`.
-async fn count_other_roots(pool: &ArangoPool, root: &str) -> Result<usize> {
+/// The paths are reported too, because "another root" covers two very different
+/// situations — a genuinely separate repository, and a mis-rooted ingest of this
+/// one — and only the path distinguishes them.
+async fn other_roots(pool: &ArangoPool, root: &str) -> Result<(usize, Vec<String>)> {
     let aql = format!(
-        "RETURN LENGTH(FOR f IN @@files \
-           FILTER f.{field} != null AND f.{field} != @root RETURN 1)",
+        "FOR f IN @@files \
+           FILTER f.{field} != null AND f.{field} != @root \
+           COLLECT r = f.{field} WITH COUNT INTO n \
+           SORT r RETURN {{ root: r, count: n }}",
         field = INGEST_ROOT_FIELD
     );
     let bind = json!({ "@files": CODEBASE.files, "root": root });
-    match query::query_single(pool, &aql, Some(&bind), ExecutionTarget::Reader).await {
-        Ok(v) => Ok(v.and_then(|v| v.as_u64()).unwrap_or(0) as usize),
-        Err(e) if is_missing_collection(&e) => Ok(0),
-        Err(e) => Err(e.into()),
+    match query::query(
+        pool,
+        &aql,
+        Some(&bind),
+        None,
+        false,
+        ExecutionTarget::Reader,
+    )
+    .await
+    {
+        Ok(rows) => {
+            let mut total = 0usize;
+            let mut paths = Vec::new();
+            for row in &rows.results {
+                total += row.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                if let Some(r) = row.get("root").and_then(|r| r.as_str()) {
+                    paths.push(r.to_string());
+                }
+            }
+            Ok((total, paths))
+        }
+        Err(e) if is_missing_collection(&e) => Ok((0, Vec::new())),
+        Err(e) => Err(e).context("failed to read other ingest roots"),
     }
 }
 
@@ -415,7 +487,7 @@ mod tests {
     /// a full re-ingest of a graph that was fine.
     #[test]
     fn unattributed_nodes_stay_in_scope_and_are_flagged() {
-        let side = classify(vec![row("a_rs", true), row("b_rs", false)], 0);
+        let side = classify(vec![row("a_rs", true), row("b_rs", false)], 0, Vec::new());
 
         assert_eq!(side.in_scope.len(), 2, "both nodes must be comparable");
         assert!(side.in_scope.contains_key("b_rs"));
@@ -432,9 +504,10 @@ mod tests {
     /// an operator learns this database holds more than one code graph from
     /// drift rather than from a surprising `retire`.
     #[test]
-    fn other_roots_count_is_reported() {
-        let side = classify(vec![row("a_rs", true)], 7);
+    fn other_roots_count_and_paths_are_reported() {
+        let side = classify(vec![row("a_rs", true)], 7, vec!["/other/tree".to_string()]);
         assert_eq!(side.other_roots, 7);
+        assert_eq!(side.other_root_paths, vec!["/other/tree".to_string()]);
         assert_eq!(
             side.in_scope.len(),
             1,
@@ -447,7 +520,7 @@ mod tests {
     /// has been ingested once by a version that records attribution.
     #[test]
     fn a_fully_attributed_graph_has_nothing_unverifiable_by_root() {
-        let side = classify(vec![row("a_rs", true), row("b_rs", true)], 0);
+        let side = classify(vec![row("a_rs", true), row("b_rs", true)], 0, Vec::new());
         assert!(side.unattributed.is_empty());
     }
 
@@ -456,7 +529,7 @@ mod tests {
     /// telling those apart.
     #[test]
     fn missing_digest_is_preserved_distinctly_from_a_missing_node() {
-        let side = classify(vec![("a_rs".to_string(), None, true)], 0);
+        let side = classify(vec![("a_rs".to_string(), None, true)], 0, Vec::new());
         assert_eq!(side.in_scope.get("a_rs"), Some(&None));
         assert!(side.in_scope.contains_key("a_rs"));
     }

@@ -61,6 +61,13 @@ pub enum CodebaseCmd {
         /// file whose stored analysis came from a richer analyzer than the one
         /// available now is still skipped — pass `--allow-analysis-downgrade`
         /// as well to refresh it.
+        ///
+        /// One exception, and it is the recovery path for #193: a `.go` node
+        /// whose stored `semantic` tier came from the old gopls stamp IS
+        /// rewritten to `structural`, without `--allow-analysis-downgrade`.
+        /// Go has no per-file semantic analyzer, so that stamp described a
+        /// fidelity the node's own digest never had, and the gopls phase
+        /// re-supplies the semantic symbols and edges later in the same run.
         #[arg(short = 'f', long = "force", alias = "no-skip")]
         force: bool,
 

@@ -545,20 +545,43 @@ pub async fn run(
         );
     }
 
-    // Same loud-zero rule as rust-analyzer (#164): a passing preflight with Go
-    // files ingested and zero modules analyzed is silent semantic loss, not
-    // success.
-    if !go_abs_paths.is_empty()
-        && gopls_cmd.is_some()
-        && gopls_stats.workspaces == 0
-        && !allow_analysis_downgrade
-    {
-        anyhow::bail!(
-            "gopls enrichment produced nothing across {} Go file(s) despite a \
-             passing preflight. Investigate the session logs above, or pass \
-             --allow-analysis-downgrade to accept the loss explicitly.",
-            go_abs_paths.len()
-        );
+    // Same loud-zero rule as rust-analyzer (#164), widened to partial failure.
+    //
+    // A passing preflight with Go files ingested and zero modules analyzed is
+    // silent semantic loss. So is *some* modules analyzed, and that case is the
+    // more dangerous one now that the fidelity guard stands aside for `.go`
+    // files whenever the phase is merely scheduled (#193). Releasing the guard
+    // is a bet that re-enrichment follows the purge; when a module's gopls
+    // session fails to start, `run_gopls_phase` warns and moves on, so every
+    // `.go` file in that module was purged and rebuilt at `structural` with
+    // nothing restoring the semantic layer. Exiting 0 there would report success
+    // over data this run destroyed (#194 review).
+    let modules_missing = gopls_stats
+        .workspaces_attempted
+        .saturating_sub(gopls_stats.workspaces);
+    if !go_abs_paths.is_empty() && gopls_cmd.is_some() && !allow_analysis_downgrade {
+        if gopls_stats.workspaces == 0 {
+            anyhow::bail!(
+                "gopls enrichment produced nothing across {} Go file(s) despite a \
+                 passing preflight. Investigate the session logs above, or pass \
+                 --allow-analysis-downgrade to accept the loss explicitly.",
+                go_abs_paths.len()
+            );
+        }
+        if modules_missing > 0 {
+            anyhow::bail!(
+                "gopls analyzed {} of {} Go module(s); {} failed to start a session \
+                 (see the warnings above). Those modules' files were re-ingested at \
+                 the Tree-sitter tier and their gopls symbols and calls/implements \
+                 edges are gone, because the fidelity guard stands aside for Go on \
+                 the expectation that this phase re-supplies them. Fix the failing \
+                 module(s) and re-run, or pass --allow-analysis-downgrade to accept \
+                 the loss explicitly.",
+                gopls_stats.workspaces,
+                gopls_stats.workspaces_attempted,
+                modules_missing
+            );
+        }
     }
 
     // Report inbound edges left dangling by this run's rebuilds.
@@ -1900,6 +1923,13 @@ async fn purge_file_symbols_and_edges(db: &ArangoPool, file_key: &str) {
 /// would hand the hatch to `.rs`, `.py` and `.h` files whose stored `Semantic`
 /// gopls cannot rebuild. The override can force how a file is parsed; it cannot
 /// make gopls able to re-enrich it.
+///
+/// Note what `gopls_scheduled` does and does not promise. It means the preflight
+/// found a runnable binary, so the phase will run — not that it will succeed for
+/// this file's module. Releasing the guard is therefore a bet that re-enrichment
+/// follows the purge. `run_ingest` covers the bet: a module whose gopls session
+/// fails to start leaves `workspaces < workspaces_attempted`, and the caller
+/// bails rather than exiting 0 over files it purged and could not rebuild.
 fn reenrichment_hatch(rel_path: &str, gopls_scheduled: bool) -> bool {
     gopls_scheduled && Language::from_path(rel_path) == Some(Language::Go)
 }
@@ -2021,6 +2051,10 @@ struct SemanticLspStats {
     edges: usize,
     /// Crates (rust-analyzer) or modules (gopls) successfully analyzed.
     workspaces: usize,
+    /// Crates/modules the phase *attempted*. Greater than `workspaces` means
+    /// some were skipped after their language-server session failed to start,
+    /// which the caller must treat as loss rather than success (#194 review).
+    workspaces_attempted: usize,
     /// Documents ArangoDB rejected individually (illegal key, bad body).
     /// Non-zero means degraded-but-usable enrichment.
     store_errors: usize,
@@ -2165,7 +2199,10 @@ async fn run_gopls_phase(
             debug!(%error, "gopls shutdown warning (non-fatal)");
         }
     }
-    store_lsp_extractions(db, all_extractions, modules_analyzed, "gopls", "gopls").await
+    let mut stats =
+        store_lsp_extractions(db, all_extractions, modules_analyzed, "gopls", "gopls").await?;
+    stats.workspaces_attempted = groups.len();
+    Ok(stats)
 }
 
 /// Persist language-neutral LSP symbol documents and semantic edges.
@@ -2307,6 +2344,8 @@ async fn store_lsp_extractions(
                             symbols: stored_symbols,
                             edges: stored_edges,
                             workspaces,
+                            // Set by the caller, which knows how many it tried.
+                            workspaces_attempted: workspaces,
                             store_errors,
                             store_failed: true,
                         });
@@ -2397,6 +2436,8 @@ async fn store_lsp_extractions(
         symbols: stored_symbols,
         edges: stored_edges,
         workspaces,
+        // Set by the caller, which knows how many it tried.
+        workspaces_attempted: workspaces,
         store_errors,
         store_failed: false,
     })
@@ -2693,14 +2734,19 @@ mod tests {
     }
 
     /// Remove every trace of a test fixture file from the codebase graph.
-    /// Shared prefix for every fixture the live tests in this module write,
-    /// across all PIDs and all tests.
+    /// Sweep tag for the #159 live test's fixtures, across all PIDs.
+    const FIXTURE_PREFIX_159: &str = "__hades_test159_";
+
+    /// Sweep tag for the #193 live test's fixtures, across all PIDs.
     ///
-    /// Deliberately broader than any one test's `__hades_test<issue>_` tag: the
-    /// sweep is the only thing that reclaims docs leaked by an assertion that
-    /// unwound past its own cleanup, and a per-test prefix silently stops
-    /// covering the next test somebody adds.
-    const FIXTURE_PREFIX: &str = "__hades_test";
+    /// Each live test owns its own tag and sweeps only that. A single shared
+    /// prefix would reclaim leaks from any test, which is tempting, but libtest
+    /// runs these `#[tokio::test]`s concurrently in one binary and the sweep is
+    /// a `REMOVE`: one test entering cleanup mid-run would delete the other's
+    /// live fixtures and fail it for reasons unrelated to what it tests. A tag
+    /// per test still reclaims that test's own leaks from every previous PID,
+    /// which is what the sweep is for.
+    const FIXTURE_PREFIX_193: &str = "__hades_test193_";
 
     /// Do the codebase collections this test writes to actually exist?
     ///
@@ -2734,10 +2780,10 @@ mod tests {
     /// leaks its PID-keyed docs permanently — the next run uses a new PID and
     /// would never reclaim them. Sweeping the shared prefix keeps the test
     /// leak-free in the project-management DB even across failures.
-    async fn cleanup_fixture_prefix(pool: &ArangoPool) {
+    async fn cleanup_fixture_prefix(pool: &ArangoPool, prefix: &str) {
         let stale = {
             let aql = "FOR f IN @@files FILTER STARTS_WITH(f._key, @prefix) RETURN f._key";
-            let bind = json!({ "@files": CODEBASE.files, "prefix": FIXTURE_PREFIX });
+            let bind = json!({ "@files": CODEBASE.files, "prefix": prefix });
             hades_core::db::query::query(
                 pool,
                 aql,
@@ -2762,7 +2808,7 @@ mod tests {
         // via the file-key sweep above, so clear them by their own prefix too.
         for col in [CODEBASE.chunks, CODEBASE.embeddings, CODEBASE.symbols] {
             let aql = "FOR d IN @@col FILTER STARTS_WITH(d.file_key, @prefix) REMOVE d IN @@col";
-            let bind = json!({ "@col": col, "prefix": FIXTURE_PREFIX });
+            let bind = json!({ "@col": col, "prefix": prefix });
             let _ = hades_core::db::query::query(
                 pool,
                 aql,
@@ -2817,8 +2863,8 @@ mod tests {
             eprintln!("skipping: target database has no codebase collections");
             return;
         }
-        // Reclaim anything a previously failed run leaked (any PID, any test).
-        cleanup_fixture_prefix(&pool).await;
+        // Reclaim anything a previously failed run of THIS test leaked (any PID).
+        cleanup_fixture_prefix(&pool, FIXTURE_PREFIX_193).await;
 
         let config = HadesConfig::default();
         let pid = std::process::id();
@@ -2985,8 +3031,8 @@ mod tests {
             eprintln!("skipping: target database has no codebase collections");
             return;
         }
-        // Reclaim anything a previously failed run leaked (any PID).
-        cleanup_fixture_prefix(&pool).await;
+        // Reclaim anything a previously failed run of THIS test leaked (any PID).
+        cleanup_fixture_prefix(&pool, FIXTURE_PREFIX_159).await;
 
         let config = HadesConfig::default();
         let pid = std::process::id();

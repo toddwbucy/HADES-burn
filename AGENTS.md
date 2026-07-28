@@ -106,10 +106,13 @@ which is a triple of (metadata, chunks, embeddings) collections. Common profiles
 are `default` and `codebase`.
 
 With no `-c`, you get the `default` profile, which in many databases is empty.
-The exception is worth knowing because it is invisible: if
-`HADES_DEFAULT_COLLECTION` is set in the environment, it names the default
-instead, and nothing in the output tells you. Pass `-c` explicitly when it
-matters.
+If `HADES_DEFAULT_COLLECTION` is set in the environment it names the default
+instead, so the profile you get is not always the one you assumed.
+
+You never have to guess which one ran. Every `db query` response carries
+`.collection`, and it is always the profile actually searched. Read it back
+rather than assuming `default`. On a zero-result search it is the first thing
+to check, and it is already in the output you have.
 
 If a search against a clearly populated database returns nothing, or errors with
 `404 collection embeddings`, you have the wrong profile. You do not have a broken

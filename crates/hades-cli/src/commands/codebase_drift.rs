@@ -8,7 +8,7 @@
 //!
 //! This command closes that gap. It reports, in both directions:
 //!
-//! - **stale** — a `codebase_files` node whose source file no longer exists
+//! - **stale** — a `codebase_files` node with no source file under this root
 //! - **uningested** — a source file with no node in the graph
 //! - **changed** — a matched file whose content differs from what was ingested
 //! - **unhandled** — a file under the root that ingest has no handler for
@@ -16,14 +16,19 @@
 //! The last two exist because their absence made a clean report a false green
 //! (#183). A file ingest cannot handle used to fall outside drift's notion of
 //! source entirely — neither ingested nor reportable — so a tree that was only
-//! partially covered reported `0/0`. And `symbol_hash` is deliberately
-//! name-only, so an edited body, signature, or comment left the stored chunks
-//! stale while every counter read zero; `changed` compares a full-source digest
+//! partially covered reported `0/0`. And `symbol_hash` is name-only for Python
+//! and Rust at tier `semantic` (tier `structural` and C++ hash the serialized
+//! symbol list; tier `text` hashes full content), so an edited body, signature,
+//! or comment left the stored chunks stale while every counter read zero.
+//! `changed` compares a full-source digest
 //! instead. A gate that cannot cover something must still say so.
 //!
 //! It is strictly read-only. Acting on the result is [`super::codebase_retire`]
 //! (for stale nodes) and `codebase ingest` (uningested, and `--force` for
-//! changed).
+//! changed). Read `stale` before retiring from it: the graph side of the
+//! comparison is the whole `codebase_files` collection with no root filter, so
+//! in a database holding two ingested trees every node of the other tree lands
+//! in `stale` with its source file present and untouched (#192).
 //!
 //! Discovery uses the same `discover_files` walk and the same key derivation as
 //! ingest, so a file counts as "present" exactly when ingest would have picked

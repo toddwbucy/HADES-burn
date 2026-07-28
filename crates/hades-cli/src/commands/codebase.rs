@@ -39,15 +39,23 @@ pub enum CodebaseCmd {
         /// authored bridge edges survive (unlike `db purge`). Use it to refresh
         /// a node whose stored view has drifted from the source — in particular
         /// after an edit that touched only bodies, signatures, or comments,
-        /// which the name-keyed `symbol_hash` cannot see and which
-        /// `codebase drift` reports as `changed`.
+        /// which a name-keyed `symbol_hash` cannot see and which
+        /// `codebase drift` reports as `changed`. What `symbol_hash` covers
+        /// depends on the node's `analysis_tier` — see `codebase drift --help`;
+        /// the name-only case is Python and Rust at tier `semantic`.
+        ///
+        /// Pass the ORIGINAL ingest root, not a narrower path. Keys are
+        /// derived relative to the path given (a file bases at its parent), so
+        /// re-ingesting a single file or subdirectory writes duplicate nodes
+        /// under re-based keys, purges nothing, and repairs nothing.
         ///
         /// If a rebuild drops a symbol that another file points at, those
         /// inbound edges are reported as `dangling_inbound_edges` — not
-        /// deleted, since each records a real dependency. Re-ingest the
-        /// dependent files to re-resolve them, or run
-        /// `hades codebase prune-orphans` to drop them; until then
-        /// `codebase validate` will flag them.
+        /// deleted, since each records a real dependency. Re-resolve them by
+        /// re-running `codebase ingest --force <the same ingest root>` (plain
+        /// re-ingest skips the dependents, whose own `symbol_hash` did not
+        /// change), or run `hades codebase prune-orphans` to drop them; until
+        /// then `codebase validate` will flag them.
         ///
         /// This never permits an analyzer-fidelity downgrade by itself, so a
         /// file whose stored analysis came from a richer analyzer than the one

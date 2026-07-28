@@ -213,8 +213,12 @@ known to be current, and reporting a clean sweep over uncompared files is exactl
 the false green this command exists to remove.
 
 Any graph built before `content_hash` existed reports `clean: false` with a large
-`unverifiable`. The remedy is `codebase ingest --force <path>`, and the `--force`
-is load-bearing: a plain re-ingest skips every file whose `symbol_hash` still
+`unverifiable`. The remedy is `codebase ingest --force <the original ingest
+root>`. Both halves matter. Do not narrow the path to bound the cost: keys are
+derived relative to whatever path you pass, so a subdirectory re-bases every key
+under it, the `unverifiable` count does not drop, and the subtree is duplicated.
+The `--force` is load-bearing too: a plain re-ingest skips every file whose
+`symbol_hash` still
 matches and returns before it writes the file document that carries
 `content_hash`, so the count does not move. The exception is a file counted as
 unverifiable because it no longer reads as text. Re-ingest cannot read it either,
@@ -310,7 +314,10 @@ repairing. Keys are derived relative to whatever path you pass: a directory base
 at itself, and a *file* bases at its parent. So re-ingesting one file writes a
 node keyed `main_rs` instead of `crates_hades-cli_src_main_rs`. That purges
 nothing, leaves the dangling edges in place, and adds a duplicate node that drift
-then reports as both `stale` and `uningested`. This is the same rule as ingesting
+then reports as one extra `stale` key. Note what it does **not** do: the real
+file's node is still there and still matches the tree, so it stays `matched` and
+`uningested` stays empty. A zero there is not confirmation the repair worked.
+This is the same rule as ingesting
 at the repository root, and it means the narrow-looking repair is in fact a
 whole-tree rebuild. Budget for it.
 

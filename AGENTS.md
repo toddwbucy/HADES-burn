@@ -219,12 +219,10 @@ derived relative to whatever path you pass, so a subdirectory re-bases every key
 under it, the `unverifiable` count does not drop, and the subtree is duplicated.
 The `--force` is load-bearing too: a plain re-ingest skips every file whose
 `symbol_hash` still matches and returns before it writes the file document that
-carries `content_hash`, so the count does not move. The exceptions are a file
-counted as
-unverifiable because it no longer reads as text, and `.go` files, which the
-fidelity guard described below skips regardless of `--force`. Re-ingest cannot
-read an unreadable file either,
-so that one stays counted until the file is readable again or its node is retired.
+carries `content_hash`, so the count does not move. The exception is a file
+counted as unverifiable because it no longer reads as text. Re-ingest cannot read
+it either, so that one stays counted until the file is readable again or its node
+is retired.
 
 `unhandled` does **not** block `clean`, because every repository contains a
 README. Read the bucket and judge for yourself whether the gap matters.
@@ -245,16 +243,15 @@ the bucket exists.
   identical will still be missed.
 - **Tier `text`**: `symbol_hash` is the full-content digest, so any edit at all
   changes it and a plain re-ingest always picks the file up.
-- **Go, at tier `semantic`**: a special case that matches none of the above. Go
-  has no semantic analyzer, so it is Tree-sitter-analyzed and gets the serialized
-  digest, but the gopls phase then patches the node's tier up to `semantic`
-  without rewriting `symbol_hash`. A `.go` node therefore advertises a tier whose
-  rule does not apply to it, and `--force` cannot refresh it at all (see below).
+Go sits in the second bucket: it has no per-file semantic analyzer, so it is
+Tree-sitter-analyzed and carries the serialized digest. The gopls phase adds
+semantic symbols and edges afterwards, and those are recorded on the node under
+their own keys (`gopls_analyzed`, `gopls_symbol_count`) rather than by restating
+the file's tier.
 
 Read the tier off the node rather than guessing from the extension. `--force` is
-the broadest remedy, but it is not a guarantee: it rebuilds every file under the
-ingest root that the fidelity guard lets through, and that guard ignores
-`--force` entirely.
+the broadest remedy: it rebuilds symbols, chunks and embeddings for every file
+under the ingest root.
 
 `--force` never permits an analyzer-fidelity downgrade on its own, and that shows
 up in two very different ways.
@@ -269,21 +266,19 @@ aborting after the purge would be too late. So on a host without rust-analyzer,
 at all. `--allow-analysis-downgrade` is not an afterthought here, it is the only
 thing that lets the command run.
 
-**Stored analysis outranks incoming: the file is skipped, and `--force` does not
-help.** When a lower-tier analysis would overwrite a richer stored one, the file
-is returned as skipped with
+**Stored analysis outranks incoming: that file is skipped, and `--force` does not
+override it.** When a lower-tier analysis would permanently replace a richer
+stored one, the file is returned as skipped with
 `error: "higher-fidelity stored analysis preserved"` and drift keeps reporting
 it. This guard runs *before* the `--force` check and is gated on
-`--allow-analysis-downgrade` instead, so `--force` has no effect on it.
+`--allow-analysis-downgrade` instead.
 
-Do not read that as a rare per-file oddity. It is permanent and whole-language
-wherever a stored tier was raised after the fact, and **Go is exactly that case**:
-gopls patches every `.go` node to `semantic`, later runs can only offer
-`structural`, and so every `.go` file is skipped on every run after the first.
-`codebase ingest --force /go-repo` reports each one as `skipped`, and drift
-reports the same counts afterwards as before. The same happens to any language
-whose semantic analyzer becomes unavailable between runs, such as C++ without a
-compilation database. `--allow-analysis-downgrade` is the only way through.
+The case to expect is a semantic analyzer that was available at first ingest and
+is not now: C++ ingested without the compilation database it had before, so
+libclang loses to the stored `semantic`. Rust and Go do not hit this, because
+their semantic artifacts come from a phase that re-runs later in the same ingest,
+and the guard yields when that is scheduled. `--allow-analysis-downgrade` is the
+way through when you do want the poorer analysis stored.
 
 ### Verify graph integrity
 

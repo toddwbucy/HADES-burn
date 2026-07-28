@@ -574,10 +574,12 @@ pub async fn run(
     if dangling_inbound > 0 {
         warn!(
             edges = dangling_inbound,
-            "inbound edges now point at symbols this run removed; re-ingest the \
-             dependent files with `codebase ingest --force <path>` (a plain \
-             re-ingest skips them, since their own symbol_hash is unchanged), \
-             or run `hades codebase prune-orphans` to drop them"
+            "inbound edges now point at symbols this run removed; re-run \
+             `codebase ingest --force <the same ingest root>` to re-resolve \
+             them (--force because the dependents' own symbol_hash is \
+             unchanged, and the original root because keys are relative to it \
+             -- a narrower path re-bases them and writes duplicate nodes), or \
+             run `hades codebase prune-orphans` to drop them"
         );
     }
 

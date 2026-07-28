@@ -23,7 +23,9 @@ pub enum DbCmd {
         #[arg(short = 'H', long)]
         hybrid: bool,
 
-        /// Enable re-ranking of results.
+        /// Enable re-ranking of results. NOT AVAILABLE: the cross-encoder this
+        /// needs does not ship with the CLI, so passing it exits non-zero
+        /// without searching. Use `--hybrid` and/or `--structural` instead.
         #[arg(short = 'R', long)]
         rerank: bool,
 

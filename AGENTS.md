@@ -101,6 +101,10 @@ which is a triple of (metadata, chunks, embeddings) collections. Common profiles
 are `default` and `codebase`.
 
 With no `-c`, you get the `default` profile, which in many databases is empty.
+The exception is worth knowing because it is invisible: if
+`HADES_DEFAULT_COLLECTION` is set in the environment, it names the default
+instead, and nothing in the output tells you. Pass `-c` explicitly when it
+matters.
 
 If a search against a clearly populated database returns nothing, or errors with
 `404 collection embeddings`, you have the wrong profile. You do not have a broken
@@ -132,8 +136,9 @@ or `-S` instead.
 | Documents | `ingest <files...>`, `extract <file>` |
 | Embeddings | `embed text "..."`, `embed service ...`, `graph-embed train`, `graph-embed update` |
 
-Run `hades <command> --help` before composing anything non-trivial. The help text
-is accurate and cheaper than a wrong guess.
+Run `hades <command> --help` before composing anything non-trivial. It is the
+best available source and cheaper than a wrong guess, though it describes what a
+flag is *for* rather than whether it currently works: `-R` above is the example.
 
 Note on short flags: `-g` is the global `--gpu`. It is **not** an alias for
 `--graph`. Graph commands take the long form, `--graph <name>`.
@@ -161,14 +166,28 @@ Ingest at the **repository root, as a directory**, not file by file. A node key 
 its path relative to the ingest root with `.` and `/` replaced by `_`. Ingesting
 piecemeal produces inconsistent keys and edges that do not resolve.
 
-Files with a recognized extension are sent to AST analysis, though a file whose
-analyzer fails falls back to raw text rather than erroring. Files with an
-unhandled extension are skipped. Extensionless files are classified by shebang,
-so a script starting with `#!/bin/bash` is picked up and stored as raw text. Use
-`--unparsed-ext cu,cuh` to bring extra extensions in through the raw-text path.
+If the tree contains any `.rs` or `.go` file, rust-analyzer and gopls are probed
+before the first file is written, and a tool that will not run aborts the entire
+run with exit 1 and nothing ingested. This is not specific to `--force`, and it
+is the first failure most agents meet. See the analyzer notes under `changed`
+below for what to do about it.
 
-Which path a file actually took is recorded on its node as `analysis_tier`, and
-that is the only reliable way to know. Extension is not a proxy for it.
+Analysis degrades in tiers rather than failing. A recognized extension is sent to
+its semantic analyzer first; if that is unavailable or errors, the file falls
+back to a Tree-sitter parse; only if Tree-sitter also cannot recover structure
+does the file land on the raw-text path. The Tree-sitter grammars are compiled
+into the binary, so that last step is rare and means the source itself is
+malformed, not that a tool is missing on the host.
+
+Files with an unhandled extension are skipped. Extensionless files are classified
+by shebang, so a script starting with `#!/bin/bash` is picked up and stored as raw
+text. Use `--unparsed-ext wgsl,vert` to bring extra extensions in through the
+raw-text path. The flag only applies to extensions no analyzer already claims, so
+naming one that does (`cu` and `cuh` are already C++) changes nothing.
+
+Which tier a file landed on is recorded on its node as `analysis_tier`
+(`semantic`, `structural`, `text`). Extension is not a proxy for it, and the tier
+determines how change detection behaves on that file.
 
 ### Check whether a graph still matches its source tree
 
@@ -204,27 +223,26 @@ so that one stays counted until the file is readable again or its node is retire
 `unhandled` does **not** block `clean`, because every repository contains a
 README. Read the bucket and judge for yourself whether the gap matters.
 
-`changed` is worth understanding, and it means different things on the two ingest
-paths.
+`changed` is worth understanding. Drift always compares a full-content hash, but
+incremental re-ingest compares the file node's `symbol_hash`, and what that field
+covers depends on which analyzer produced it. That mismatch is the whole reason
+the bucket exists.
 
-For a file a parser analyzed, incremental re-ingest keys on the file node's
-`symbol_hash` field, which covers symbol **names** only, so an edit to a body, a
-signature, or a comment leaves it unchanged and an ordinary `codebase ingest`
-will skip the file. Drift compares a full-content hash and will still report it
-as `changed`. The remedy is `codebase ingest --force <path>`.
+- **Python and Rust at tier `semantic`**: `symbol_hash` covers symbol **names**
+  only. An edit to a body, a signature, or a comment leaves it identical, so a
+  plain `codebase ingest` skips the file while drift keeps reporting it. This is
+  the case that needs `--force`.
+- **Tier `structural` (any language), and C++ at tier `semantic`**: the digest
+  covers the serialized symbol list, including line spans and metadata. Most
+  edits move a line and so change it, and a plain re-ingest picks the file up.
+  An edit that leaves every symbol boundary and every recorded attribute
+  identical will still be missed.
+- **Tier `text`**: `symbol_hash` is the full-content digest, so any edit at all
+  changes it and a plain re-ingest always picks the file up.
 
-For a file that came in through the raw-text path, `symbol_hash` is stored as the
-full-content digest, so any edit changes it and a plain `codebase ingest` picks
-the file up on its own. Check which path a file took before reaching for
-`--force`, because `--force` applies to the whole ingest root and rebuilds
-symbols, chunks and embeddings for every file under it.
-
-Do not classify by extension. Three things land on the raw-text path: shebang
-scripts, `--unparsed-ext` files, and **any file whose analyzer failed** (a `.go`
-file ingested on a host without gopls, a `.c` or `.cu` without libclang). The
-third case is invisible from the filename, which is why the discriminator is the
-stored `analysis_tier`. A node whose tier is `text` has a full-content
-`symbol_hash` and needs no `--force`, whatever its extension.
+Read the tier off the node rather than guessing from the extension. If you do not
+want to check, `--force` is always correct and never wrong, just expensive: it
+rebuilds symbols, chunks and embeddings for every file under the ingest root.
 
 `--force` never permits an analyzer-fidelity downgrade on its own, and that shows
 up in two very different ways.
@@ -271,20 +289,30 @@ appear under the invariant **names** `defines_edge_endpoints`,
 `imports_edge_endpoints`. Searching validate output for `dangling_inbound_edges`
 finds nothing and reads as a clean graph.
 
-Two repairs, in order of preference. Re-ingesting the dependent files re-resolves
-the relation and is non-destructive:
+Two repairs, in order of preference. Re-ingesting re-resolves the relation and is
+non-destructive:
 
 ```bash
-hades --db <name> codebase ingest --force <dependent-path>
+hades --db <name> codebase ingest --force /path/to/repo   # the original root
 ```
 
-The `--force` is required, and this is the one place it is easy to get wrong. The
-dependent file is dependent precisely because the *other* file changed, so its
-own symbol set is untouched, its `symbol_hash` still matches, and a plain
-`codebase ingest` skips it. A skipped file is never re-purged and never feeds the
-import and call resolvers that run after the file loop, so its stale outbound
-edges are never rewritten. A plain re-ingest over an otherwise-unchanged tree
-leaves every dangling edge exactly where it was.
+Both parts of that command are load-bearing, and each is easy to get wrong.
+
+`--force` is required. The dependent file is dependent precisely because the
+*other* file changed, so its own symbol set is untouched, its `symbol_hash` still
+matches, and a plain `codebase ingest` skips it. A skipped file is never
+re-purged and never feeds the import and call resolvers that run after the file
+loop, so its stale outbound edges are never rewritten. A plain re-ingest over an
+otherwise-unchanged tree leaves every dangling edge exactly where it was.
+
+**The path must be the original ingest root**, even though only a few files need
+repairing. Keys are derived relative to whatever path you pass: a directory bases
+at itself, and a *file* bases at its parent. So re-ingesting one file writes a
+node keyed `main_rs` instead of `crates_hades-cli_src_main_rs`. That purges
+nothing, leaves the dangling edges in place, and adds a duplicate node that drift
+then reports as both `stale` and `uningested`. This is the same rule as ingesting
+at the repository root, and it means the narrow-looking repair is in fact a
+whole-tree rebuild. Budget for it.
 
 The second repair, `codebase prune-orphans`, drops the edges instead. It is
 destructive, so preview it first:

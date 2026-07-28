@@ -103,17 +103,18 @@ pub enum CodebaseCmd {
     /// `changed.unverifiable` are all zero. `unhandled` does not gate it, since
     /// every repository contains files no analyzer handles.
     ///
-    /// `changed` exists because for a parser-analyzed file, incremental ingest
-    /// keys on `symbol_hash`, which covers symbol *names* only: an edited body,
-    /// signature or comment leaves it identical, so a plain `codebase ingest`
-    /// skips the file while its stored chunks go stale. Refresh those with
-    /// `codebase ingest --force`.
+    /// `changed` exists because drift compares full content while incremental
+    /// ingest compares `symbol_hash`, whose meaning depends on the node's
+    /// `analysis_tier`. At tier `semantic`, Python and Rust hash symbol *names*
+    /// only, so an edited body, signature or comment leaves it identical and a
+    /// plain `codebase ingest` skips the file while its stored chunks go stale.
+    /// Refresh those with `codebase ingest --force`.
     ///
-    /// Files stored at `analysis_tier: "text"` store the full-content digest as
-    /// their `symbol_hash` instead, so a plain re-ingest already picks those up
-    /// and `--force` is not needed. Check the tier, not the extension: besides
-    /// shebang scripts and `--unparsed-ext` files, any file whose analyzer
-    /// failed lands there too (a `.go` without gopls, a `.c` without libclang).
+    /// The other tiers are stricter and mostly self-correct: tier `structural`
+    /// and C++ at tier `semantic` hash the serialized symbol list (line spans
+    /// and metadata included), and tier `text` hashes full content. Check the
+    /// tier rather than the extension. `--force` is always correct, just
+    /// expensive: it rebuilds every file under the ingest root.
     ///
     /// Pass the same discovery flags used at ingest time, and the same root —
     /// keys are relative to the ingest root, so a wrong root reports near-total

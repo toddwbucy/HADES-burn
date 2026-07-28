@@ -95,6 +95,27 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Fixed
 
+- `codebase drift` reported a colliding file as `uningested`, whose
+  documented remedy makes it worse. A node's `_key` is its path relative to
+  the ingest root and nothing in it identifies the root, so `src/main.py` in
+  two repositories derives the same key and only one document can exist.
+  Since #192 scoped drift to its own root, the other tree's node was
+  excluded and the file looked simply missing -- and `codebase ingest`, the
+  remedy for `uningested`, overwrites the other tree's node rather than
+  adding one. That tree's next drift then reports the same file missing, and
+  the two roots trade one document back and forth indefinitely.
+
+  Drift now reports these under a `collisions` bucket naming the root that
+  holds each key, gates `clean` on it, and says on stderr not to re-ingest.
+  `codebase ingest` warns when it takes over keys another root owned, which
+  is also what a moved repository looks like -- the two are
+  indistinguishable from keys alone, so it warns rather than refusing.
+
+  This makes the situation legible; it does not make colliding trees work.
+  Keep them in separate databases. Folding the root into the key is the
+  real fix and is a migration. (#196)
+
+
 - `codebase drift` reported one tree's file nodes as `stale` for another,
   on a delete path. File keys are relative to the ingest root, so they
   carry no evidence of which tree produced them, and the graph side of

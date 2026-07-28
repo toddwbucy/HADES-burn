@@ -10,6 +10,8 @@
 //!
 //! - **stale** — a `codebase_files` node with no source file under this root
 //! - **uningested** — a source file with no node in the graph
+//! - **collisions** — a source file whose key is held by a node from a different
+//!   ingest root, so this tree has no node of its own for it
 //! - **changed** — a matched file whose content differs from what was ingested
 //! - **unhandled** — a file under the root that ingest has no handler for
 //!
@@ -23,8 +25,17 @@
 //! still purely root-relative, so two trees sharing a relative path (`src/main.py`
 //! in both) share one document, and the later ingest overwrites the earlier. Root
 //! attribution makes drift stop mislabelling the *other* tree's nodes; it cannot
-//! separate nodes that were never distinct. Non-overlapping trees are handled;
-//! colliding ones need the root folded into the key, which is a migration. Nodes
+//! separate nodes that were never distinct.
+//!
+//! What it can do is stop recommending the action that makes it worse. A source
+//! file whose key is already held by another root is reported under
+//! **collisions**, not `uningested` (#196): the documented remedy for
+//! `uningested` is `codebase ingest`, which on a collision overwrites the other
+//! tree's node, and that tree's next drift then reports the same file missing —
+//! the two roots trade one document back and forth indefinitely. Separating the
+//! buckets makes the situation legible; keeping colliding trees in separate
+//! databases is the answer until the root is folded into the key, which is a
+//! migration. Nodes
 //! belonging to another root are excluded and reported under `other_roots`;
 //! nodes predating attribution are kept (dropping them would report an entire
 //! existing graph as uningested) and listed under `stale.unattributed_keys`,
@@ -139,7 +150,18 @@ pub async fn run_drift(
     let (stale_unattributed, stale_attributed): (Vec<&String>, Vec<&String>) = stale
         .iter()
         .partition(|k| graph_side.unattributed.contains(**k));
-    let uningested: Vec<&String> = disk.difference(&graph).collect();
+    // A disk file with no node here is usually just uningested. But it can also
+    // be a file whose node was claimed by a different tree: `file_key` is purely
+    // root-relative, so `/repo-a/src/main.py` and `/repo-b/src/main.py` derive
+    // the same key and only one document can exist (#196). Those two want
+    // opposite responses, and telling them apart matters because the documented
+    // remedy for `uningested` is `codebase ingest`, which on a collision
+    // overwrites the other tree's node and moves the problem rather than fixing
+    // it — then the other tree's drift reports the same file uningested, and the
+    // two roots trade the node back and forth forever.
+    let (colliding, uningested): (Vec<&String>, Vec<&String>) = disk
+        .difference(&graph)
+        .partition(|k| graph_side.other_root_keys.contains_key(k.as_str()));
     let matched = graph.intersection(&disk).count();
 
     // Content drift over matched files: hash what is on disk now and compare to
@@ -207,6 +229,21 @@ pub async fn run_drift(
             "keys": sample(&uningested),
             "truncated": uningested.len() > limit,
         },
+        // Source files under this root whose key is already taken by a node
+        // belonging to a different ingest root. NOT uningested: re-ingesting
+        // them overwrites the other tree's node rather than adding one (#196).
+        "collisions": {
+            "count": colliding.len(),
+            "keys": colliding
+                .iter()
+                .take(limit)
+                .map(|k| json!({
+                    "key": k,
+                    "held_by": graph_side.other_root_keys.get(k.as_str()),
+                }))
+                .collect::<Vec<_>>(),
+            "truncated": colliding.len() > limit,
+        },
         "changed": {
             "count": changed.len(),
             "keys": owned_sample(&changed),
@@ -235,8 +272,13 @@ pub async fn run_drift(
     // permanent false red, which carries just as little information. The count
     // and per-file reasons are reported either way, so a caller that wants to
     // treat unhandled files as a gap can read the bucket and decide.
-    report["clean"] =
-        json!(stale.is_empty() && uningested.is_empty() && changed.is_empty() && unverifiable == 0);
+    report["clean"] = json!(
+        stale.is_empty()
+            && uningested.is_empty()
+            && changed.is_empty()
+            && unverifiable == 0
+            && colliding.is_empty()
+    );
 
     // A near-total mismatch in both directions almost always means the root is
     // wrong, not that the graph is worthless. Say so rather than let an
@@ -288,6 +330,18 @@ pub async fn run_drift(
              is pre-attribution backlog to clear with a reviewed retire.",
             stale_unattributed.len(),
             stale.len(),
+        );
+    }
+    if !colliding.is_empty() {
+        let _ = writeln!(
+            err,
+            "warning: {} source file(s) under this root have keys already held by \
+             nodes from another ingest root, so this tree has no node of its own \
+             for them. Do NOT re-ingest to fix it: `file_key` is root-relative, so \
+             the write would overwrite the other tree's node and the two roots \
+             would trade it back and forth (#196). Keep colliding trees in \
+             separate databases.",
+            colliding.len(),
         );
     }
     if unverifiable > 0 {
@@ -346,6 +400,11 @@ struct GraphSide {
     other_roots: usize,
     /// The distinct roots those nodes name, sorted.
     other_root_paths: Vec<String>,
+    /// Excluded key -> the root it belongs to. Lets the caller tell a source
+    /// file with no node from one whose node was claimed by another tree
+    /// (#196): the keys are root-relative, so both trees derive the same key
+    /// and only one document can exist.
+    other_root_keys: BTreeMap<String, String>,
 }
 
 async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<GraphSide> {
@@ -357,9 +416,14 @@ async fn graph_file_side(pool: &ArangoPool, base: &std::path::Path) -> Result<Gr
         field = INGEST_ROOT_FIELD
     );
     let bind = json!({ "@files": CODEBASE.files, "root": root });
-    let (counted, other_root_paths) = other_roots(pool, &root).await?;
+    let (counted, other_root_paths, other_root_keys) = other_roots(pool, &root).await?;
     let entries = graph_file_hashes(pool, &aql, &bind).await?;
-    Ok(classify(entries, counted, other_root_paths))
+    Ok(classify(
+        entries,
+        counted,
+        other_root_paths,
+        other_root_keys,
+    ))
 }
 
 /// Split fetched rows into the in-scope map and the unattributed key set.
@@ -371,6 +435,7 @@ fn classify(
     entries: Vec<(String, Option<String>, bool)>,
     other_roots: usize,
     other_root_paths: Vec<String>,
+    other_root_keys: BTreeMap<String, String>,
 ) -> GraphSide {
     let mut in_scope = BTreeMap::new();
     let mut unattributed = BTreeSet::new();
@@ -385,6 +450,7 @@ fn classify(
         unattributed,
         other_roots,
         other_root_paths,
+        other_root_keys,
     }
 }
 
@@ -396,12 +462,15 @@ fn classify(
 /// The paths are reported too, because "another root" covers two very different
 /// situations — a genuinely separate repository, and a mis-rooted ingest of this
 /// one — and only the path distinguishes them.
-async fn other_roots(pool: &ArangoPool, root: &str) -> Result<(usize, Vec<String>)> {
+#[allow(clippy::type_complexity)]
+async fn other_roots(
+    pool: &ArangoPool,
+    root: &str,
+) -> Result<(usize, Vec<String>, BTreeMap<String, String>)> {
     let aql = format!(
         "FOR f IN @@files \
            FILTER f.{field} != null AND f.{field} != @root \
-           COLLECT r = f.{field} WITH COUNT INTO n \
-           SORT r RETURN {{ root: r, count: n }}",
+           RETURN {{ key: f._key, root: f.{field} }}",
         field = INGEST_ROOT_FIELD
     );
     let bind = json!({ "@files": CODEBASE.files, "root": root });
@@ -416,17 +485,21 @@ async fn other_roots(pool: &ArangoPool, root: &str) -> Result<(usize, Vec<String
     .await
     {
         Ok(rows) => {
-            let mut total = 0usize;
-            let mut paths = Vec::new();
+            let mut keys = BTreeMap::new();
+            let mut roots = BTreeSet::new();
             for row in &rows.results {
-                total += row.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
-                if let Some(r) = row.get("root").and_then(|r| r.as_str()) {
-                    paths.push(r.to_string());
-                }
+                let (Some(k), Some(r)) = (
+                    row.get("key").and_then(|k| k.as_str()),
+                    row.get("root").and_then(|r| r.as_str()),
+                ) else {
+                    continue;
+                };
+                roots.insert(r.to_string());
+                keys.insert(k.to_string(), r.to_string());
             }
-            Ok((total, paths))
+            Ok((keys.len(), roots.into_iter().collect(), keys))
         }
-        Err(e) if is_missing_collection(&e) => Ok((0, Vec::new())),
+        Err(e) if is_missing_collection(&e) => Ok((0, Vec::new(), BTreeMap::new())),
         Err(e) => Err(e).context("failed to read other ingest roots"),
     }
 }
@@ -487,7 +560,12 @@ mod tests {
     /// a full re-ingest of a graph that was fine.
     #[test]
     fn unattributed_nodes_stay_in_scope_and_are_flagged() {
-        let side = classify(vec![row("a_rs", true), row("b_rs", false)], 0, Vec::new());
+        let side = classify(
+            vec![row("a_rs", true), row("b_rs", false)],
+            0,
+            Vec::new(),
+            BTreeMap::new(),
+        );
 
         assert_eq!(side.in_scope.len(), 2, "both nodes must be comparable");
         assert!(side.in_scope.contains_key("b_rs"));
@@ -505,7 +583,12 @@ mod tests {
     /// drift rather than from a surprising `retire`.
     #[test]
     fn other_roots_count_and_paths_are_reported() {
-        let side = classify(vec![row("a_rs", true)], 7, vec!["/other/tree".to_string()]);
+        let side = classify(
+            vec![row("a_rs", true)],
+            7,
+            vec!["/other/tree".to_string()],
+            BTreeMap::new(),
+        );
         assert_eq!(side.other_roots, 7);
         assert_eq!(side.other_root_paths, vec!["/other/tree".to_string()]);
         assert_eq!(
@@ -520,8 +603,36 @@ mod tests {
     /// has been ingested once by a version that records attribution.
     #[test]
     fn a_fully_attributed_graph_has_nothing_unverifiable_by_root() {
-        let side = classify(vec![row("a_rs", true), row("b_rs", true)], 0, Vec::new());
+        let side = classify(
+            vec![row("a_rs", true), row("b_rs", true)],
+            0,
+            Vec::new(),
+            BTreeMap::new(),
+        );
         assert!(side.unattributed.is_empty());
+    }
+
+    /// A disk file whose key is held by another root is a collision, not a
+    /// missing node (#196).
+    ///
+    /// The distinction is the whole point: `uningested` tells an operator to run
+    /// `codebase ingest`, which on a collision overwrites the other tree's node
+    /// and hands the same complaint to that tree's next drift run.
+    #[test]
+    fn a_key_held_by_another_root_is_a_collision_not_uningested() {
+        let mut held = BTreeMap::new();
+        held.insert("src_main_py".to_string(), "/repo-b".to_string());
+        let side = classify(Vec::new(), 1, vec!["/repo-b".to_string()], held);
+
+        // Disk has the file; the graph side (this root) does not.
+        let disk: BTreeSet<String> = ["src_main_py".to_string(), "src_util_py".to_string()].into();
+        let graph: BTreeSet<String> = BTreeSet::new();
+        let (colliding, uningested): (Vec<&String>, Vec<&String>) = disk
+            .difference(&graph)
+            .partition(|k| side.other_root_keys.contains_key(k.as_str()));
+
+        assert_eq!(colliding, vec!["src_main_py"], "held by /repo-b");
+        assert_eq!(uningested, vec!["src_util_py"], "genuinely absent");
     }
 
     /// Pre-`content_hash` digests survive classification as `None` rather than
@@ -529,7 +640,12 @@ mod tests {
     /// telling those apart.
     #[test]
     fn missing_digest_is_preserved_distinctly_from_a_missing_node() {
-        let side = classify(vec![("a_rs".to_string(), None, true)], 0, Vec::new());
+        let side = classify(
+            vec![("a_rs".to_string(), None, true)],
+            0,
+            Vec::new(),
+            BTreeMap::new(),
+        );
         assert_eq!(side.in_scope.get("a_rs"), Some(&None));
         assert!(side.in_scope.contains_key("a_rs"));
     }

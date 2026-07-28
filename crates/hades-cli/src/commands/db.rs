@@ -8,7 +8,8 @@ use clap::Subcommand;
 pub enum DbCmd {
     /// Semantic search across the knowledge base.
     Query {
-        /// Search text (optional — interactive mode if omitted).
+        /// Search text. Required — there is no interactive mode, and omitting
+        /// it exits non-zero without searching.
         search_text: Option<String>,
 
         /// Maximum results to return.

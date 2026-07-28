@@ -87,10 +87,13 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
   entirely — neither ingested nor reportable — so `stale=0 uningested=0`
   was returned for a tree ingest had only partly read. Drift now reports
   an `unhandled` bucket with a per-file reason, and a `clean` flag that
-  is false whenever anything is unhandled or changed. (#183)
+  is false whenever anything is stale, uningested, changed or
+  unverifiable. `unhandled` deliberately does not gate `clean`, since
+  every repository contains files no analyzer handles. (#183)
 - `codebase drift` could not see content staleness at all. `symbol_hash`
-  is deliberately name-only (a rewritten body, changed signature, or
-  edited comment leaves it identical), and drift compared only file
+  is name-only for Python and Rust at tier `semantic` (a rewritten body,
+  changed signature, or edited comment leaves it identical), and drift
+  compared only file
   existence, so an edited file reported clean while its stored chunks and
   embeddings were stale. Ingest now records a full-source `content_hash`
   alongside it and drift reports a `changed` bucket. Files ingested before

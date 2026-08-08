@@ -223,7 +223,20 @@ ln -sfn "$(basename "$ARCHIVE")" "$OUT_DIR/latest.tar.gz"
 sha256sum "$ARCHIVE" | tee "$ARCHIVE.sha256" >/dev/null
 chmod 600 "$ARCHIVE.sha256"
 
-echo "  wrote $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
+# Report the logical size, not `du`. On a compressed ZFS dataset du shows
+# allocated blocks, which for a small archive reads as "512" and looks
+# alarmingly like a truncated write at the exact moment the operator is
+# checking whether their only copy of the secrets is intact.
+echo "  wrote $ARCHIVE ($(stat -c %s "$ARCHIVE") bytes)"
+
+# Prove the archive is readable before anyone relies on it. A backup that
+# is verified only after the wipe is not a backup.
+if gzip -t "$ARCHIVE" 2>/dev/null; then
+    echo "  integrity: gzip OK, $(tar tzf "$ARCHIVE" | grep -cv '/$') files"
+else
+    echo "  INTEGRITY CHECK FAILED - do not rely on this archive" >&2
+    exit 1
+fi
 echo "  sha256: $(cut -d' ' -f1 < "$ARCHIVE.sha256")"
 echo "  symlink: $OUT_DIR/latest.tar.gz"
 echo

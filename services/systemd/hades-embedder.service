@@ -15,8 +15,11 @@ Group=hades
 # (DBA tooling, forensic embedder access); the embedder service itself
 # does not exercise them.
 
-WorkingDirectory=/home/todd/olympus/HADES-Burn/services
-ExecStart=/home/todd/olympus/HADES-Burn/services/.venv/bin/python -m embedding.http_server
+# @SERVICES_DIR@ is substituted with the actual services/ path at install
+# time (`make install-embedder`, or scripts/install/hades-install.sh
+# --with-services), so this unit isn't pinned to any one workstation.
+WorkingDirectory=@SERVICES_DIR@
+ExecStart=@SERVICES_DIR@/.venv/bin/python -m embedding.http_server
 
 EnvironmentFile=-/etc/hades/embedder.conf
 

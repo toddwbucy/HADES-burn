@@ -4,7 +4,7 @@ GEN_DIR := generated
 # cold shell (no activated venv); override with `make PYTHON=python ...`.
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
-.PHONY: all test proto-gen clean install install-trainer start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
+.PHONY: all test proto-gen clean install install-units install-embedder install-extractor install-trainer start-extraction stop-extraction start-embedding stop-embedding start-training stop-training start-all stop-all
 
 all: proto-gen start-all
 
@@ -41,14 +41,31 @@ clean:
 install:
 	$(PYTHON) -m pip install -e .
 
-# Install the trainer systemd unit + config, substituting this repo's services/
-# path so the unit isn't pinned to any one workstation. Run from services/.
-install-trainer:
-	sed 's|@SERVICES_DIR@|$(CURDIR)|g' systemd/hades-trainer.service \
-		| sudo tee /etc/systemd/system/hades-trainer.service > /dev/null
-	sudo install -D -m 644 systemd/trainer.conf /etc/hades/trainer.conf
+# Install a service systemd unit + its config, substituting this repo's
+# services/ path so the unit isn't pinned to any one workstation. Run from
+# services/. The Rust-side daemon unit needs no substitution and is installed
+# by scripts/install/hades-install.sh.
+#
+# $(1) = service name (embedder|extractor|trainer), $(2) = config file mode
+define install_unit
+	sed 's|@SERVICES_DIR@|$(CURDIR)|g' systemd/hades-$(1).service \
+		| sudo tee /etc/systemd/system/hades-$(1).service > /dev/null
+	sudo chmod 644 /etc/systemd/system/hades-$(1).service
+	sudo install -D -m $(2) systemd/$(1).conf /etc/hades/$(1).conf
 	sudo systemctl daemon-reload
-	@echo "Installed hades-trainer.service (SERVICES_DIR=$(CURDIR))"
+	@echo "Installed hades-$(1).service (SERVICES_DIR=$(CURDIR))"
+endef
+
+install-embedder:
+	$(call install_unit,embedder,644)
+
+install-extractor:
+	$(call install_unit,extractor,644)
+
+install-trainer:
+	$(call install_unit,trainer,644)
+
+install-units: install-embedder install-extractor install-trainer
 
 start-extraction:
 	systemctl start hades-extractor

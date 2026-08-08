@@ -108,12 +108,41 @@ answers "is the graph right".
 
 ## Install
 
-The install procedure below has been validated end-to-end on a fresh
-Ubuntu 24.04 environment via the container harness at
-`scripts/install/test/` (run `bash scripts/install/test/run-install.sh`
-inside the harness image; see the script header for details). The
-systemd-unit portion is verified only via the harness's manual-daemon
-path; the real-VPS systemd flow is documented but tested separately.
+### Scripted
+
+After installing the prerequisites in step 0 below and building the
+binary:
+
+```bash
+sudo scripts/install/hades-install.sh --dry-run   # review, then re-run without --dry-run
+```
+
+The script performs steps 1 through 8 below, and is idempotent — running
+it again converges the machine on the repository state and reports what
+it changed. Add `--with-services` to install the embedder, extractor and
+trainer units (they need a populated Python venv and, for two of them, a
+GPU). It does not create the ArangoDB user for you; that is step 2, and
+it needs a password you choose.
+
+The step-by-step procedure below remains the reference explanation of
+what the script does and why each step exists. If the script fails,
+read the step it failed on.
+
+**Replacing the OS under an existing installation** — where the data
+directory lives on storage that survives the wipe — is a different
+problem, because what needs restoring is host identity rather than data.
+See [docs/install/reinstall-runbook.md](docs/install/reinstall-runbook.md)
+and the `scripts/install/hades-preserve.sh` companion, which must run
+*before* the wipe.
+
+### Validation status
+
+The procedure below has been validated end-to-end on a fresh Ubuntu 24.04
+environment via the container harness at `scripts/install/test/` (run
+`bash scripts/install/test/run-install.sh` inside the harness image; see
+the script header for details). The systemd-unit portion is verified only
+via the harness's manual-daemon path; the real-VPS systemd flow is
+documented but tested separately.
 
 ### 0. Prerequisites
 
@@ -140,6 +169,22 @@ sudo apt-get update && sudo apt-get install -y arangodb3
 
 During `apt-get install` you'll be prompted to set a root password
 for ArangoDB — note it, you'll use it in step 2.
+
+**Install the arangod drop-in.** The packaged unit leaves the Unix
+socket inaccessible to the `arangodb` group and waits for a PID file
+this configuration never produces. Without the drop-in, ArangoDB comes
+up reporting `active (running)` and every HADES command fails to
+connect:
+
+```bash
+sudo install -D -m 644 services/systemd/arangodb3-hades.conf \
+  /etc/systemd/system/arangodb3.service.d/hades.conf
+sudo systemctl daemon-reload
+sudo systemctl restart arangodb3
+```
+
+A drop-in takes effect on restart, not on `daemon-reload`. Verify with
+`ls -l /run/arangodb3/arangodb.sock` — the mode should be `770`.
 
 **Install Rust** (edition 2024, stable 1.85+):
 

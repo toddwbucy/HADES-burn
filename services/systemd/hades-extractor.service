@@ -25,8 +25,11 @@ SupplementaryGroups=weaver-admin arangodb
 CacheDirectory=hades
 CacheDirectoryMode=0755
 
-WorkingDirectory=/home/todd/olympus/HADES-Burn/services
-ExecStart=/home/todd/olympus/HADES-Burn/services/.venv/bin/python -m extraction.server
+# @SERVICES_DIR@ is substituted with the actual services/ path at install
+# time (`make install-extractor`, or scripts/install/hades-install.sh
+# --with-services), so this unit isn't pinned to any one workstation.
+WorkingDirectory=@SERVICES_DIR@
+ExecStart=@SERVICES_DIR@/.venv/bin/python -m extraction.server
 
 # Environment from config file
 EnvironmentFile=/etc/hades/extractor.conf

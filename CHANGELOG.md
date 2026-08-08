@@ -19,6 +19,40 @@ with the release date, and a fresh `[Unreleased]` is opened above it.
 
 ### Added
 
+- `scripts/install/hades-install.sh` — idempotent installer that performs the
+  README's manual install steps, with `--dry-run`, `--with-services`, and a
+  `--from-preserve` mode for rebuilding onto storage that outlived the
+  operating system. Reconciles the `arangodb` account's UID against the owner
+  of the data directory (`--arango-uid-fix adopt|chown`), a mismatch that
+  otherwise leaves arangod unable to read its own data after a pool import.
+  Detects a missing `weaver-admin` group — created by WeaverTools, absent on a
+  fresh machine — and writes a drop-in clearing it from the units'
+  `SupplementaryGroups`, without which systemd refuses to exec the daemon.
+  Never overwrites a differing config without keeping the previous copy as
+  `.preserved`.
+- `scripts/install/hades-preserve.sh` — captures the host state a reinstall
+  destroys (`/etc/hades` secrets, systemd units and drop-ins, and the numeric
+  UID/GID assignments that ZFS files are owned by) into a mode-0600 archive
+  written to a surviving pool. Run before the wipe.
+- `docs/install/reinstall-runbook.md` — ZFS-aware runbook for replacing the OS
+  under a live installation: what survives, pool export and import, the
+  ordering constraint that the `arangodb` account must be created with its
+  original UID before the package is installed, and verification.
+- `services/systemd/arangodb3-hades.conf` — the arangod drop-in HADES depends
+  on, now tracked. It makes the Unix socket group-connectable and stops the
+  packaged unit waiting for a PID file this configuration never produces.
+  Previously three untracked hand-written files on one workstation, one of
+  which set `Type=` twice. Without it ArangoDB reports `active (running)` and
+  every HADES command fails to connect.
+
+### Fixed
+
+- `hades-embedder.service` and `hades-extractor.service` hardcoded
+  `/home/todd/olympus/HADES-Burn/services`, pinning them to a single
+  workstation. Both now use the `@SERVICES_DIR@` substitution that
+  `hades-trainer.service` already used, via new `make install-embedder` /
+  `install-extractor` / `install-units` targets.
+
 - `hades-viewer` (`crates/hades-frontend`) — a local WebGL graph viewer for
   any HADES graph, plus a shared-reference channel between a human and an
   agent. Renders a named graph as a force-directed view with styling driven
